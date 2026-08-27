@@ -1,0 +1,44 @@
+services:
+  ytm-sync:
+    image: ytm-sync:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ytm-sync
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      - TZ=${TZ:-UTC}
+      - PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - YTM_SYNC_DATA_DIR=/config
+    volumes:
+      # Persistent configuration, SQLite database, logs, and authentication headers
+      - ${CONFIG_PATH:-./config}:/config
+      # Read-only music directory mounts
+      - ${MUSIC_PATH:-/mnt/music}:/music:ro
+      - ${DOWNLOADS_PATH:-/mnt/downloads}:/downloads:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    tmpfs:
+      - /tmp:size=128M,mode=1777
+    # Optional Traefik reverse proxy integration (uncomment if using Traefik):
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.ytmsync.rule=Host(`${TRAEFIK_HOST:-ytmsync.example.com}`)"
+    #   - "traefik.http.routers.ytmsync.entrypoints=websecure"
+    #   - "traefik.http.routers.ytmsync.tls.certresolver=letsencrypt"
+    #   - "traefik.http.services.ytmsync.loadbalancer.server.port=8080"

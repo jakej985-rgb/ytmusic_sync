@@ -1,0 +1,28 @@
+# Configuration and credentials
+config/
+.env
+headers_auth.json
+*.token
+*.key
+*.db
+*.log
+ytm_sync.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+backend/.venv/
+.pytest_cache/
+
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
