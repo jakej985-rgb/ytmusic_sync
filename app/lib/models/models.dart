@@ -297,3 +297,79 @@ class YTMPlaylistDetails {
     );
   }
 }
+
+class RootFolderStats {
+  final String path;
+  final bool exists;
+  final String freeSpace;
+  final String totalSpace;
+  final int songsCount;
+  final int unmappedCount;
+
+  RootFolderStats({
+    required this.path,
+    required this.exists,
+    required this.freeSpace,
+    required this.totalSpace,
+    required this.songsCount,
+    required this.unmappedCount,
+  });
+
+  factory RootFolderStats.fromJson(Map<String, dynamic> json) {
+    return RootFolderStats(
+      path: json['path'] ?? '',
+      exists: json['exists'] ?? false,
+      freeSpace: json['free_space'] ?? 'N/A',
+      totalSpace: json['total_space'] ?? 'N/A',
+      songsCount: json['songs_count'] ?? 0,
+      unmappedCount: json['unmapped_count'] ?? 0,
+    );
+  }
+}
+
+class FsDirectoryItem {
+  final String name;
+  final String path;
+
+  FsDirectoryItem({
+    required this.name,
+    required this.path,
+  });
+
+  factory FsDirectoryItem.fromJson(Map<String, dynamic> json) {
+    return FsDirectoryItem(
+      name: json['name'] ?? '',
+      path: json['path'] ?? '',
+    );
+  }
+}
+
+class FsBrowseResult {
+  final String currentPath;
+  final String? parentPath;
+  final List<FsDirectoryItem> directories;
+  final String freeSpace;
+  final String totalSpace;
+
+  FsBrowseResult({
+    required this.currentPath,
+    this.parentPath,
+    required this.directories,
+    required this.freeSpace,
+    required this.totalSpace,
+  });
+
+  factory FsBrowseResult.fromJson(Map<String, dynamic> json) {
+    final dirs = (json['directories'] as List<dynamic>?)
+            ?.map((d) => FsDirectoryItem.fromJson(d as Map<String, dynamic>))
+            .toList() ??
+        [];
+    return FsBrowseResult(
+      currentPath: json['current_path'] ?? '/',
+      parentPath: json['parent_path'],
+      directories: dirs,
+      freeSpace: json['free_space'] ?? 'N/A',
+      totalSpace: json['total_space'] ?? 'N/A',
+    );
+  }
+}

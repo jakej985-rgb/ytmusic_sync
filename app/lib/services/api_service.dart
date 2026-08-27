@@ -65,8 +65,14 @@ class ApiService {
     }
   }
 
-  Future<void> triggerScan() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/scan'));
+  Future<void> triggerScan([List<String>? folders]) async {
+    final body = folders != null ? jsonEncode({'folders': folders}) : null;
+    final headers = folders != null ? {'Content-Type': 'application/json'} : null;
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/scan'),
+      headers: headers,
+      body: body,
+    );
     if (response.statusCode != 200) {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Failed to trigger scan');
@@ -184,6 +190,26 @@ class ApiService {
       return YTMPlaylistDetails.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }
     throw Exception('Failed to fetch playlist details');
+  }
+
+  Future<List<RootFolderStats>> fetchFolderStats() async {
+    final response = await http.get(Uri.parse('$baseUrl/api/folders/stats'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((item) => RootFolderStats.fromJson(item as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to fetch root folder statistics');
+  }
+
+  Future<FsBrowseResult> browseFilesystem([String? path]) async {
+    final uri = Uri.parse('$baseUrl/api/fs/browse').replace(
+      queryParameters: path != null && path.isNotEmpty ? {'path': path} : null,
+    );
+    final response = await http.get(uri);
+    if (response.statusCode == 200) {
+      return FsBrowseResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    }
+    throw Exception('Failed to browse container filesystem');
   }
 }
 

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import 'components/folder_browser_dialog.dart';
 
 class SettingsView extends StatefulWidget {
   const SettingsView({super.key});
@@ -15,6 +15,7 @@ class _SettingsViewState extends State<SettingsView> {
   final TextEditingController _folderPathController = TextEditingController();
 
   List<String> _folders = [];
+  List<RootFolderStats> _folderStats = [];
   AppSettings? _settings;
   ConnectionStatus? _authStatus;
   bool _isLoading = true;
@@ -38,11 +39,13 @@ class _SettingsViewState extends State<SettingsView> {
     setState(() => _isLoading = true);
     try {
       final folders = await apiService.getFolders();
+      final stats = await apiService.fetchFolderStats();
       final settings = await apiService.getSettings();
       final authStatus = await apiService.fetchAuthStatus();
       if (mounted) {
         setState(() {
           _folders = folders;
+          _folderStats = stats;
           _settings = settings;
           _authStatus = authStatus;
           _isLoading = false;
@@ -53,15 +56,21 @@ class _SettingsViewState extends State<SettingsView> {
     }
   }
 
-  Future<void> _pickFolder() async {
-    final selectedDirectory = await FilePicker.getDirectoryPath();
-    if (selectedDirectory != null && !_folders.contains(selectedDirectory)) {
-      final updated = List<String>.from(_folders)..add(selectedDirectory);
+  Future<void> _openFolderBrowser() async {
+    final selectedPath = await FolderBrowserDialog.show(
+      context,
+      initialPath: _folders.isNotEmpty ? _folders.first : '/music',
+    );
+    if (selectedPath != null && selectedPath.isNotEmpty && !_folders.contains(selectedPath)) {
+      final updated = List<String>.from(_folders)..add(selectedPath);
       await apiService.updateFolders(updated);
+      await _loadAll();
       if (mounted) {
-        setState(() => _folders = updated);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Added folder: $selectedDirectory')),
+          SnackBar(
+            content: Text('Added root folder: $selectedPath'),
+            backgroundColor: Colors.green,
+          ),
         );
       }
     }
@@ -72,11 +81,15 @@ class _SettingsViewState extends State<SettingsView> {
     if (path.isNotEmpty && !_folders.contains(path)) {
       final updated = List<String>.from(_folders)..add(path);
       await apiService.updateFolders(updated);
+      _folderPathController.clear();
+      await _loadAll();
       if (mounted) {
-        setState(() {
-          _folders = updated;
-          _folderPathController.clear();
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Added root folder: $path'),
+            backgroundColor: Colors.green,
+          ),
+        );
       }
     }
   }
@@ -84,8 +97,23 @@ class _SettingsViewState extends State<SettingsView> {
   Future<void> _removeFolder(String folder) async {
     final updated = List<String>.from(_folders)..remove(folder);
     await apiService.updateFolders(updated);
-    if (mounted) {
-      setState(() => _folders = updated);
+    await _loadAll();
+  }
+
+  Future<void> _scanFolder(String folder) async {
+    try {
+      await apiService.triggerScan([folder]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Started scan for $folder')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Scan failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
     }
   }
 
@@ -244,32 +272,194 @@ class _SettingsViewState extends State<SettingsView> {
           ),
           const SizedBox(height: 24),
 
-          // 2. Music Folders Section
+          // 2. Root Folders Section (Radarr-Style)
           _buildCard(
-            title: '2. Local Music Folders',
+            title: '2. Root Folders',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Directories containing your audio files (.mp3, .flac, .m4a, .ogg, .wma):',
+                  'Container directories containing your music libraries. Scanned for audio files (.mp3, .flac, .m4a, .ogg, .wma).',
                   style: TextStyle(color: Colors.grey[400], fontSize: 13),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
+
+                if (_folderStats.isEmpty && _folders.isEmpty)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(24),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF14141A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Text(
+                      'No root folders configured yet. Click "Add Root Folder" to select a folder inside the container (e.g. /music).',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 13),
+                    ),
+                  )
+                else
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF14141A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Table(
+                      columnWidths: const {
+                        0: FlexColumnWidth(3.5),
+                        1: FlexColumnWidth(1.5),
+                        2: FlexColumnWidth(1.2),
+                        3: FlexColumnWidth(1.8),
+                        4: FixedColumnWidth(96),
+                      },
+                      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                      children: [
+                        // Header Row
+                        TableRow(
+                          decoration: const BoxDecoration(
+                            border: Border(bottom: BorderSide(color: Colors.white12)),
+                          ),
+                          children: [
+                            _buildTableHeader('Path'),
+                            _buildTableHeader('Free Space'),
+                            _buildTableHeader('Songs'),
+                            _buildTableHeader('Unmapped Folders'),
+                            _buildTableHeader('Actions'),
+                          ],
+                        ),
+                        // Data Rows
+                        ...(_folderStats.isNotEmpty
+                            ? _folderStats
+                            : _folders.map((f) => RootFolderStats(
+                                  path: f,
+                                  exists: true,
+                                  freeSpace: 'N/A',
+                                  totalSpace: 'N/A',
+                                  songsCount: 0,
+                                  unmappedCount: 0,
+                                ))).map((stat) => TableRow(
+                              decoration: const BoxDecoration(
+                                border: Border(bottom: BorderSide(color: Colors.white10)),
+                              ),
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        stat.exists ? Icons.folder : Icons.folder_off_outlined,
+                                        size: 18,
+                                        color: stat.exists ? const Color(0xFF3EA6FF) : Colors.redAccent,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          stat.path,
+                                          style: TextStyle(
+                                            fontFamily: 'monospace',
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                            color: stat.exists ? const Color(0xFF3EA6FF) : Colors.redAccent,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  child: Text(
+                                    stat.freeSpace,
+                                    style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  child: Text(
+                                    '${stat.songsCount}',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: stat.unmappedCount > 0
+                                              ? Colors.amber.withValues(alpha: 0.15)
+                                              : Colors.green.withValues(alpha: 0.15),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          '${stat.unmappedCount}',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: stat.unmappedCount > 0 ? Colors.amberAccent : Colors.greenAccent,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.sync, size: 18, color: Colors.grey),
+                                        tooltip: 'Scan this root folder',
+                                        onPressed: () => _scanFolder(stat.path),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+                                        tooltip: 'Remove root folder',
+                                        onPressed: () => _removeFolder(stat.path),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            )),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 16),
+
+                // Button row: [Add Root Folder] + manual path input
                 Row(
                   children: [
-                    ElevatedButton.icon(
-                      onPressed: _pickFolder,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text('Browse & Add Folder'),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF3EA6FF),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onPressed: _openFolderBrowser,
+                      icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                      label: const Text('Add Root Folder', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 16),
                     Expanded(
                       child: TextField(
                         controller: _folderPathController,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                         decoration: InputDecoration(
-                          hintText: 'Or enter directory path manually...',
+                          hintText: 'Or enter container path manually (e.g. /music)...',
                           isDense: true,
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                          filled: true,
+                          fillColor: const Color(0xFF14141A),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                         ),
                         onSubmitted: (_) => _addManualFolder(),
                       ),
@@ -281,29 +471,6 @@ class _SettingsViewState extends State<SettingsView> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
-                if (_folders.isEmpty)
-                  Text('No folders configured yet.', style: TextStyle(color: Colors.grey[500]))
-                else
-                  ListView.separated(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: _folders.length,
-                    separatorBuilder: (context, index) => const Divider(height: 1, color: Colors.white10),
-                    itemBuilder: (context, index) {
-                      final folder = _folders[index];
-                      return ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.folder, color: Colors.amberAccent),
-                        title: Text(folder, style: const TextStyle(fontSize: 13, fontFamily: 'monospace')),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 20, color: Colors.redAccent),
-                          onPressed: () => _removeFolder(folder),
-                        ),
-                      );
-                    },
-                  ),
               ],
             ),
           ),
@@ -428,6 +595,20 @@ class _SettingsViewState extends State<SettingsView> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTableHeader(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontWeight: FontWeight.bold,
+          fontSize: 13,
+          color: Colors.grey,
+        ),
       ),
     );
   }

@@ -503,4 +503,31 @@ class Database:
         shutil.copy2(self.db_path, backup_file)
         return str(backup_file)
 
+    async def get_folder_song_counts(self, folder_path: str) -> dict:
+        folder_prefix = folder_path.rstrip("/") + "/%"
+        exact_match = folder_path.rstrip("/")
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            # Total songs under this folder
+            async with db.execute(
+                "SELECT COUNT(*) as cnt FROM music_files WHERE path LIKE ? OR path = ?",
+                (folder_prefix, exact_match)
+            ) as cursor:
+                row = await cursor.fetchone()
+                total = row["cnt"] if row else 0
+
+            # Unmapped songs (songs not yet matched/uploaded)
+            async with db.execute(
+                """
+                SELECT COUNT(*) as cnt FROM music_files mf
+                LEFT JOIN matches m ON mf.id = m.music_file_id
+                WHERE (mf.path LIKE ? OR mf.path = ?) AND m.id IS NULL
+                """,
+                (folder_prefix, exact_match)
+            ) as cursor:
+                row = await cursor.fetchone()
+                unmapped = row["cnt"] if row else 0
+
+            return {"total": total, "unmapped": unmapped}
+
 db = Database()

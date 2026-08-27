@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -152,10 +154,103 @@ async def get_ytm_playlist_details(playlist_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlist details: {e}")
 
+def format_size(bytes_val: Optional[int | float]) -> str:
+    if bytes_val is None or bytes_val < 0:
+        return "N/A"
+    for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB']:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:.1f} {unit}"
+        bytes_val /= 1024.0
+    return f"{bytes_val:.1f} PiB"
+
+@app.get("/api/fs/browse")
+async def browse_filesystem(path: Optional[str] = Query(None)):
+    """Browse directories inside the container filesystem."""
+    if not path:
+        if Path("/music").exists() and Path("/music").is_dir():
+            target_path = Path("/music")
+        else:
+            target_path = Path("/")
+    else:
+        target_path = Path(path)
+
+    try:
+        target_path = target_path.resolve()
+        if not target_path.exists() or not target_path.is_dir():
+            target_path = Path("/")
+    except Exception:
+        target_path = Path("/")
+
+    directories = []
+    try:
+        for entry in os.scandir(str(target_path)):
+            try:
+                # Exclude system pseudo-filesystems when browsing /
+                if str(target_path) == "/" and entry.name in ("proc", "sys", "dev", "run"):
+                    continue
+                if entry.is_dir(follow_symlinks=True):
+                    directories.append({
+                        "name": entry.name,
+                        "path": entry.path
+                    })
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+
+    directories.sort(key=lambda x: x["name"].lower())
+    parent_path = str(target_path.parent) if target_path != target_path.parent else None
+
+    free_space = "N/A"
+    total_space = "N/A"
+    try:
+        usage = shutil.disk_usage(str(target_path))
+        free_space = format_size(usage.free)
+        total_space = format_size(usage.total)
+    except Exception:
+        pass
+
+    return {
+        "current_path": str(target_path),
+        "parent_path": parent_path,
+        "directories": directories,
+        "free_space": free_space,
+        "total_space": total_space
+    }
+
 @app.get("/api/folders")
 async def get_folders() -> list[str]:
     folders = await db.get_setting("music_folders", default=[])
     return folders
+
+@app.get("/api/folders/stats")
+async def get_folders_stats():
+    """Get root folder statistics including free space, songs count, and unmapped count."""
+    folders = await db.get_setting("music_folders", default=[])
+    results = []
+    for f in folders:
+        p = Path(f)
+        free_space = "N/A"
+        total_space = "N/A"
+        exists = p.exists() and p.is_dir()
+        if exists:
+            try:
+                usage = shutil.disk_usage(str(p))
+                free_space = format_size(usage.free)
+                total_space = format_size(usage.total)
+            except Exception:
+                pass
+
+        counts = await db.get_folder_song_counts(f)
+        results.append({
+            "path": f,
+            "exists": exists,
+            "free_space": free_space,
+            "total_space": total_space,
+            "songs_count": counts["total"],
+            "unmapped_count": counts["unmapped"]
+        })
+    return results
 
 class FoldersUpdate(BaseModel):
     folders: list[str]
