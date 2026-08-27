@@ -1,6 +1,6 @@
 services:
   ytm-sync:
-    image: ytm-sync:latest
+    image: ghcr.io/jakej985-rgb/ytmusic_sync:latest
     build:
       context: .
       dockerfile: Dockerfile

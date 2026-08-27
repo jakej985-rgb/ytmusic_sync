@@ -7,7 +7,7 @@ class ApiService {
   final String baseUrl;
 
   ApiService({String? baseUrl})
-      : baseUrl = baseUrl ?? (kIsWeb ? '' : 'http://127.0.0.1:8765');
+      : baseUrl = baseUrl ?? (kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765');
 
   Future<DashboardStats> fetchDashboardStatus() async {
     final response = await http.get(Uri.parse('$baseUrl/api/status'));
