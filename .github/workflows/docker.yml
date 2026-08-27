@@ -59,3 +59,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Clean up untagged images in GHCR
+        if: github.event_name != 'pull_request'
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: ytmusic_sync
+          delete-untagged: true
+          delete-ghost-images: true
+          token: ${{ secrets.GITHUB_TOKEN }}
