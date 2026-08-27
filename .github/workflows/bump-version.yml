@@ -64,6 +64,7 @@ jobs:
 
           gh release create "v${{ steps.bump.outputs.clean_version }}" \
             docker-compose.yml \
+            ytsync.yml \
             .env.example \
             --title "v${{ steps.bump.outputs.clean_version }}" \
             --notes "Release v${{ steps.bump.outputs.clean_version }} of YTM Sync." \
