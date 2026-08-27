@@ -168,6 +168,23 @@ class ApiService {
     }
     throw Exception('Failed to backup database');
   }
+
+  Future<List<YTMPlaylist>> fetchPlaylists() async {
+    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((item) => YTMPlaylist.fromJson(item as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to fetch playlists');
+  }
+
+  Future<YTMPlaylistDetails> fetchPlaylistDetails(String playlistId) async {
+    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists/$playlistId'));
+    if (response.statusCode == 200) {
+      return YTMPlaylistDetails.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    }
+    throw Exception('Failed to fetch playlist details');
+  }
 }
 
 final apiService = ApiService();

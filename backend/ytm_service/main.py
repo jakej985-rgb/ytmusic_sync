@@ -132,6 +132,26 @@ async def test_auth():
         user_name=res.get("user_name")
     )
 
+@app.get("/api/ytm/playlists")
+async def get_ytm_playlists():
+    if not ytm_client.is_auth_configured():
+        raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+    try:
+        playlists = await ytm_client.get_playlists()
+        return playlists
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch playlists: {e}")
+
+@app.get("/api/ytm/playlists/{playlist_id}")
+async def get_ytm_playlist_details(playlist_id: str):
+    if not ytm_client.is_auth_configured():
+        raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+    try:
+        details = await ytm_client.get_playlist_details(playlist_id)
+        return details
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch playlist details: {e}")
+
 @app.get("/api/folders")
 async def get_folders() -> list[str]:
     folders = await db.get_setting("music_folders", default=[])

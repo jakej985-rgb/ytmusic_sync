@@ -182,4 +182,138 @@ class YTMClient:
             "response": result_str
         }
 
+    async def get_playlists(self) -> list[dict]:
+        """Fetch user's YouTube Music library playlists."""
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _fetch_playlists_sync():
+            yt = self._get_client()
+            playlists = yt.get_library_playlists(limit=None)
+            result = []
+            # Add Liked Music auto-playlist at top
+            result.append({
+                "id": "LM",
+                "title": "Liked Music",
+                "description": "Your auto-generated liked songs playlist",
+                "track_count": None,
+                "thumbnail": None
+            })
+            for p in playlists:
+                p_id = p.get("playlistId")
+                if not p_id:
+                    continue
+                thumb = None
+                thumbs = p.get("thumbnails")
+                if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
+                    thumb = thumbs[-1].get("url")
+
+                count_val = p.get("count")
+                track_cnt = None
+                if count_val is not None:
+                    try:
+                        track_cnt = int(re.sub(r"[^\d]", "", str(count_val)))
+                    except Exception:
+                        track_cnt = None
+
+                result.append({
+                    "id": p_id,
+                    "title": p.get("title", "Untitled Playlist"),
+                    "description": p.get("description", ""),
+                    "track_count": track_cnt,
+                    "thumbnail": thumb
+                })
+            return result
+
+        return await asyncio.to_thread(_fetch_playlists_sync)
+
+    async def get_playlist_details(self, playlist_id: str) -> dict:
+        """Fetch playlist tracks and match against local library and uploads."""
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _fetch_details_sync():
+            yt = self._get_client()
+            if playlist_id == "LM":
+                return yt.get_liked_songs(limit=None)
+            return yt.get_playlist(playlist_id, limit=None)
+
+        raw = await asyncio.to_thread(_fetch_details_sync)
+        tracks_raw = raw.get("tracks", [])
+
+        # Load local songs and uploads for matching
+        local_files = await db.get_all_local_songs()
+        uploads = await db.get_all_ytm_uploads()
+
+        # Build normalized lookups for fast comparison
+        from .normalizer import normalize_text
+
+        local_map = {}
+        for f in local_files:
+            key = f"{normalize_text(f.get('artist'))}|{normalize_text(f.get('title'))}"
+            local_map[key] = f.get("path")
+            title_key = normalize_text(f.get("title"))
+            if title_key and title_key not in local_map:
+                local_map[title_key] = f.get("path")
+
+        uploads_set = set()
+        for u in uploads:
+            u_key = f"{normalize_text(u.artist)}|{normalize_text(u.title)}"
+            uploads_set.add(u_key)
+            u_title = normalize_text(u.title)
+            if u_title:
+                uploads_set.add(u_title)
+
+        matched_tracks = []
+        for t in tracks_raw:
+            title = t.get("title", "")
+            artists = t.get("artists", [])
+            artist_name = None
+            if artists and isinstance(artists, list) and len(artists) > 0:
+                artist_name = artists[0].get("name") if isinstance(artists[0], dict) else str(artists[0])
+
+            album = t.get("album")
+            album_name = album.get("name") if isinstance(album, dict) else (album if isinstance(album, str) else None)
+
+            thumb = None
+            thumbs = t.get("thumbnails")
+            if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
+                thumb = thumbs[-1].get("url")
+
+            duration = t.get("duration") or t.get("duration_seconds")
+
+            # Check match against local library & uploads
+            key = f"{normalize_text(artist_name)}|{normalize_text(title)}"
+            title_key = normalize_text(title)
+
+            local_path = local_map.get(key) or local_map.get(title_key)
+            in_local = local_path is not None
+            in_uploads = (key in uploads_set) or (title_key in uploads_set)
+
+            matched_tracks.append({
+                "video_id": t.get("videoId"),
+                "title": title,
+                "artist": artist_name,
+                "album": album_name,
+                "duration": duration,
+                "thumbnail": thumb,
+                "in_local": in_local,
+                "in_uploads": in_uploads,
+                "local_path": local_path
+            })
+
+        thumb = None
+        thumbs = raw.get("thumbnails")
+        if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
+            thumb = thumbs[-1].get("url")
+
+        return {
+            "id": playlist_id,
+            "title": raw.get("title", "Liked Music" if playlist_id == "LM" else "Playlist"),
+            "description": raw.get("description", ""),
+            "track_count": len(matched_tracks),
+            "thumbnail": thumb,
+            "tracks": matched_tracks
+        }
+
 ytm_client = YTMClient()

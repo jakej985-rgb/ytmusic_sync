@@ -188,3 +188,112 @@ class AppSettings {
     );
   }
 }
+
+class YTMPlaylist {
+  final String id;
+  final String title;
+  final String description;
+  final int? trackCount;
+  final String? thumbnail;
+
+  YTMPlaylist({
+    required this.id,
+    required this.title,
+    required this.description,
+    this.trackCount,
+    this.thumbnail,
+  });
+
+  factory YTMPlaylist.fromJson(Map<String, dynamic> json) {
+    return YTMPlaylist(
+      id: json['id'] ?? '',
+      title: json['title'] ?? 'Untitled Playlist',
+      description: json['description'] ?? '',
+      trackCount: json['track_count'],
+      thumbnail: json['thumbnail'],
+    );
+  }
+}
+
+class YTMPlaylistTrack {
+  final String? videoId;
+  final String title;
+  final String? artist;
+  final String? album;
+  final dynamic duration;
+  final String? thumbnail;
+  final bool inLocal;
+  final bool inUploads;
+  final String? localPath;
+
+  YTMPlaylistTrack({
+    this.videoId,
+    required this.title,
+    this.artist,
+    this.album,
+    this.duration,
+    this.thumbnail,
+    required this.inLocal,
+    required this.inUploads,
+    this.localPath,
+  });
+
+  factory YTMPlaylistTrack.fromJson(Map<String, dynamic> json) {
+    return YTMPlaylistTrack(
+      videoId: json['video_id'],
+      title: json['title'] ?? '',
+      artist: json['artist'],
+      album: json['album'],
+      duration: json['duration'],
+      thumbnail: json['thumbnail'],
+      inLocal: json['in_local'] ?? false,
+      inUploads: json['in_uploads'] ?? false,
+      localPath: json['local_path'],
+    );
+  }
+
+  String get displayArtist => (artist != null && artist!.isNotEmpty) ? artist! : 'Unknown Artist';
+  String get displayAlbum => (album != null && album!.isNotEmpty) ? album! : 'Unknown Album';
+  
+  String get formattedDuration {
+    if (duration == null) return '--:--';
+    if (duration is String) return duration;
+    if (duration is num) {
+      final totalSec = duration.round();
+      final mins = totalSec ~/ 60;
+      final secs = totalSec % 60;
+      return '$mins:${secs.toString().padLeft(2, '0')}';
+    }
+    return '--:--';
+  }
+}
+
+class YTMPlaylistDetails {
+  final String id;
+  final String title;
+  final String description;
+  final int trackCount;
+  final String? thumbnail;
+  final List<YTMPlaylistTrack> tracks;
+
+  YTMPlaylistDetails({
+    required this.id,
+    required this.title,
+    required this.description,
+    required this.trackCount,
+    this.thumbnail,
+    required this.tracks,
+  });
+
+  factory YTMPlaylistDetails.fromJson(Map<String, dynamic> json) {
+    final rawTracks = json['tracks'] as List<dynamic>? ?? [];
+    return YTMPlaylistDetails(
+      id: json['id'] ?? '',
+      title: json['title'] ?? '',
+      description: json['description'] ?? '',
+      trackCount: json['track_count'] ?? rawTracks.length,
+      thumbnail: json['thumbnail'],
+      tracks: rawTracks.map((t) => YTMPlaylistTrack.fromJson(t as Map<String, dynamic>)).toList(),
+    );
+  }
+}

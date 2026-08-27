@@ -239,6 +239,13 @@ class Database:
                 data = dict(row)
                 return MusicFile(**data)
 
+    async def get_all_local_songs(self) -> list[dict]:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT path, title, artist, album, duration FROM music_files") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
     # YTM Uploads
     async def upsert_ytm_upload(self, upload_info: dict):
         now = datetime.now(timezone.utc).isoformat()
