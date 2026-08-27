@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
         background_scanner_task.cancel()
     await queue_manager.stop_worker()
 
-app = FastAPI(title="YTM Sync Backend Service", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="YTM Sync Backend Service", version="0.0.1-beta", lifespan=lifespan)
 
 # Allow Flutter Desktop / Localhost clients
 app.add_middleware(

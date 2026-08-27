@@ -3,7 +3,7 @@ name: Build and Package Docker Image
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -50,7 +50,7 @@ jobs:
           PYTHONPATH=./backend pytest backend/tests/ -v
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
