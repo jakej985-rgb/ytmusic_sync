@@ -37,7 +37,6 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
-            type=sha,format=short
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -60,15 +59,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Prune Untagged GHCR Images
+      - name: Prune Untagged and Commit-SHA GHCR Images
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Scanning for untagged package versions in GHCR..."
-          UNTAGGED_IDS=$(gh api "/user/packages/container/ytmusic_sync/versions?per_page=100" --jq '.[] | select(.metadata.container.tags | length == 0) | .id' 2>/dev/null || true)
-          for id in $UNTAGGED_IDS; do
-            echo "Deleting untagged version ID: $id"
+          echo "Scanning for untagged and sha-* package versions in GHCR..."
+          CLEANUP_IDS=$(gh api "/user/packages/container/ytmusic_sync/versions?per_page=100" --jq '.[] | select((.metadata.container.tags | length == 0) or (.metadata.container.tags | all(startswith("sha-")))) | .id' 2>/dev/null || true)
+          for id in $CLEANUP_IDS; do
+            echo "Deleting version ID: $id"
             gh api --method DELETE "/user/packages/container/ytmusic_sync/versions/$id" || true
           done
-          echo "GHCR untagged image cleanup completed."
+          echo "GHCR cleanup completed."
