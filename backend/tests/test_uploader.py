@@ -199,13 +199,14 @@ async def test_uploader_handles_file_disappearing(tmp_path: Path):
         uploaded.append(Path(filepath).name)
         return {"success": True, "response": "STATUS_SUCCEEDED"}
 
+    manager = UploadQueueManager()
+    await db_instance.create_sync_job(fid2)  # Missing file queued first
+    await db_instance.create_sync_job(fid1)  # Existing file queued second
+
     with patch("ytm_service.uploader.db", db_instance), \
          patch("ytm_service.uploader.ytm_client.upload_file", side_effect=mock_upload), \
          patch("ytm_service.uploader.settings.verify_uploads", False):
 
-        manager = UploadQueueManager()
-        await manager.enqueue_song(fid2)  # Missing file queued first
-        await manager.enqueue_song(fid1)  # Existing file queued second
         await manager._process_queue_loop()
 
     # Deleted song marked FAILED, existing song continues and SUCCEEDS
