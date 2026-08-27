@@ -14,6 +14,35 @@ from .normalizer import parse_duration
 
 logger = logging.getLogger("ytm_sync.ytm_client")
 
+import re
+
+def preprocess_headers(raw: str) -> str:
+    raw = raw.strip()
+    # 1. Handle Copy as cURL (bash / POSIX / Windows)
+    if raw.startswith("curl "):
+        header_lines = []
+        matches = re.findall(r'(?:-H|--header)\s+[\'"]([^\'"]+)[\'"]', raw, re.IGNORECASE)
+        for m in matches:
+            header_lines.append(m)
+        if header_lines:
+            return "\n".join(header_lines)
+
+    # 2. Handle JSON array of cookies/headers
+    if raw.startswith("[") or raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                cookie_pairs = []
+                for item in parsed:
+                    if isinstance(item, dict) and "name" in item and "value" in item:
+                        cookie_pairs.append(f"{item['name']}={item['value']}")
+                if cookie_pairs:
+                    return f"cookie: {'; '.join(cookie_pairs)}\nx-goog-authuser: 0\nuser-agent: Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0\naccept: */*\n"
+        except Exception:
+            pass
+
+    return raw
+
 class YTMClient:
     def __init__(self):
         self._ytm: Optional[YTMusic] = None
@@ -35,8 +64,9 @@ class YTMClient:
         """Parse raw browser headers and write securely to auth_file with 0600 permissions."""
         def _setup_sync():
             settings.auth_file.parent.mkdir(parents=True, exist_ok=True)
+            cleaned_headers = preprocess_headers(raw_headers)
             # Use ytmusicapi's setup parser
-            res = setup(filepath=str(settings.auth_file), headers_raw=raw_headers)
+            res = setup(filepath=str(settings.auth_file), headers_raw=cleaned_headers)
             # Secure file permissions (rw-------)
             os.chmod(settings.auth_file, stat.S_IRUSR | stat.S_IWUSR)
             return res

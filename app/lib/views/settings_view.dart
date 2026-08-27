@@ -200,11 +200,11 @@ class _SettingsViewState extends State<SettingsView> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '1. Open music.youtube.com in your web browser and log in.\n'
-                  '2. Press F12 to open Developer Tools, then navigate to the Network tab.\n'
-                  '3. Click on any request to music.youtube.com (e.g. browse or player).\n'
-                  '4. Under Request Headers, right click and Copy Request Headers (or copy everything).\n'
-                  '5. Paste the copied text into the field below and click "Connect Account".',
+                  '1. Open music.youtube.com in your web browser and ensure you are logged in.\n'
+                  '2. Press F12 to open Developer Tools, then click the Network tab.\n'
+                  '3. In the Filter box, type "browse" (or click "Library" / "Explore" on YouTube Music).\n'
+                  '4. Right-click on a "browse" request row ➔ hover over "Copy Value" ➔ click "Copy Request Headers" (or "Copy as cURL").\n'
+                  '5. Paste the copied text directly into the box below and click "Connect YouTube Music".',
                   style: TextStyle(color: Colors.grey[400], height: 1.4, fontSize: 12),
                 ),
                 const SizedBox(height: 16),
