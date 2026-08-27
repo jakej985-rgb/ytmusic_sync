@@ -60,6 +60,7 @@ async def test_get_playlist_details_with_matching():
         "duration": 354.0,
         "format": "mp3",
         "file_size": 5000000,
+        "modified_time": 1700000000.0,
         "file_hash": "hash1",
         "metadata_hash": "meta1",
     })
