@@ -60,11 +60,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Clean up untagged images in GHCR
+      - name: Prune Untagged GHCR Images
         if: github.event_name != 'pull_request'
-        uses: dataaxiom/ghcr-cleanup-action@v1
-        with:
-          packages: ytmusic_sync
-          delete-untagged: true
-          delete-ghost-images: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Scanning for untagged package versions in GHCR..."
+          UNTAGGED_IDS=$(gh api "/user/packages/container/ytmusic_sync/versions?per_page=100" --jq '.[] | select(.metadata.container.tags | length == 0) | .id' 2>/dev/null || true)
+          for id in $UNTAGGED_IDS; do
+            echo "Deleting untagged version ID: $id"
+            gh api --method DELETE "/user/packages/container/ytmusic_sync/versions/$id" || true
+          done
+          echo "GHCR untagged image cleanup completed."
