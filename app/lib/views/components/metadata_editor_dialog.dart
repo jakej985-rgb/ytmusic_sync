@@ -45,68 +45,111 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     super.dispose();
   }
 
-  /// Automatically parses "Artist - Title" from the filename
-  void _smartSplitFilename() {
+  /// Automatically parses filename into Artist and Title based on requested order
+  void _smartSplit({required bool artistFirst}) {
     final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
-    
-    // Pattern 1: Optional Track Number prefix, then Artist - Title (e.g., "01 - Akon - I Wanna Love You" or "Akon - I Wanna Love You")
-    final matchTrackArtistTitle = RegExp(r'^(?:(\d+)\s*[-._]\s*)?([^-]+)\s*-\s*(.+)$').firstMatch(rawName);
-    if (matchTrackArtistTitle != null) {
-      final track = matchTrackArtistTitle.group(1);
-      final artist = matchTrackArtistTitle.group(2)?.trim();
-      final title = matchTrackArtistTitle.group(3)?.trim();
+    String cleanName = rawName;
+    String? trackNum;
 
+    // Check optional track number prefix (e.g. "01 - ", "01. ", "01 ")
+    final trackPrefixMatch = RegExp(r'^(\d+)\s*[-._\s]\s*(.+)$').firstMatch(cleanName);
+    if (trackPrefixMatch != null) {
+      trackNum = trackPrefixMatch.group(1);
+      cleanName = trackPrefixMatch.group(2)!.trim();
+    }
+
+    String? partA;
+    String? partB;
+
+    // 1. Try splitting by " - " or " _ " or " by "
+    if (cleanName.contains(' - ')) {
+      final parts = cleanName.split(' - ');
+      partA = parts[0].trim();
+      partB = parts.sublist(1).join(' - ').trim();
+    } else if (cleanName.contains(' _ ')) {
+      final parts = cleanName.split(' _ ');
+      partA = parts[0].trim();
+      partB = parts.sublist(1).join(' _ ').trim();
+    } else if (RegExp(r'\s+by\s+', caseSensitive: false).hasMatch(cleanName)) {
+      final match = RegExp(r'^(.+?)\s+by\s+(.+)$', caseSensitive: false).firstMatch(cleanName);
+      if (match != null) {
+        final title = match.group(1)?.trim();
+        final artist = match.group(2)?.trim();
+        setState(() {
+          if (artistFirst) {
+            _artistController.text = artist ?? '';
+            _titleController.text = title ?? '';
+          } else {
+            _titleController.text = title ?? '';
+            _artistController.text = artist ?? '';
+          }
+          if (trackNum != null && trackNum.isNotEmpty) _trackNumController.text = trackNum;
+        });
+        _notifyAutoFill(artistFirst ? 'Artist - Title' : 'Title - Artist');
+        return;
+      }
+    } else if (cleanName.contains('_')) {
+      final parts = cleanName.split('_');
+      partA = parts[0].trim();
+      partB = parts.sublist(1).join(' ').trim();
+    } else if (cleanName.contains('-')) {
+      final parts = cleanName.split('-');
+      partA = parts[0].trim();
+      partB = parts.sublist(1).join('-').trim();
+    }
+
+    if (partA != null && partB != null) {
       setState(() {
-        if (artist != null && artist.isNotEmpty) _artistController.text = artist;
-        if (title != null && title.isNotEmpty) _titleController.text = title;
-        if (track != null && track.isNotEmpty) _trackNumController.text = track;
+        if (artistFirst) {
+          _artistController.text = partA!;
+          _titleController.text = partB!;
+        } else {
+          _titleController.text = partA!;
+          _artistController.text = partB!;
+        }
+        if (trackNum != null && trackNum.isNotEmpty) {
+          _trackNumController.text = trackNum;
+        }
       });
-
+      _notifyAutoFill(artistFirst ? 'Artist - Title' : 'Title - Artist');
+    } else {
+      setState(() {
+        _titleController.text = cleanName;
+        if (trackNum != null && trackNum.isNotEmpty) {
+          _trackNumController.text = trackNum;
+        }
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Auto-filled Title and Artist from filename!'),
+          content: Text('No separator found; used entire name as Title.'),
           duration: Duration(seconds: 2),
         ),
       );
-      return;
     }
+  }
 
-    // Pattern 2: "Title by Artist" (e.g. "Better Dig Two by The Band Perry")
-    final matchBy = RegExp(r'^(.+?)\s+by\s+(.+)$', caseSensitive: false).firstMatch(rawName);
-    if (matchBy != null) {
-      final title = matchBy.group(1)?.trim();
-      final artist = matchBy.group(2)?.trim();
-      setState(() {
-        if (artist != null && artist.isNotEmpty) _artistController.text = artist;
-        if (title != null && title.isNotEmpty) _titleController.text = title;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Auto-filled Title and Artist from filename!'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-      return;
-    }
+  void _swapArtistTitle() {
+    final curTitle = _titleController.text;
+    final curArtist = _artistController.text;
+    setState(() {
+      _titleController.text = curArtist;
+      _artistController.text = curTitle;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Swapped Title ⇄ Artist'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
 
-    // Pattern 2: "Artist _ Title" with underscores
-    final matchUnderscore = RegExp(r'^([^_]+)_(.+)$').firstMatch(rawName);
-    if (matchUnderscore != null) {
-      final artist = matchUnderscore.group(1)?.replaceAll('.', ' ').trim();
-      final title = matchUnderscore.group(2)?.replaceAll('_', ' ').trim();
-
-      setState(() {
-        if (artist != null && artist.isNotEmpty) _artistController.text = artist;
-        if (title != null && title.isNotEmpty) _titleController.text = title;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Auto-filled Title and Artist from filename!'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
+  void _notifyAutoFill(String mode) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Auto-filled as $mode!'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   Future<void> _saveMetadata({bool enqueueUpload = false}) async {
@@ -231,8 +274,11 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
             ),
             const SizedBox(height: 14),
 
-            // Smart Split Button
-            Row(
+            // Smart Split Controls
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
@@ -240,9 +286,29 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                     side: const BorderSide(color: Color(0xFF3EA6FF)),
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
-                  onPressed: _smartSplitFilename,
+                  onPressed: () => _smartSplit(artistFirst: true),
                   icon: const Icon(Icons.auto_fix_high, size: 16),
-                  label: const Text('Smart Auto-Split (Artist - Title)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  label: const Text('Artist - Title', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                ),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF3EA6FF),
+                    side: const BorderSide(color: Color(0xFF3EA6FF)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onPressed: () => _smartSplit(artistFirst: false),
+                  icon: const Icon(Icons.auto_fix_high, size: 16),
+                  label: const Text('Title - Artist', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                ),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white70,
+                    side: const BorderSide(color: Colors.white24),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  ),
+                  onPressed: _swapArtistTitle,
+                  icon: const Icon(Icons.swap_vert, size: 16),
+                  label: const Text('Swap (⇄)', style: TextStyle(fontSize: 12)),
                 ),
               ],
             ),
