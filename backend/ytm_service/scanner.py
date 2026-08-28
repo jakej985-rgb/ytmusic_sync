@@ -83,6 +83,48 @@ def extract_metadata(filepath: Path) -> dict:
     )
     return metadata
 
+def write_metadata_tags(
+    filepath: Path,
+    title: Optional[str] = None,
+    artist: Optional[str] = None,
+    album: Optional[str] = None,
+    track_number: Optional[int] = None
+) -> bool:
+    """Write audio metadata tags using mutagen (EasyID3, FLAC, MP4, OggVorbis)."""
+    try:
+        p = Path(filepath)
+        if not p.exists():
+            return False
+        
+        ext = p.suffix.lower()
+        if ext == ".mp3":
+            from mutagen.id3 import ID3, ID3NoHeaderError
+            try:
+                audio = EasyID3(str(p))
+            except ID3NoHeaderError:
+                ID3().save(str(p))
+                audio = EasyID3(str(p))
+        else:
+            audio = mutagen.File(str(p), easy=True)
+
+        if audio is None:
+            return False
+
+        if title is not None:
+            audio["title"] = [title]
+        if artist is not None:
+            audio["artist"] = [artist]
+        if album is not None:
+            audio["album"] = [album]
+        if track_number is not None:
+            audio["tracknumber"] = [str(track_number)]
+
+        audio.save()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not write metadata tags to {filepath}: {e}")
+        return False
+
 class MusicScanner:
     def __init__(self):
         self.is_scanning = False

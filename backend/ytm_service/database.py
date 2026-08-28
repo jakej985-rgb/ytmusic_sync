@@ -239,6 +239,38 @@ class Database:
                 data = dict(row)
                 return MusicFile(**data)
 
+    async def update_music_file_metadata(
+        self,
+        file_id: int,
+        title: str,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        track_number: Optional[int] = None
+    ) -> Optional[MusicFile]:
+        from .normalizer import compute_metadata_hash
+        now = datetime.now(timezone.utc).isoformat()
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM music_files WHERE id = ?", (file_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                duration = row["duration"]
+
+            meta_hash = compute_metadata_hash(artist, album, title, duration)
+
+            await db.execute(
+                """
+                UPDATE music_files
+                SET title = ?, artist = ?, album = ?, track_number = ?, metadata_hash = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (title, artist, album, track_number, meta_hash, now, file_id)
+            )
+            await db.commit()
+
+        return await self.get_music_file_by_id(file_id)
+
     async def get_all_local_songs(self) -> list[dict]:
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row

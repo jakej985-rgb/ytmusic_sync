@@ -1,7 +1,7 @@
 import difflib
 import logging
 from typing import Optional
-from .models import MatchType
+from .models import MatchType, MusicFile
 from .normalizer import normalize_text
 from .database import db
 
@@ -146,5 +146,40 @@ class MatchingEngine:
             "weak_potential": weak_count,
             "missing": len(local_files) - matched_count
         }
+
+    async def match_single_file(self, loc: MusicFile) -> Optional[dict]:
+        """Evaluate matching for a single music file against known YTM uploads."""
+        if not loc.id:
+            return None
+        ytm_uploads = await db.get_all_ytm_uploads()
+        if not ytm_uploads:
+            return None
+
+        best_match = None
+        best_score = 0.0
+        best_type = MatchType.NONE
+
+        for y in ytm_uploads:
+            m_type, score = evaluate_match(
+                loc.artist, loc.album, loc.title, loc.duration,
+                y.artist, y.album, y.title, y.duration
+            )
+            if score > best_score:
+                best_score = score
+                best_type = m_type
+                best_match = y
+            if best_type == MatchType.EXACT:
+                break
+
+        if best_match and best_type in (MatchType.EXACT, MatchType.STRONG):
+            await db.save_match(
+                file_id=loc.id,
+                ytm_upload_id=best_match.entity_id,
+                match_type=best_type,
+                score=best_score
+            )
+            return {"matched": True, "upload_id": best_match.entity_id, "type": best_type.value, "score": best_score}
+
+        return {"matched": False}
 
 matcher = MatchingEngine()

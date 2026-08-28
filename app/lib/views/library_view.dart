@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import 'components/metadata_editor_dialog.dart';
 
 class LibraryView extends StatefulWidget {
   const LibraryView({super.key});
@@ -84,6 +85,13 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
           SnackBar(content: Text('Failed to enqueue upload: $e'), backgroundColor: Colors.redAccent),
         );
       }
+    }
+  }
+
+  Future<void> _openMetadataEditor(MusicFile song) async {
+    final saved = await MetadataEditorDialog.show(context, song);
+    if (saved == true) {
+      _loadSongs();
     }
   }
 
@@ -269,23 +277,32 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
             const SizedBox(width: 16),
             // Status Badge
             SizedBox(
-              width: 120,
+              width: 110,
               child: _buildStatusBadge(song.uploadStatus),
             ),
-            const SizedBox(width: 12),
-            // Action Button
-            SizedBox(
-              width: 90,
-              child: (song.uploadStatus == 'not_uploaded' || song.uploadStatus == 'failed')
-                  ? FilledButton.tonal(
-                      onPressed: () => _uploadTrack(song),
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      child: const Text('Upload', style: TextStyle(fontSize: 12)),
-                    )
-                  : const SizedBox.shrink(),
+            const SizedBox(width: 8),
+            // Actions: Edit Metadata & Upload
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined, size: 18, color: Colors.grey),
+                  tooltip: 'Edit Track Metadata',
+                  onPressed: () => _openMetadataEditor(song),
+                ),
+                const SizedBox(width: 4),
+                if (song.uploadStatus == 'not_uploaded' || song.uploadStatus == 'failed')
+                  FilledButton.tonal(
+                    onPressed: () => _uploadTrack(song),
+                    style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Upload', style: TextStyle(fontSize: 12)),
+                  )
+                else
+                  const SizedBox(width: 64),
+              ],
             ),
           ],
         ),
@@ -324,6 +341,14 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
           ),
         ),
         actions: [
+          OutlinedButton.icon(
+            icon: const Icon(Icons.edit_outlined, size: 16),
+            label: const Text('Edit Metadata'),
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _openMetadataEditor(song);
+            },
+          ),
           if (song.uploadStatus == 'not_uploaded' || song.uploadStatus == 'failed')
             FilledButton(
               onPressed: () {

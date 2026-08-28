@@ -105,6 +105,30 @@ class ApiService {
     throw Exception('Failed to fetch songs');
   }
 
+  Future<MusicFile> updateSongMetadata(
+    int fileId, {
+    required String title,
+    String? artist,
+    String? album,
+    int? trackNumber,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/songs/$fileId/metadata'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'title': title,
+        'artist': (artist != null && artist.isNotEmpty) ? artist : null,
+        'album': (album != null && album.isNotEmpty) ? album : null,
+        'track_number': trackNumber,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return MusicFile.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to update metadata');
+  }
+
   Future<void> triggerSync() async {
     final response = await http.post(Uri.parse('$baseUrl/api/sync'));
     if (response.statusCode != 200) {

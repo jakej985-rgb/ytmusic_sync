@@ -286,6 +286,47 @@ async def get_songs(
 ) -> list[MusicFile]:
     return await db.get_music_files(filter_status=status, search=search, limit=limit, offset=offset)
 
+class MetadataUpdateRequest(BaseModel):
+    title: str
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    track_number: Optional[int] = None
+
+@app.post("/api/songs/{file_id}/metadata", response_model=MusicFile)
+async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
+    """Update title, artist, album, track_number for a local song and write to file if writable."""
+    existing = await db.get_music_file_by_id(file_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Music file with ID {file_id} not found")
+
+    updated = await db.update_music_file_metadata(
+        file_id=file_id,
+        title=req.title.strip(),
+        artist=req.artist.strip() if req.artist else None,
+        album=req.album.strip() if req.album else None,
+        track_number=req.track_number
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update music file metadata")
+
+    from .scanner import write_metadata_tags
+    try:
+        await asyncio.to_thread(
+            write_metadata_tags,
+            Path(existing.path),
+            title=req.title.strip(),
+            artist=req.artist.strip() if req.artist else None,
+            album=req.album.strip() if req.album else None,
+            track_number=req.track_number
+        )
+    except Exception as e:
+        logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
+
+    # Re-evaluate matching for this file
+    await matcher.match_single_file(updated)
+
+    return updated
+
 @app.post("/api/sync")
 async def sync_remote_and_match(bg_tasks: BackgroundTasks):
     """Fetch remote YTM uploads and run local comparison matching."""

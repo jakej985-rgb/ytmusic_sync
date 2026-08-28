@@ -151,7 +151,10 @@ async def test_uploader_queue_persistence_across_restart(tmp_path: Path):
     # Process remaining queue
     uploaded_files = []
     async def mock_upload(filepath):
-        uploaded_files.append(Path(filepath).name)
+        name = Path(filepath).name
+        if name.startswith("stage_"):
+            name = name.split("_", 2)[-1]
+        uploaded_files.append(name)
         return {"success": True, "response": "STATUS_SUCCEEDED"}
 
     with patch("ytm_service.uploader.db", db_instance), \
@@ -196,7 +199,10 @@ async def test_uploader_handles_file_disappearing(tmp_path: Path):
     async def mock_upload(filepath):
         if not Path(filepath).exists():
             return {"success": False, "error": "FileNotFoundError: File no longer exists on disk"}
-        uploaded.append(Path(filepath).name)
+        name = Path(filepath).name
+        if name.startswith("stage_"):
+            name = name.split("_", 2)[-1]
+        uploaded.append(name)
         return {"success": True, "response": "STATUS_SUCCEEDED"}
 
     manager = UploadQueueManager()

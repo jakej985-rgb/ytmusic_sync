@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 from .config import settings
 from .database import db
@@ -85,29 +86,67 @@ class UploadQueueManager:
         logger.info(f"Processing upload job {job_id} for: {music_file.filename}")
         await db.update_sync_job(job_id, UploadStatus.UPLOADING, increment_attempts=True)
 
+        from .scanner import write_metadata_tags, extract_metadata
+        import shutil
+
+        upload_path = Path(music_file.path)
+        temp_staged_path = None
+
+        try:
+            if upload_path.exists():
+                current_meta = await asyncio.to_thread(extract_metadata, upload_path)
+                tags_differ = (
+                    current_meta.get("title") != music_file.title or
+                    current_meta.get("artist") != music_file.artist or
+                    current_meta.get("album") != music_file.album
+                )
+                if tags_differ:
+                    staging_dir = Path("/tmp/ytm_staging")
+                    staging_dir.mkdir(parents=True, exist_ok=True)
+                    temp_staged_path = staging_dir / f"stage_{job_id}_{music_file.filename}"
+                    shutil.copy2(upload_path, temp_staged_path)
+                    await asyncio.to_thread(
+                        write_metadata_tags,
+                        temp_staged_path,
+                        title=music_file.title,
+                        artist=music_file.artist,
+                        album=music_file.album,
+                        track_number=music_file.track_number
+                    )
+                    upload_path = temp_staged_path
+        except Exception as e:
+            logger.warning(f"Could not stage custom metadata tags for {music_file.filename}: {e}")
+
         # Retry loop with exponential backoff
         max_retries = settings.max_retries
         attempt = job.attempts + 1
         uploaded_successfully = False
         last_error = None
 
-        while attempt <= max_retries:
-            try:
-                res = await ytm_client.upload_file(music_file.path)
-                if res.get("success"):
-                    uploaded_successfully = True
-                    break
-                else:
-                    last_error = f"YTM rejected upload: {res.get('response')}"
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(f"Upload attempt {attempt}/{max_retries} failed for {music_file.filename}: {e}")
+        try:
+            while attempt <= max_retries:
+                try:
+                    res = await ytm_client.upload_file(str(upload_path))
+                    if res.get("success"):
+                        uploaded_successfully = True
+                        break
+                    else:
+                        last_error = f"YTM rejected upload: {res.get('response')}"
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"Upload attempt {attempt}/{max_retries} failed for {music_file.filename}: {e}")
 
-            attempt += 1
-            if attempt <= max_retries:
-                backoff_secs = 2 ** attempt
-                logger.info(f"Retrying in {backoff_secs}s...")
-                await asyncio.sleep(backoff_secs)
+                attempt += 1
+                if attempt <= max_retries:
+                    backoff_secs = 2 ** attempt
+                    logger.info(f"Retrying in {backoff_secs}s...")
+                    await asyncio.sleep(backoff_secs)
+        finally:
+            if temp_staged_path and temp_staged_path.exists():
+                try:
+                    temp_staged_path.unlink()
+                except Exception:
+                    pass
 
         if not uploaded_successfully:
             logger.error(f"All upload attempts failed for job {job_id}: {last_error}")
