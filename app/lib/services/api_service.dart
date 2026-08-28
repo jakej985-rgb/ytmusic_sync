@@ -242,6 +242,26 @@ class ApiService {
     }
     throw Exception('Failed to browse container filesystem');
   }
+
+  Future<List<MusicBrainzMatch>> searchMusicBrainz({
+    String? query,
+    String? artist,
+    String? title,
+    int limit = 5,
+  }) async {
+    final Map<String, String> queryParams = {'limit': limit.toString()};
+    if (query != null && query.isNotEmpty) queryParams['query'] = query;
+    if (artist != null && artist.isNotEmpty) queryParams['artist'] = artist;
+    if (title != null && title.isNotEmpty) queryParams['title'] = title;
+
+    final uri = Uri.parse('$baseUrl/api/musicbrainz/search').replace(queryParameters: queryParams);
+    final response = await http.get(uri);
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((item) => MusicBrainzMatch.fromJson(item as Map<String, dynamic>)).toList();
+    }
+    return [];
+  }
 }
 
 final apiService = ApiService();

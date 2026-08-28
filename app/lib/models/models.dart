@@ -373,3 +373,42 @@ class FsBrowseResult {
     );
   }
 }
+
+class MusicBrainzMatch {
+  final String mbid;
+  final String title;
+  final String primaryTitle;
+  final String artist;
+  final String? featuredArtists;
+  final String? album;
+  final int? trackNumber;
+  final String? releaseDate;
+  final int score;
+
+  MusicBrainzMatch({
+    required this.mbid,
+    required this.title,
+    required this.primaryTitle,
+    required this.artist,
+    this.featuredArtists,
+    this.album,
+    this.trackNumber,
+    this.releaseDate,
+    required this.score,
+  });
+
+  factory MusicBrainzMatch.fromJson(Map<String, dynamic> json) {
+    return MusicBrainzMatch(
+      mbid: json['mbid'] ?? '',
+      title: json['title'] ?? '',
+      primaryTitle: json['primary_title'] ?? '',
+      artist: json['artist'] ?? '',
+      featuredArtists: json['featured_artists'],
+      album: json['album'],
+      trackNumber: json['track_number'],
+      releaseDate: json['release_date'],
+      score: json['score'] ?? 100,
+    );
+  }
+}
+

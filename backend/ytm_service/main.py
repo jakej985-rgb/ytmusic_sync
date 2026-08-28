@@ -13,12 +13,13 @@ from .config import settings
 from .database import db
 from .models import (
     MusicFile, YtmUpload, SyncJob, DashboardStats,
-    ScanRequest, AuthSetupRequest, ConnectionStatus
+    ScanRequest, AuthSetupRequest, ConnectionStatus, MusicBrainzMatch
 )
 from .scanner import scanner
 from .ytm_client import ytm_client
 from .matcher import matcher
 from .uploader import queue_manager
+from .musicbrainz import musicbrainz_client
 from logging.handlers import RotatingFileHandler
 from fastapi.staticfiles import StaticFiles
 
@@ -419,6 +420,20 @@ async def update_settings(req: SettingsUpdate):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.get("/api/musicbrainz/search", response_model=list[MusicBrainzMatch])
+async def search_musicbrainz(
+    query: Optional[str] = Query(None, description="Free-text search query"),
+    artist: Optional[str] = Query(None, description="Artist name"),
+    title: Optional[str] = Query(None, description="Song title"),
+    limit: int = Query(5, ge=1, le=10, description="Max results")
+):
+    try:
+        matches = await musicbrainz_client.search(query=query, artist=artist, title=title, limit=limit)
+        return matches
+    except Exception as e:
+        logger.error(f"Error in musicbrainz search endpoint: {e}", exc_info=True)
+        return []
 
 @app.post("/api/database/backup")
 async def backup_db():

@@ -95,3 +95,15 @@ class ConnectionStatus(BaseModel):
     connected: bool
     message: str
     user_name: Optional[str] = None
+
+class MusicBrainzMatch(BaseModel):
+    mbid: str
+    title: str
+    primary_title: str
+    artist: str
+    featured_artists: Optional[str] = None
+    album: Optional[str] = None
+    track_number: Optional[int] = None
+    release_date: Optional[str] = None
+    score: int = 100
+
