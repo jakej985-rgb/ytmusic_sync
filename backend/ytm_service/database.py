@@ -1,5 +1,8 @@
 import aiosqlite
+import asyncio
 import json
+import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any
@@ -79,14 +82,19 @@ class Database:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or settings.db_path
 
-    def get_connection(self):
-        return aiosqlite.connect(self.db_path)
+    @asynccontextmanager
+    async def get_connection(self):
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON;")
+            await conn.execute("PRAGMA busy_timeout = 60000;")
+            yield conn
 
     async def init_db(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self.get_connection() as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("PRAGMA foreign_keys = ON;")
+            await db.execute("PRAGMA journal_mode = WAL;")
+            await db.execute("PRAGMA synchronous = NORMAL;")
             await db.executescript(CREATE_TABLES_SQL)
             # Reset any interrupted jobs from previous SIGTERM or shutdown back to queued
             await db.execute("UPDATE sync_jobs SET status = 'queued' WHERE status IN ('uploading', 'verifying')")
@@ -280,25 +288,33 @@ class Database:
     ) -> Optional[MusicFile]:
         from .normalizer import compute_metadata_hash
         now = datetime.now(timezone.utc).isoformat()
-        async with self.get_connection() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM music_files WHERE id = ?", (file_id,)) as cursor:
-                row = await cursor.fetchone()
-                if not row:
-                    return None
-                duration = row["duration"]
 
-            meta_hash = compute_metadata_hash(artist, album, title, duration)
+        for attempt in range(5):
+            try:
+                async with self.get_connection() as db:
+                    async with db.execute("SELECT duration FROM music_files WHERE id = ?", (file_id,)) as cursor:
+                        row = await cursor.fetchone()
+                        if not row:
+                            return None
+                        duration = row["duration"]
 
-            await db.execute(
-                """
-                UPDATE music_files
-                SET title = ?, artist = ?, album = ?, track_number = ?, metadata_hash = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (title, artist, album, track_number, meta_hash, now, file_id)
-            )
-            await db.commit()
+                    meta_hash = compute_metadata_hash(artist, album, title, duration)
+
+                    await db.execute(
+                        """
+                        UPDATE music_files
+                        SET title = ?, artist = ?, album = ?, track_number = ?, metadata_hash = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (title, artist, album, track_number, meta_hash, now, file_id)
+                    )
+                    await db.commit()
+                    break
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    await asyncio.sleep(0.3 * (attempt + 1))
+                else:
+                    raise
 
         return await self.get_music_file_by_id(file_id)
 
