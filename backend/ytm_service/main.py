@@ -415,6 +415,14 @@ async def backup_db():
     backup_path = await db.backup_database()
     return {"status": "success", "backup_path": backup_path}
 
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
 # Mount Flutter Web frontend if built
 web_dir_candidates = [
     settings.web_dir,
@@ -424,7 +432,7 @@ web_dir_candidates = [
 for candidate in web_dir_candidates:
     if candidate.is_dir() and (candidate / "index.html").exists():
         logger.info(f"Serving Flutter Web UI from {candidate}")
-        app.mount("/", StaticFiles(directory=str(candidate), html=True), name="web")
+        app.mount("/", NoCacheStaticFiles(directory=str(candidate), html=True), name="web")
         break
 
 def start():
