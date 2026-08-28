@@ -71,6 +71,24 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
       return;
     }
 
+    // Pattern 2: "Title by Artist" (e.g. "Better Dig Two by The Band Perry")
+    final matchBy = RegExp(r'^(.+?)\s+by\s+(.+)$', caseSensitive: false).firstMatch(rawName);
+    if (matchBy != null) {
+      final title = matchBy.group(1)?.trim();
+      final artist = matchBy.group(2)?.trim();
+      setState(() {
+        if (artist != null && artist.isNotEmpty) _artistController.text = artist;
+        if (title != null && title.isNotEmpty) _titleController.text = title;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Auto-filled Title and Artist from filename!'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
     // Pattern 2: "Artist _ Title" with underscores
     final matchUnderscore = RegExp(r'^([^_]+)_(.+)$').firstMatch(rawName);
     if (matchUnderscore != null) {

@@ -125,8 +125,15 @@ class ApiService {
     if (response.statusCode == 200) {
       return MusicFile.fromJson(jsonDecode(response.body));
     }
-    final err = jsonDecode(response.body);
-    throw Exception(err['detail'] ?? 'Failed to update metadata');
+    try {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to update metadata');
+    } catch (e) {
+      if (e is Exception && !e.toString().contains('FormatException')) {
+        rethrow;
+      }
+      throw Exception('Server error (${response.statusCode}): ${response.body}');
+    }
   }
 
   Future<void> triggerSync() async {

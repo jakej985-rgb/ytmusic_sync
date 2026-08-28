@@ -232,12 +232,43 @@ class Database:
     async def get_music_file_by_id(self, file_id: int) -> Optional[MusicFile]:
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM music_files WHERE id = ?", (file_id,)) as cursor:
+            query = """
+                SELECT 
+                    mf.*,
+                    (
+                        CASE 
+                            WHEN m.id IS NOT NULL THEN 'verified'
+                            WHEN sj.status IS NOT NULL THEN sj.status
+                            ELSE 'not_uploaded'
+                        END
+                    ) as upload_status,
+                    m.ytm_upload_id as matched_upload_id,
+                    m.match_score as match_score
+                FROM music_files mf
+                LEFT JOIN matches m ON mf.id = m.music_file_id
+                LEFT JOIN (
+                    SELECT s1.* FROM sync_jobs s1
+                    JOIN (SELECT music_file_id, MAX(id) as max_id FROM sync_jobs GROUP BY music_file_id) s2
+                    ON s1.id = s2.max_id
+                ) sj ON mf.id = sj.music_file_id
+                WHERE mf.id = ?
+            """
+            async with db.execute(query, (file_id,)) as cursor:
                 row = await cursor.fetchone()
                 if not row:
                     return None
                 data = dict(row)
-                return MusicFile(**data)
+                raw_st = data.pop("upload_status", "not_uploaded")
+                matched_id = data.pop("matched_upload_id", None)
+                m_score = data.pop("match_score", None)
+                item = MusicFile(**data)
+                try:
+                    item.upload_status = UploadStatus(raw_st)
+                except ValueError:
+                    item.upload_status = UploadStatus.NOT_UPLOADED
+                item.matched_upload_id = matched_id
+                item.match_score = m_score
+                return item
 
     async def update_music_file_metadata(
         self,

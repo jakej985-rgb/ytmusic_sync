@@ -295,37 +295,47 @@ class MetadataUpdateRequest(BaseModel):
 @app.post("/api/songs/{file_id}/metadata", response_model=MusicFile)
 async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
     """Update title, artist, album, track_number for a local song and write to file if writable."""
-    existing = await db.get_music_file_by_id(file_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Music file with ID {file_id} not found")
-
-    updated = await db.update_music_file_metadata(
-        file_id=file_id,
-        title=req.title.strip(),
-        artist=req.artist.strip() if req.artist else None,
-        album=req.album.strip() if req.album else None,
-        track_number=req.track_number
-    )
-    if not updated:
-        raise HTTPException(status_code=500, detail="Failed to update music file metadata")
-
-    from .scanner import write_metadata_tags
     try:
-        await asyncio.to_thread(
-            write_metadata_tags,
-            Path(existing.path),
+        existing = await db.get_music_file_by_id(file_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Music file with ID {file_id} not found")
+
+        updated = await db.update_music_file_metadata(
+            file_id=file_id,
             title=req.title.strip(),
             artist=req.artist.strip() if req.artist else None,
             album=req.album.strip() if req.album else None,
             track_number=req.track_number
         )
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to update music file metadata in database")
+
+        from .scanner import write_metadata_tags
+        try:
+            await asyncio.to_thread(
+                write_metadata_tags,
+                Path(existing.path),
+                title=req.title.strip(),
+                artist=req.artist.strip() if req.artist else None,
+                album=req.album.strip() if req.album else None,
+                track_number=req.track_number
+            )
+        except Exception as e:
+            logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
+
+        # Re-evaluate matching for this file
+        try:
+            await matcher.match_single_file(updated)
+        except Exception as e:
+            logger.warning(f"Matching re-evaluation failed: {e}")
+
+        refreshed = await db.get_music_file_by_id(file_id)
+        return refreshed or updated
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
-
-    # Re-evaluate matching for this file
-    await matcher.match_single_file(updated)
-
-    return updated
+        logger.exception(f"Unhandled error in update_song_metadata: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating metadata: {str(e)}")
 
 @app.post("/api/sync")
 async def sync_remote_and_match(bg_tasks: BackgroundTasks):
