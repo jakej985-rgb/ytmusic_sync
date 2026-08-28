@@ -2,6 +2,20 @@ import 'package:flutter/material.dart';
 import '../../models/models.dart';
 import '../../services/api_service.dart';
 
+class _ParsedFilenameParts {
+  final String partA;
+  final String partB;
+  final String? trackNum;
+  final bool isBySeparator;
+
+  _ParsedFilenameParts({
+    required this.partA,
+    required this.partB,
+    this.trackNum,
+    required this.isBySeparator,
+  });
+}
+
 class MetadataEditorDialog extends StatefulWidget {
   final MusicFile song;
 
@@ -30,10 +44,35 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   @override
   void initState() {
     super.initState();
-    _titleController = TextEditingController(text: widget.song.title ?? widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), ''));
-    _artistController = TextEditingController(text: widget.song.artist ?? '');
-    _albumController = TextEditingController(text: widget.song.album ?? '');
-    _trackNumController = TextEditingController(text: widget.song.trackNumber != null ? widget.song.trackNumber.toString() : '');
+    final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    String initialTitle = widget.song.title ?? rawName;
+    String initialArtist = widget.song.artist ?? '';
+    String initialAlbum = widget.song.album ?? '';
+    String initialTrackNum = widget.song.trackNumber != null ? widget.song.trackNumber.toString() : '';
+
+    // Auto-detect if artist is unknown or empty
+    if (initialArtist.isEmpty || initialArtist.toLowerCase() == 'unknown artist') {
+      final parts = _extractParts(rawName);
+      if (parts != null) {
+        if (parts.isBySeparator) {
+          // "alone by tech nine" -> Title: "alone", Artist: "tech nine"
+          initialTitle = parts.partA;
+          initialArtist = parts.partB;
+        } else {
+          // "Akon - I Wanna Love You" -> Artist: "Akon", Title: "I Wanna Love You"
+          initialArtist = parts.partA;
+          initialTitle = parts.partB;
+        }
+        if (parts.trackNum != null) {
+          initialTrackNum = parts.trackNum!;
+        }
+      }
+    }
+
+    _titleController = TextEditingController(text: initialTitle);
+    _artistController = TextEditingController(text: initialArtist);
+    _albumController = TextEditingController(text: initialAlbum);
+    _trackNumController = TextEditingController(text: initialTrackNum);
   }
 
   @override
@@ -45,83 +84,102 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     super.dispose();
   }
 
-  /// Automatically parses filename into Artist and Title based on requested order
-  void _smartSplit({required bool artistFirst}) {
-    final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
-    String cleanName = rawName;
+  _ParsedFilenameParts? _extractParts(String rawName) {
+    String cleanName = rawName.trim();
     String? trackNum;
 
-    // Check optional track number prefix (e.g. "01 - ", "01. ", "01 ")
     final trackPrefixMatch = RegExp(r'^(\d+)\s*[-._\s]\s*(.+)$').firstMatch(cleanName);
     if (trackPrefixMatch != null) {
       trackNum = trackPrefixMatch.group(1);
       cleanName = trackPrefixMatch.group(2)!.trim();
     }
 
-    String? partA;
-    String? partB;
-
-    // 1. Try splitting by " - " or " _ " or " by "
-    if (cleanName.contains(' - ')) {
-      final parts = cleanName.split(' - ');
-      partA = parts[0].trim();
-      partB = parts.sublist(1).join(' - ').trim();
-    } else if (cleanName.contains(' _ ')) {
-      final parts = cleanName.split(' _ ');
-      partA = parts[0].trim();
-      partB = parts.sublist(1).join(' _ ').trim();
-    } else if (RegExp(r'\s+by\s+', caseSensitive: false).hasMatch(cleanName)) {
-      final match = RegExp(r'^(.+?)\s+by\s+(.+)$', caseSensitive: false).firstMatch(cleanName);
-      if (match != null) {
-        final title = match.group(1)?.trim();
-        final artist = match.group(2)?.trim();
-        setState(() {
-          if (artistFirst) {
-            _artistController.text = artist ?? '';
-            _titleController.text = title ?? '';
-          } else {
-            _titleController.text = title ?? '';
-            _artistController.text = artist ?? '';
-          }
-          if (trackNum != null && trackNum.isNotEmpty) _trackNumController.text = trackNum;
-        });
-        _notifyAutoFill(artistFirst ? 'Artist - Title' : 'Title - Artist');
-        return;
-      }
-    } else if (cleanName.contains('_')) {
-      final parts = cleanName.split('_');
-      partA = parts[0].trim();
-      partB = parts.sublist(1).join(' ').trim();
-    } else if (cleanName.contains('-')) {
-      final parts = cleanName.split('-');
-      partA = parts[0].trim();
-      partB = parts.sublist(1).join('-').trim();
+    // 1. "by" separator: e.g. "alone by tech nine"
+    final matchBy = RegExp(r'^(.+?)\s+by\s+(.+)$', caseSensitive: false).firstMatch(cleanName);
+    if (matchBy != null) {
+      return _ParsedFilenameParts(
+        partA: matchBy.group(1)!.trim(),
+        partB: matchBy.group(2)!.trim(),
+        trackNum: trackNum,
+        isBySeparator: true,
+      );
     }
 
-    if (partA != null && partB != null) {
+    // 2. " - " separator
+    if (cleanName.contains(' - ')) {
+      final parts = cleanName.split(' - ');
+      return _ParsedFilenameParts(
+        partA: parts[0].trim(),
+        partB: parts.sublist(1).join(' - ').trim(),
+        trackNum: trackNum,
+        isBySeparator: false,
+      );
+    }
+
+    // 3. " _ " separator
+    if (cleanName.contains(' _ ')) {
+      final parts = cleanName.split(' _ ');
+      return _ParsedFilenameParts(
+        partA: parts[0].trim(),
+        partB: parts.sublist(1).join(' _ ').trim(),
+        trackNum: trackNum,
+        isBySeparator: false,
+      );
+    }
+
+    // 4. Underscores
+    if (cleanName.contains('_')) {
+      final parts = cleanName.split('_');
+      return _ParsedFilenameParts(
+        partA: parts[0].trim(),
+        partB: parts.sublist(1).join(' ').trim(),
+        trackNum: trackNum,
+        isBySeparator: false,
+      );
+    }
+
+    // 5. Hyphen
+    if (cleanName.contains('-')) {
+      final parts = cleanName.split('-');
+      return _ParsedFilenameParts(
+        partA: parts[0].trim(),
+        partB: parts.sublist(1).join('-').trim(),
+        trackNum: trackNum,
+        isBySeparator: false,
+      );
+    }
+
+    return null;
+  }
+
+  /// Automatically parses filename into Artist and Title based on requested order
+  void _smartSplit({required bool artistFirst}) {
+    final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    final parts = _extractParts(rawName);
+
+    if (parts != null) {
       setState(() {
         if (artistFirst) {
-          _artistController.text = partA!;
-          _titleController.text = partB!;
+          // Artist gets partA, Title gets partB
+          _artistController.text = parts.partA;
+          _titleController.text = parts.partB;
         } else {
-          _titleController.text = partA!;
-          _artistController.text = partB!;
+          // Title gets partA, Artist gets partB
+          _titleController.text = parts.partA;
+          _artistController.text = parts.partB;
         }
-        if (trackNum != null && trackNum.isNotEmpty) {
-          _trackNumController.text = trackNum;
+        if (parts.trackNum != null && parts.trackNum!.isNotEmpty) {
+          _trackNumController.text = parts.trackNum!;
         }
       });
       _notifyAutoFill(artistFirst ? 'Artist - Title' : 'Title - Artist');
     } else {
       setState(() {
-        _titleController.text = cleanName;
-        if (trackNum != null && trackNum.isNotEmpty) {
-          _trackNumController.text = trackNum;
-        }
+        _titleController.text = rawName;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('No separator found; used entire name as Title.'),
+          content: Text('No separator found; used filename as Title.'),
           duration: Duration(seconds: 2),
         ),
       );
