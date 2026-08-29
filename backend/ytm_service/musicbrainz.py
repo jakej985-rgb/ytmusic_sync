@@ -116,7 +116,7 @@ class MusicBrainzClient:
         title: Optional[str] = None,
         limit: int = 5
     ) -> List[MusicBrainzMatch]:
-        """Search YouTube Music's own official catalog for 100% exact song & album metadata."""
+        """Search YouTube Music's own official catalog (both songs and videos) for exact metadata."""
         search_terms = []
         if artist and title:
             search_terms.append(f"{artist} - {title}")
@@ -132,9 +132,26 @@ class MusicBrainzClient:
             return []
 
         def _sync_ytm():
+            results = []
             try:
                 yt = YTMusic()
-                return yt.search(term, filter="songs", limit=limit)
+                # 1. Official songs catalog
+                try:
+                    s_res = yt.search(term, filter="songs", limit=limit)
+                    if s_res:
+                        results.extend(s_res)
+                except Exception as e:
+                    logger.debug(f"YTM songs search error: {e}")
+
+                # 2. Videos catalog (crucial for YouTube music videos, featured collabs, and singles)
+                try:
+                    v_res = yt.search(term, filter="videos", limit=limit)
+                    if v_res:
+                        results.extend(v_res)
+                except Exception as e:
+                    logger.debug(f"YTM videos search error: {e}")
+
+                return results
             except Exception as e:
                 logger.warning(f"YouTube Music catalog search error: {e}")
                 return []
@@ -142,16 +159,26 @@ class MusicBrainzClient:
         items = await asyncio.to_thread(_sync_ytm)
         matches: List[MusicBrainzMatch] = []
         for s in items:
-            track_name = s.get("title", "").strip()
+            raw_title = s.get("title", "").strip()
             artists = [a.get("name") for a in s.get("artists", []) if isinstance(a, dict)]
             artist_name = ", ".join(artists) if artists else "Unknown Artist"
             album_name = s.get("album", {}).get("name") if isinstance(s.get("album"), dict) else (s.get("album") or None)
+
+            track_name = raw_title
+            # If title is in 'Artist - Title' format (common in YouTube music videos)
+            if " - " in raw_title:
+                p1, p2 = raw_title.split(" - ", 1)
+                if artist_name == "Unknown Artist" or artist_name.lower() in p1.lower() or p1.lower() in artist_name.lower():
+                    artist_name = p1.strip()
+                    track_name = p2.strip()
 
             thumb = None
             if s.get("thumbnails"):
                 thumb = s.get("thumbnails")[-1].get("url")
                 if thumb and "=w120-h120" in thumb:
                     thumb = re.sub(r'=w\d+-h\d+', '=w600-h600', thumb)
+            elif s.get("videoId"):
+                thumb = f"https://i.ytimg.com/vi/{s.get('videoId')}/hqdefault.jpg"
 
             feat_match = re.search(r'^(.*?)\s+(?:\(|\[)?(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\])?$', track_name, re.IGNORECASE)
             primary_title = track_name
@@ -406,6 +433,7 @@ class MusicBrainzClient:
         # Target terms for scoring
         target_a = (artist or "").strip().lower()
         target_t = (title or "").strip().lower()
+        target_feat = ""
         if not target_a and not target_t and query:
             q_clean = self._clean_ripper_junk(query.strip())
             if " - " in q_clean:
@@ -414,6 +442,16 @@ class MusicBrainzClient:
             elif " by " in q_clean.lower():
                 p1, p2 = re.split(r'\s+by\s+', q_clean, flags=re.IGNORECASE, maxsplit=1)
                 target_t, target_a = p1.strip().lower(), p2.strip().lower()
+            else:
+                target_t = q_clean.lower()
+
+        # Check for feat/ft in query
+        full_q = (query or f"{artist} {title}").lower()
+        feat_match = re.search(r'\b(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\]|$)', full_q)
+        if feat_match:
+            target_feat = feat_match.group(1).strip()
+            # Strip ft. ... from target_t to isolate primary title
+            target_t = re.sub(r'\s*(?:\(|\[)?(?:feat\.|ft\.|featuring).*$', '', target_t).strip()
 
         # Run multi-source searches in parallel
         tasks = [
@@ -434,16 +472,32 @@ class MusicBrainzClient:
             m_a = m.artist.lower()
             m_t = m.title.lower()
             m_pt = m.primary_title.lower()
+            m_feat = (m.featured_artists or "").lower()
 
-            artist_match = target_a and (target_a in m_a or m_a in target_a or (m.featured_artists and target_a in m.featured_artists.lower()))
-            title_match = target_t and (target_t in m_t or m_t in target_t or target_t in m_pt or m_pt in target_t)
+            artist_match = bool(target_a and (target_a in m_a or m_a in target_a or target_a in m_feat))
+            title_match = bool(target_t and (target_t in m_t or m_t in target_t or target_t in m_pt or m_pt in target_t))
+
+            # Featured artist match bonus
+            feat_match_score = False
+            if target_feat and m_feat:
+                for f_part in re.split(r'[,&]\s*', target_feat):
+                    f_clean = f_part.strip()
+                    if f_clean and (f_clean in m_feat or m_feat in f_clean or f_clean in m_t):
+                        feat_match_score = True
+                        break
 
             if artist_match and title_match:
                 m.score = 100
+            elif title_match and feat_match_score:
+                m.score = 100
+            elif artist_match and feat_match_score:
+                m.score = 95
             elif artist_match:
                 m.score = 85
             elif title_match:
                 m.score = 80
+            elif feat_match_score:
+                m.score = 75
             else:
                 m.score = max(35, m.score - 20)
 
