@@ -57,11 +57,13 @@ async def test_search_structured(mb_client):
     mock_resp.status_code = 200
     mock_resp.json.return_value = mock_payload
 
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get, \
+         patch.object(mb_client, "_search_ytmusic", new_callable=AsyncMock, return_value=[]), \
+         patch.object(mb_client, "_search_deezer", new_callable=AsyncMock, return_value=[]):
         mock_get.return_value = mock_resp
         results = await mb_client.search(artist="C-Mob", title="For Some Strange Reason")
 
-        assert len(results) == 1
+        assert len(results) >= 1
         res = results[0]
         assert res.primary_title == "For Some Strange Reason"
         assert res.artist == "C-Mob"

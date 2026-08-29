@@ -58,12 +58,33 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   List<MusicBrainzMatch>? _mbMatches;
   String? _mbSearchMessage;
 
+  static String _cleanRipperJunk(String name) {
+    var s = name.replaceAll(
+      RegExp(r'^(?:y2mate(?:\.com|\.is)?|snapsave(?:\.app|\.io)?|tuberipper(?:\.com)?|youtube)\s*[-_–]\s*', caseSensitive: false),
+      '',
+    );
+    s = s.replaceAll(
+      RegExp(r'\b(?:official\s+music\s+video|official\s+video|official\s+audio|lyrics\s+video|music\s+video|video\s+clip|official)\b', caseSensitive: false),
+      '',
+    );
+    s = s.replaceAll(
+      RegExp(r'\s*[\(\[](?:official.*?|lyrics.*?|hd|hq|1080p|720p|audio|video)[\)\]]', caseSensitive: false),
+      '',
+    );
+    if (s.contains('_') && !s.contains(' - ')) {
+      s = s.replaceAll('_', ' ');
+    }
+    return s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
   @override
   void initState() {
     super.initState();
     final isYtm = widget.ytmUpload != null;
     final rawFilename = isYtm ? widget.ytmUpload!.title : widget.song!.filename;
-    final rawName = rawFilename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    String rawName = rawFilename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    rawName = _cleanRipperJunk(rawName);
+
     String initialTitle = (isYtm ? widget.ytmUpload!.title : widget.song!.title) ?? rawName;
     if (initialTitle.toLowerCase().endsWith('.mp3') ||
         initialTitle.toLowerCase().endsWith('.flac') ||
@@ -110,6 +131,13 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
 
     // If initial artist has feat/ft, normalize immediately
     _normalizeFeaturedArtists();
+
+    // Automatically search online metadata on open
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && (_mbMatches == null || _mbMatches!.isEmpty)) {
+        _searchMusicBrainz();
+      }
+    });
   }
 
   @override
@@ -123,7 +151,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   }
 
   _ParsedFilenameParts? _extractParts(String rawName) {
-    String cleanName = rawName.trim();
+    String cleanName = _cleanRipperJunk(rawName.trim());
     String? trackNum;
 
     final trackPrefixMatch = RegExp(r'^(\d+)\s*[-._\s]\s*(.+)$').firstMatch(cleanName);
@@ -758,10 +786,10 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                         children: [
                           Row(
                             children: [
-                              const Icon(Icons.library_music, size: 14, color: Color(0xFF00B4D8)),
+                              const Icon(Icons.travel_explore, size: 14, color: Color(0xFF00B4D8)),
                               const SizedBox(width: 6),
                               Text(
-                                'MusicBrainz Matches (${_mbMatches!.length})',
+                                'Online Matches (${_mbMatches!.length})',
                                 style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF00B4D8)),
                               ),
                             ],
@@ -823,6 +851,30 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                                             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: match.source == 'YouTube Music'
+                                                ? const Color(0xFFFF0000).withValues(alpha: 0.2)
+                                                : match.source == 'Deezer'
+                                                    ? const Color(0xFFA259FF).withValues(alpha: 0.2)
+                                                    : const Color(0xFF00B4D8).withValues(alpha: 0.2),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            match.source,
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                              color: match.source == 'YouTube Music'
+                                                  ? const Color(0xFFFF6B6B)
+                                                  : match.source == 'Deezer'
+                                                      ? const Color(0xFFD3A4FF)
+                                                      : const Color(0xFF64DFDF),
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(width: 4),

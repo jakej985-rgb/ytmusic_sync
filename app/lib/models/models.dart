@@ -384,6 +384,7 @@ class MusicBrainzMatch {
   final int? trackNumber;
   final String? releaseDate;
   final String? coverUrl;
+  final String source;
   final int score;
 
   MusicBrainzMatch({
@@ -396,6 +397,7 @@ class MusicBrainzMatch {
     this.trackNumber,
     this.releaseDate,
     this.coverUrl,
+    this.source = 'YouTube Music',
     required this.score,
   });
 
@@ -410,6 +412,7 @@ class MusicBrainzMatch {
       trackNumber: json['track_number'],
       releaseDate: json['release_date'],
       coverUrl: json['cover_url'],
+      source: json['source'] ?? 'YouTube Music',
       score: json['score'] ?? 100,
     );
   }

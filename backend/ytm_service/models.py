@@ -106,5 +106,6 @@ class MusicBrainzMatch(BaseModel):
     track_number: Optional[int] = None
     release_date: Optional[str] = None
     cover_url: Optional[str] = None
+    source: Optional[str] = "YouTube Music"
     score: int = 100
 

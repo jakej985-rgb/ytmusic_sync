@@ -4,6 +4,7 @@ import re
 import time
 from typing import List, Optional
 import httpx
+from ytmusicapi import YTMusic
 
 from .models import MusicBrainzMatch
 
@@ -11,6 +12,7 @@ logger = logging.getLogger("ytm_sync")
 
 MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2/recording"
 ITUNES_API_URL = "https://itunes.apple.com/search"
+DEEZER_API_URL = "https://api.deezer.com/search"
 USER_AGENT = "YTMusicSync/0.0.1 ( mailto:jakej985@gmail.com; https://github.com/jakej985-rgb/ytmusic_sync )"
 
 class MusicBrainzClient:
@@ -31,18 +33,20 @@ class MusicBrainzClient:
         cleaned = re.sub(r'[\/\\:;*?+^=!~(){}\[\]"]', ' ', text)
         return re.sub(r'\s+', ' ', cleaned).strip()
 
+    def _clean_ripper_junk(self, name: str) -> str:
+        """Strips ripper prefixes, YouTube video junk, and normalizes underscores."""
+        s = re.sub(r'^(?:y2mate(?:\.com|\.is)?|snapsave(?:\.app|\.io)?|tuberipper(?:\.com)?|youtube)\s*[-_–]\s*', '', name, flags=re.IGNORECASE)
+        s = re.sub(r'\b(?:official\s+music\s+video|official\s+video|official\s+audio|lyrics\s+video|music\s+video|video\s+clip|official)\b', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'\s*[\(\[](?:official.*?|lyrics.*?|hd|hq|1080p|720p|audio|video)[\)\]]', '', s, flags=re.IGNORECASE)
+        if '_' in s and ' - ' not in s:
+            s = s.replace('_', ' ')
+        return re.sub(r'\s+', ' ', s).strip()
+
     def _parse_artist_credits(self, credits_list: list) -> tuple[str, Optional[str]]:
-        """
-        Parses MusicBrainz artist-credit array into (primary_artist, featured_artists).
-        Example:
-          [{"name": "C-Mob", "joinphrase": " feat. "}, {"name": "Brotha Lynch Hung", "joinphrase": ""}]
-          -> ("C-Mob", "Brotha Lynch Hung")
-        """
         if not credits_list:
             return ("Unknown Artist", None)
 
         primary_artist = credits_list[0].get("name", "").strip()
-        
         if len(credits_list) == 1:
             feat_match = re.search(r'^(.*?)\s+(?:feat\.|ft\.|featuring)\s+(.+)$', primary_artist, re.IGNORECASE)
             if feat_match:
@@ -59,20 +63,10 @@ class MusicBrainzClient:
         return (primary_artist, featured_str)
 
     def _select_best_release(self, releases: list) -> tuple[Optional[str], Optional[str], Optional[int], Optional[str]]:
-        """
-        Selects the best studio album from a list of release dictionaries.
-        Prioritizes:
-          1. Official Studio Albums (status=Official, type=Album, no live/compilation)
-          2. Any Official Album
-          3. Any Official release
-          4. First available release
-        """
         if not releases:
             return None, None, None, None
 
         best_rel = None
-
-        # Pass 1: Studio Album
         for rel in releases:
             status = rel.get("status", "")
             rg = rel.get("release-group", {})
@@ -82,7 +76,6 @@ class MusicBrainzClient:
                 best_rel = rel
                 break
 
-        # Pass 2: Any official album
         if not best_rel:
             for rel in releases:
                 status = rel.get("status", "")
@@ -92,14 +85,12 @@ class MusicBrainzClient:
                     best_rel = rel
                     break
 
-        # Pass 3: Any official release
         if not best_rel:
             for rel in releases:
                 if rel.get("status") == "Official":
                     best_rel = rel
                     break
 
-        # Fallback to first release
         if not best_rel:
             best_rel = releases[0]
 
@@ -118,107 +109,248 @@ class MusicBrainzClient:
 
         return album, release_date, track_number, cover_url
 
-    async def search(
+    async def _search_ytmusic(
         self,
         query: Optional[str] = None,
         artist: Optional[str] = None,
         title: Optional[str] = None,
         limit: int = 5
     ) -> List[MusicBrainzMatch]:
-        """
-        Search for recording matches using MusicBrainz with automatic retry, studio album
-        prioritization, and iTunes fast fallback.
-        """
-        cache_key = f"{query or ''}|{artist or ''}|{title or ''}|{limit}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        """Search YouTube Music's own official catalog for 100% exact song & album metadata."""
+        search_terms = []
+        if artist and title:
+            search_terms.append(f"{artist} - {title}")
+        elif title:
+            search_terms.append(title)
+        elif artist:
+            search_terms.append(artist)
+        elif query:
+            search_terms.append(query)
 
+        term = self._clean_ripper_junk(" ".join(search_terms).strip())
+        if not term:
+            return []
+
+        def _sync_ytm():
+            try:
+                yt = YTMusic()
+                return yt.search(term, filter="songs", limit=limit)
+            except Exception as e:
+                logger.warning(f"YouTube Music catalog search error: {e}")
+                return []
+
+        items = await asyncio.to_thread(_sync_ytm)
+        matches: List[MusicBrainzMatch] = []
+        for s in items:
+            track_name = s.get("title", "").strip()
+            artists = [a.get("name") for a in s.get("artists", []) if isinstance(a, dict)]
+            artist_name = ", ".join(artists) if artists else "Unknown Artist"
+            album_name = s.get("album", {}).get("name") if isinstance(s.get("album"), dict) else (s.get("album") or None)
+
+            thumb = None
+            if s.get("thumbnails"):
+                thumb = s.get("thumbnails")[-1].get("url")
+                if thumb and "=w120-h120" in thumb:
+                    thumb = re.sub(r'=w\d+-h\d+', '=w600-h600', thumb)
+
+            feat_match = re.search(r'^(.*?)\s+(?:\(|\[)?(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\])?$', track_name, re.IGNORECASE)
+            primary_title = track_name
+            featured_artists = None
+            if feat_match:
+                primary_title = feat_match.group(1).strip()
+                featured_artists = feat_match.group(2).strip()
+
+            matches.append(
+                MusicBrainzMatch(
+                    mbid=f"ytm:{s.get('videoId') or track_name}",
+                    title=track_name,
+                    primary_title=primary_title,
+                    artist=artist_name,
+                    featured_artists=featured_artists,
+                    album=album_name,
+                    cover_url=thumb,
+                    source="YouTube Music",
+                    score=98
+                )
+            )
+        return matches
+
+    async def _search_deezer(
+        self,
+        query: Optional[str] = None,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        limit: int = 5
+    ) -> List[MusicBrainzMatch]:
+        """Search Deezer API (90M+ tracks, instant response, lossless album covers)."""
+        search_terms = []
+        if artist and title:
+            search_terms.append(f"{artist} {title}")
+        elif title:
+            search_terms.append(title)
+        elif artist:
+            search_terms.append(artist)
+        elif query:
+            search_terms.append(query)
+
+        term = self._clean_ripper_junk(" ".join(search_terms).strip())
+        if not term:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                r = await client.get(DEEZER_API_URL, params={"q": term, "limit": limit})
+                if r.status_code != 200:
+                    return []
+                items = r.json().get("data", [])
+                matches: List[MusicBrainzMatch] = []
+                for d in items:
+                    track_name = d.get("title", "").strip()
+                    artist_name = d.get("artist", {}).get("name", "").strip()
+                    album_name = d.get("album", {}).get("title")
+                    cover = d.get("album", {}).get("cover_big") or d.get("album", {}).get("cover_medium")
+                    track_num = d.get("track_position")
+
+                    feat_match = re.search(r'^(.*?)\s+(?:\(|\[)?(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\])?$', track_name, re.IGNORECASE)
+                    primary_title = track_name
+                    featured_artists = None
+                    if feat_match:
+                        primary_title = feat_match.group(1).strip()
+                        featured_artists = feat_match.group(2).strip()
+
+                    matches.append(
+                        MusicBrainzMatch(
+                            mbid=f"deezer:{d.get('id')}",
+                            title=track_name,
+                            primary_title=primary_title,
+                            artist=artist_name,
+                            featured_artists=featured_artists,
+                            album=album_name,
+                            track_number=track_num,
+                            cover_url=cover,
+                            source="Deezer",
+                            score=95
+                        )
+                    )
+                return matches
+        except Exception as e:
+            logger.warning(f"Deezer search error: {e}")
+            return []
+
+    async def _search_itunes(
+        self,
+        query: Optional[str] = None,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        limit: int = 5
+    ) -> List[MusicBrainzMatch]:
+        """Search iTunes / Apple Music catalog for official tracks."""
+        search_terms = []
+        if title:
+            search_terms.append(title)
+        if artist:
+            search_terms.append(artist)
+        if not search_terms and query:
+            search_terms.append(query)
+
+        term = self._clean_ripper_junk(" ".join(search_terms).strip())
+        if not term:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(
+                    ITUNES_API_URL,
+                    params={"term": term, "entity": "song", "limit": limit}
+                )
+                if response.status_code != 200:
+                    return []
+
+                items = response.json().get("results", [])
+                matches: List[MusicBrainzMatch] = []
+                for item in items:
+                    track_name = item.get("trackName", "").strip()
+                    artist_name = item.get("artistName", "").strip()
+                    album_name = item.get("collectionName")
+                    track_num = item.get("trackNumber")
+                    rel_date = item.get("releaseDate")
+                    if rel_date and len(rel_date) >= 10:
+                        rel_date = rel_date[:10]
+
+                    feat_match = re.search(r'^(.*?)\s+(?:\(|\[)?(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\])?$', track_name, re.IGNORECASE)
+                    primary_title = track_name
+                    featured_artists = None
+                    if feat_match:
+                        primary_title = feat_match.group(1).strip()
+                        featured_artists = feat_match.group(2).strip()
+
+                    cover_url = item.get("artworkUrl100", "").replace("100x100bb", "600x600bb") or None
+
+                    matches.append(
+                        MusicBrainzMatch(
+                            mbid=f"itunes:{item.get('trackId')}",
+                            title=track_name,
+                            primary_title=primary_title,
+                            artist=artist_name,
+                            featured_artists=featured_artists,
+                            album=album_name,
+                            track_number=track_num,
+                            release_date=rel_date,
+                            cover_url=cover_url,
+                            source="Apple Music",
+                            score=92
+                        )
+                    )
+                return matches
+        except Exception as e:
+            logger.warning(f"iTunes query failed: {e}")
+            return []
+
+    async def _search_musicbrainz(
+        self,
+        query: Optional[str] = None,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        limit: int = 5
+    ) -> List[MusicBrainzMatch]:
+        """Search MusicBrainz with retry on 503."""
         clean_artist = self._sanitize_term(artist) if artist else ""
         clean_title = self._sanitize_term(title) if title else ""
         lucene_query = ""
 
         if clean_title and clean_artist:
-            # Query title with artist/artistname
             lucene_query = f'recording:"{clean_title}" AND (artist:"{clean_artist}" OR artistname:"{clean_artist}")'
         elif clean_title:
             lucene_query = f'recording:"{clean_title}"'
         elif clean_artist:
             lucene_query = f'artist:"{clean_artist}"'
         elif query:
-            clean_q = self._sanitize_term(query)
-            by_match = re.search(r'^(.*?)\s+(?:by|-)\s+(.+)$', clean_q, re.IGNORECASE)
-            if by_match:
-                part_a = by_match.group(1).strip()
-                part_b = by_match.group(2).strip()
-                lucene_query = f'recording:"{part_a}" AND (artist:"{part_b}" OR artistname:"{part_b}")'
+            clean_q = self._clean_ripper_junk(self._sanitize_term(query))
+            if " - " in clean_q:
+                p_a, p_b = clean_q.split(" - ", 1)
+                # Try artist - title
+                lucene_query = f'(recording:"{p_b.strip()}" AND artist:"{p_a.strip()}") OR (recording:"{p_a.strip()}" AND artist:"{p_b.strip()}")'
             else:
                 lucene_query = clean_q
         else:
             return []
 
-        results = await self._execute_query(lucene_query, limit)
+        params = {"query": lucene_query, "fmt": "json", "limit": limit}
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
-        # If strict lucene returned nothing and we have artist + title, try looser search
-        if not results and clean_title and clean_artist:
-            looser_query = f'recording:{clean_title} AND artist:{clean_artist}'
-            results = await self._execute_query(looser_query, limit)
-
-        # If an artist was explicitly specified, re-rank to ensure matches containing the requested artist are on top
-        if clean_artist and results:
-            target_artist_lower = clean_artist.lower()
-            matching_artist_results = []
-            other_results = []
-            for m in results:
-                if target_artist_lower in m.artist.lower() or (m.featured_artists and target_artist_lower in m.featured_artists.lower()):
-                    matching_artist_results.append(m)
-                else:
-                    m.score = max(30, m.score - 40)
-                    other_results.append(m)
-            results = matching_artist_results + other_results
-
-        # Fallback to iTunes if MusicBrainz returned 0 matches or only non-matching covers
-        if len(results) < 2:
-            itunes_results = await self._search_itunes(query=query, artist=clean_artist or artist, title=clean_title or title, limit=limit)
-            if itunes_results:
-                # Merge deduplicated by title and artist
-                existing_keys = {(r.title.lower(), r.artist.lower()) for r in results}
-                for itm in itunes_results:
-                    key = (itm.title.lower(), itm.artist.lower())
-                    if key not in existing_keys:
-                        results.append(itm)
-                        existing_keys.add(key)
-                results = results[:limit]
-
-        self._cache[cache_key] = results
-        return results
-
-    async def _execute_query(self, query_str: str, limit: int) -> List[MusicBrainzMatch]:
-        """Executes a search against MusicBrainz with retry on 503 Service Unavailable."""
-        params = {
-            "query": query_str,
-            "fmt": "json",
-            "limit": limit
-        }
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json"
-        }
-
-        for attempt in range(3):
+        for attempt in range(2):
             await self._throttle()
             try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with httpx.AsyncClient(timeout=12.0) as client:
                     response = await client.get(MUSICBRAINZ_API_URL, params=params, headers=headers)
                     if response.status_code == 200:
                         data = response.json()
                         recordings = data.get("recordings", [])
                         matches: List[MusicBrainzMatch] = []
-
                         for rec in recordings:
                             mbid = rec.get("id", "")
                             primary_title = rec.get("title", "").strip()
                             score = int(rec.get("score", 100))
-
                             credits_list = rec.get("artist-credit", [])
                             primary_artist, featured_artists = self._parse_artist_credits(credits_list)
 
@@ -241,124 +373,113 @@ class MusicBrainzClient:
                                     track_number=track_number,
                                     release_date=release_date,
                                     cover_url=cover_url,
-                                    score=score
+                                    source="MusicBrainz",
+                                    score=min(90, score)
                                 )
                             )
-
                         return matches
-
                     elif response.status_code == 503:
-                        logger.warning(f"MusicBrainz server busy (503), retrying attempt {attempt + 1}/3...")
-                        await asyncio.sleep(1.5 + attempt * 0.5)
+                        await asyncio.sleep(1.0)
                         continue
                     else:
-                        logger.warning(f"MusicBrainz search returned status {response.status_code}: {response.text[:100]}")
                         break
-
             except Exception as e:
-                logger.warning(f"MusicBrainz query exception on attempt {attempt + 1}: {e}")
-                await asyncio.sleep(1.0)
+                logger.debug(f"MusicBrainz query error: {e}")
+                await asyncio.sleep(0.8)
 
         return []
 
-    async def _search_itunes(
+    async def search(
         self,
         query: Optional[str] = None,
         artist: Optional[str] = None,
         title: Optional[str] = None,
-        limit: int = 5
+        limit: int = 6
     ) -> List[MusicBrainzMatch]:
         """
-        Fast, reliable metadata fallback using the iTunes Search API.
-        Never throttled and provides studio albums and clean track numbers.
+        Unified multi-source metadata search across YouTube Music, Deezer, Apple Music, and MusicBrainz.
         """
-        search_terms = []
-        if title:
-            search_terms.append(title)
-        if artist:
-            search_terms.append(artist)
-        if not search_terms and query:
-            search_terms.append(query)
+        cache_key = f"{query or ''}|{artist or ''}|{title or ''}|{limit}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
 
-        term = " ".join(search_terms).strip()
-        if not term:
-            return []
+        # Target terms for scoring
+        target_a = (artist or "").strip().lower()
+        target_t = (title or "").strip().lower()
+        if not target_a and not target_t and query:
+            q_clean = self._clean_ripper_junk(query.strip())
+            if " - " in q_clean:
+                p1, p2 = q_clean.split(" - ", 1)
+                target_a, target_t = p1.strip().lower(), p2.strip().lower()
+            elif " by " in q_clean.lower():
+                p1, p2 = re.split(r'\s+by\s+', q_clean, flags=re.IGNORECASE, maxsplit=1)
+                target_t, target_a = p1.strip().lower(), p2.strip().lower()
 
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(
-                    ITUNES_API_URL,
-                    params={"term": term, "entity": "song", "limit": limit}
-                )
-                if response.status_code != 200:
-                    return []
+        # Run multi-source searches in parallel
+        tasks = [
+            self._search_ytmusic(query=query, artist=artist, title=title, limit=limit),
+            self._search_deezer(query=query, artist=artist, title=title, limit=limit),
+            self._search_itunes(query=query, artist=artist, title=title, limit=limit),
+            self._search_musicbrainz(query=query, artist=artist, title=title, limit=limit),
+        ]
+        results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
-                items = response.json().get("results", [])
-                matches: List[MusicBrainzMatch] = []
+        all_candidates: List[MusicBrainzMatch] = []
+        for r in results_nested:
+            if isinstance(r, list):
+                all_candidates.extend(r)
 
-                for item in items:
-                    track_name = item.get("trackName", "").strip()
-                    artist_name = item.get("artistName", "").strip()
-                    album_name = item.get("collectionName")
-                    track_num = item.get("trackNumber")
-                    rel_date = item.get("releaseDate")
-                    if rel_date and len(rel_date) >= 10:
-                        rel_date = rel_date[:10]
+        # Score candidates
+        for m in all_candidates:
+            m_a = m.artist.lower()
+            m_t = m.title.lower()
+            m_pt = m.primary_title.lower()
 
-                    # Parse possible featured artists in track name
-                    feat_match = re.search(r'^(.*?)\s+(?:\(|\[)?(?:feat\.|ft\.|featuring)\s+(.+?)(?:\)|\])?$', track_name, re.IGNORECASE)
-                    primary_title = track_name
-                    featured_artists = None
-                    if feat_match:
-                        primary_title = feat_match.group(1).strip()
-                        featured_artists = feat_match.group(2).strip()
+            artist_match = target_a and (target_a in m_a or m_a in target_a or (m.featured_artists and target_a in m.featured_artists.lower()))
+            title_match = target_t and (target_t in m_t or m_t in target_t or target_t in m_pt or m_pt in target_t)
 
-                    cover_url = item.get("artworkUrl100", "").replace("100x100bb", "600x600bb") or None
+            if artist_match and title_match:
+                m.score = 100
+            elif artist_match:
+                m.score = 85
+            elif title_match:
+                m.score = 80
+            else:
+                m.score = max(35, m.score - 20)
 
-                    matches.append(
-                        MusicBrainzMatch(
-                            mbid=f"itunes:{item.get('trackId')}",
-                            title=track_name,
-                            primary_title=primary_title,
-                            artist=artist_name,
-                            featured_artists=featured_artists,
-                            album=album_name,
-                            track_number=track_num,
-                            release_date=rel_date,
-                            cover_url=cover_url,
-                            score=98
-                        )
-                    )
+        # Deduplicate candidates across providers by (normalized primary title, normalized artist)
+        unique_matches: List[MusicBrainzMatch] = []
+        seen = set()
+        for m in sorted(all_candidates, key=lambda x: x.score, reverse=True):
+            norm_key = (
+                re.sub(r'[\W_]+', '', m.primary_title.lower()),
+                re.sub(r'[\W_]+', '', m.artist.lower())
+            )
+            if norm_key not in seen:
+                seen.add(norm_key)
+                unique_matches.append(m)
 
-                return matches
-
-        except Exception as e:
-            logger.warning(f"iTunes fallback query failed: {e}")
-            return []
+        final_results = unique_matches[:limit]
+        self._cache[cache_key] = final_results
+        return final_results
 
     async def fetch_cover_art_url(self, artist: str, title: Optional[str] = None, album: Optional[str] = None) -> Optional[str]:
-        """Query iTunes for high resolution 600x600 album artwork URL."""
-        terms = []
-        if title:
-            terms.append(title)
-        if artist:
-            terms.append(artist)
-        if album and not terms:
-            terms.append(album)
-        term = " ".join(terms).strip()
-        if not term:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get(ITUNES_API_URL, params={"term": term, "entity": "song", "limit": 1})
-                if r.status_code == 200:
-                    items = r.json().get("results", [])
-                    if items:
-                        art = items[0].get("artworkUrl100", "").replace("100x100bb", "600x600bb")
-                        if art:
-                            return art
-        except Exception as e:
-            logger.warning(f"Error fetching cover art URL: {e}")
+        """Fetch high resolution album artwork URL across YTM, Deezer, and iTunes."""
+        # 1. Try Deezer
+        deezer_matches = await self._search_deezer(artist=artist, title=title or album, limit=1)
+        if deezer_matches and deezer_matches[0].cover_url:
+            return deezer_matches[0].cover_url
+
+        # 2. Try YouTube Music
+        ytm_matches = await self._search_ytmusic(artist=artist, title=title or album, limit=1)
+        if ytm_matches and ytm_matches[0].cover_url:
+            return ytm_matches[0].cover_url
+
+        # 3. Try iTunes
+        itunes_matches = await self._search_itunes(artist=artist, title=title or album, limit=1)
+        if itunes_matches and itunes_matches[0].cover_url:
+            return itunes_matches[0].cover_url
+
         return None
 
 musicbrainz_client = MusicBrainzClient()
