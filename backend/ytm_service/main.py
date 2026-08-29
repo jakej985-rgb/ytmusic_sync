@@ -509,8 +509,30 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         # Mark deleted in memory so stale YTM continuation caches cannot resurrect it
         ytm_client.mark_deleted(entity_id)
 
-        # 5. Clean up old record from local DB
-        await db.delete_ytm_upload_record(entity_id)
+        clean_title = req.title.strip()
+        clean_artist = req.artist.strip() if req.artist else None
+        clean_album = req.album.strip() if req.album else None
+        clean_thumb = req.cover_url.strip() if req.cover_url else upload.thumbnail
+
+        # Check if the retagged upload is still missing required metadata (artist, artwork, clean title)
+        still_missing = (
+            not clean_artist or clean_artist.lower() in ('unknown artist', 'unknown') or
+            not clean_thumb or
+            clean_title.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.webm'))
+        )
+
+        # 5. If still missing any metadata, update local DB so it stays on list with fresh data.
+        # If fully fixed, delete old untagged record so it disappears from missing metadata list.
+        if still_missing:
+            await db.update_ytm_upload(
+                entity_id=entity_id,
+                title=clean_title,
+                artist=clean_artist,
+                album=clean_album,
+                thumbnail=clean_thumb
+            )
+        else:
+            await db.delete_ytm_upload_record(entity_id)
 
         # Trigger delayed background refresh so YTM has time to process the newly uploaded file
         async def _delayed_refresh():
@@ -524,7 +546,12 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
 
         return {
             "status": "success",
-            "message": f"Successfully retagged and replaced '{req.title}' on YouTube Music."
+            "message": f"Successfully retagged and replaced '{clean_title}' on YouTube Music.",
+            "still_missing": still_missing,
+            "title": clean_title,
+            "artist": clean_artist,
+            "album": clean_album,
+            "thumbnail": clean_thumb
         }
     except HTTPException:
         raise

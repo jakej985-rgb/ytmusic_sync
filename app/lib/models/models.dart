@@ -461,16 +461,49 @@ class YtmUpload {
     );
   }
 
-  bool get isMissingMetadata {
-    final hasNoArtist = artist == null || artist!.trim().isEmpty || artist == 'Unknown Artist';
-    final hasNoAlbum = album == null || album!.trim().isEmpty;
+  bool get hasNoArtist => artist == null || artist!.trim().isEmpty || artist!.trim().toLowerCase() == 'unknown artist' || artist!.trim().toLowerCase() == 'unknown';
+  bool get hasNoArtwork => thumbnail == null || thumbnail!.trim().isEmpty;
+  bool get hasFileExt {
     final lowerTitle = title.toLowerCase();
-    final hasFileExt = lowerTitle.endsWith('.mp3') ||
+    return lowerTitle.endsWith('.mp3') ||
         lowerTitle.endsWith('.flac') ||
         lowerTitle.endsWith('.m4a') ||
         lowerTitle.endsWith('.wav') ||
-        lowerTitle.endsWith('.opus');
-    return hasNoArtist || hasNoAlbum || hasFileExt;
+        lowerTitle.endsWith('.opus') ||
+        lowerTitle.endsWith('.webm') ||
+        lowerTitle.startsWith('y2mate') ||
+        lowerTitle.startsWith('snapsave') ||
+        lowerTitle.startsWith('tuberipper');
+  }
+
+  bool get isMissingMetadata => hasNoArtist || hasNoArtwork || hasFileExt;
+
+  YtmUpload copyWith({
+    int? id,
+    String? entityId,
+    String? videoId,
+    String? title,
+    String? artist,
+    String? album,
+    double? duration,
+    String? likeStatus,
+    String? thumbnail,
+    String? firstSeen,
+    String? lastSeen,
+  }) {
+    return YtmUpload(
+      id: id ?? this.id,
+      entityId: entityId ?? this.entityId,
+      videoId: videoId ?? this.videoId,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      album: album ?? this.album,
+      duration: duration ?? this.duration,
+      likeStatus: likeStatus ?? this.likeStatus,
+      thumbnail: thumbnail ?? this.thumbnail,
+      firstSeen: firstSeen ?? this.firstSeen,
+      lastSeen: lastSeen ?? this.lastSeen,
+    );
   }
 
   String get displayTitle => title.isNotEmpty ? title : 'Untitled';

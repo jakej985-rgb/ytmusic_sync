@@ -30,8 +30,8 @@ class MetadataEditorDialog extends StatefulWidget {
     );
   }
 
-  static Future<bool?> showForYtmUpload(BuildContext context, YtmUpload upload) {
-    return showDialog<bool>(
+  static Future<dynamic> showForYtmUpload(BuildContext context, YtmUpload upload) {
+    return showDialog<dynamic>(
       context: context,
       builder: (context) => MetadataEditorDialog(ytmUpload: upload),
     );
@@ -570,7 +570,13 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
               backgroundColor: Colors.green,
             ),
           );
-          Navigator.of(context).pop(true);
+          Navigator.of(context).pop({
+            'saved': true,
+            'title': title,
+            'artist': artist.isNotEmpty ? artist : null,
+            'album': album.isNotEmpty ? album : null,
+            'coverUrl': _selectedCoverUrl,
+          });
         }
         return;
       }

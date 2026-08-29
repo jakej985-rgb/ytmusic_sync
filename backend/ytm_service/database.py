@@ -401,6 +401,26 @@ class Database:
 
             await db.commit()
 
+    async def update_ytm_upload(
+        self,
+        entity_id: str,
+        title: str,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        thumbnail: Optional[str] = None
+    ):
+        """Update metadata for an existing YTM upload in the local database."""
+        async with self.get_connection() as db:
+            await db.execute(
+                """
+                UPDATE ytm_uploads
+                SET title = ?, artist = ?, album = ?, thumbnail = ?
+                WHERE entity_id = ?
+                """,
+                (title, artist, album, thumbnail, entity_id)
+            )
+            await db.commit()
+
     async def get_ytm_uploads_summary(self) -> dict:
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
@@ -410,6 +430,7 @@ class Database:
                     COUNT(*) as total,
                     COUNT(CASE WHEN (
                         artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+                        OR thumbnail IS NULL OR thumbnail = ''
                         OR title IS NULL OR title = ''
                         OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
                         OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
@@ -439,6 +460,7 @@ class Database:
         missing_condition = """
         (
             artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+            OR thumbnail IS NULL OR thumbnail = ''
             OR title IS NULL OR title = ''
             OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
             OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'

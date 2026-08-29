@@ -44,6 +44,7 @@ async def test_ytm_uploads_filtering_and_summary(temp_db):
         "title": "Clean Song",
         "artist": "Good Artist",
         "album": "Great Album",
+        "thumbnail": "https://example.com/cover.jpg",
         "duration": 210.0
     })
 
@@ -90,18 +91,64 @@ async def test_replace_ytm_upload_endpoint(temp_db, tmp_path):
                     "title": "Clean Song Title",
                     "artist": "Real Artist",
                     "album": "Real Album",
-                    "track_number": 3
+                    "track_number": 3,
+                    "cover_url": "https://example.com/art.jpg"
                 }
             )
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
+        assert data["still_missing"] is False
         mock_tag.assert_called_once()
 
-        # Old record should be deleted from DB
+        # Fully tagged record should be deleted from untagged list in DB
         remaining = await temp_db.get_ytm_upload_by_entity_id("ent_to_replace")
         assert remaining is None
+
+@pytest.mark.asyncio
+async def test_replace_ytm_upload_still_missing_artwork(temp_db, tmp_path):
+    # Insert test upload
+    await temp_db.upsert_ytm_upload({
+        "entity_id": "ent_missing_art",
+        "video_id": "vid_art_1",
+        "title": "Song_No_Art.mp3",
+        "artist": None,
+        "album": None,
+        "thumbnail": None
+    })
+
+    dummy_file = tmp_path / "dummy_audio2.mp3"
+    dummy_file.write_bytes(b"dummy audio content")
+
+    with patch("ytm_service.main.download_ytm_upload", AsyncMock(return_value=dummy_file)), \
+         patch("ytm_service.main.write_metadata_tags"), \
+         patch("ytm_service.main.ytm_client.upload_file", AsyncMock(return_value={"success": True, "response": "STATUS_SUCCEEDED"})), \
+         patch("ytm_service.main.ytm_client.delete_upload", AsyncMock(return_value={"success": True})), \
+         patch("ytm_service.main.ytm_client.fetch_and_cache_uploads", AsyncMock()):
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/ytm/uploads/ent_missing_art/replace",
+                json={
+                    "title": "Updated Title",
+                    "artist": "Updated Artist",
+                    "album": "Updated Album",
+                    "cover_url": None  # No artwork
+                }
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["still_missing"] is True
+
+        # Should keep record in DB with refreshed data!
+        updated = await temp_db.get_ytm_upload_by_entity_id("ent_missing_art")
+        assert updated is not None
+        assert updated.title == "Updated Title"
+        assert updated.artist == "Updated Artist"
+        assert updated.thumbnail is None
 
 @pytest.mark.asyncio
 async def test_delete_ytm_upload_endpoint(temp_db):

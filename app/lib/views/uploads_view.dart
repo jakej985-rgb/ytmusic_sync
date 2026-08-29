@@ -104,19 +104,47 @@ class _UploadsViewState extends State<UploadsView> {
   }
 
   Future<void> _openRetagDialog(YtmUpload upload) async {
-    final changed = await MetadataEditorDialog.showForYtmUpload(context, upload);
-    if (changed == true) {
-      // Optimistically remove the replaced upload immediately from the list
-      setState(() {
-        _uploads.removeWhere((u) => u.entityId == upload.entityId);
-        final currentMissing = _summary['missing_metadata'] ?? 0;
-        final currentProper = _summary['proper'] ?? 0;
-        _summary = {
-          ..._summary,
-          'missing_metadata': currentMissing > 0 ? currentMissing - 1 : 0,
-          'proper': currentProper + 1,
-        };
-      });
+    final result = await MetadataEditorDialog.showForYtmUpload(context, upload);
+    if (result != null) {
+      if (result is Map<String, dynamic> && result['saved'] == true) {
+        final newTitle = result['title'] as String? ?? upload.title;
+        final newArtist = result['artist'] as String?;
+        final newAlbum = result['album'] as String?;
+        final newCoverUrl = result['coverUrl'] as String? ?? upload.thumbnail;
+
+        final updatedUpload = upload.copyWith(
+          title: newTitle,
+          artist: newArtist,
+          album: newAlbum,
+          thumbnail: newCoverUrl,
+        );
+
+        final stillMissing = updatedUpload.isMissingMetadata;
+
+        setState(() {
+          final index = _uploads.indexWhere((u) => u.entityId == upload.entityId);
+          if (stillMissing) {
+            // Keep on list, but refresh immediately with changed data!
+            if (index != -1) {
+              _uploads[index] = updatedUpload;
+            }
+          } else {
+            // Completely clean! Remove from untagged list if currently viewing missing metadata
+            if (_activeFilter == 'missing_metadata') {
+              _uploads.removeWhere((u) => u.entityId == upload.entityId);
+              final currentMissing = _summary['missing_metadata'] ?? 0;
+              final currentProper = _summary['proper'] ?? 0;
+              _summary = {
+                ..._summary,
+                'missing_metadata': currentMissing > 0 ? currentMissing - 1 : 0,
+                'proper': currentProper + 1,
+              };
+            } else if (index != -1) {
+              _uploads[index] = updatedUpload;
+            }
+          }
+        });
+      }
       _loadSummaryAndData(page: _currentPage);
     }
   }
@@ -470,12 +498,9 @@ class _UploadsViewState extends State<UploadsView> {
       itemBuilder: (context, index) {
         final upload = _uploads[index];
         final isUntagged = upload.isMissingMetadata;
-        final isRawFilename = upload.title.toLowerCase().endsWith('.mp3') ||
-            upload.title.toLowerCase().endsWith('.flac') ||
-            upload.title.toLowerCase().endsWith('.m4a');
-        final hasNoArtist = upload.artist == null ||
-            upload.artist!.trim().isEmpty ||
-            upload.artist == 'Unknown Artist';
+        final isRawFilename = upload.hasFileExt;
+        final hasNoArtist = upload.hasNoArtist;
+        final hasNoArtwork = upload.hasNoArtwork;
 
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -580,6 +605,27 @@ class _UploadsViewState extends State<UploadsView> {
                               style: const TextStyle(fontSize: 12, color: Colors.white70),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+
+                        // Missing Artwork Tag
+                        if (hasNoArtwork) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: Colors.amber.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.image_not_supported_outlined, size: 10, color: Colors.amber),
+                                SizedBox(width: 4),
+                                Text('Missing Artwork', style: TextStyle(fontSize: 10, color: Colors.amber, fontWeight: FontWeight.w600)),
+                              ],
                             ),
                           ),
                         ],
