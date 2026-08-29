@@ -95,6 +95,115 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
     }
   }
 
+  final Set<int> _selectedSongIds = {};
+  bool _isBatchProcessing = false;
+
+  void _toggleSelectAll() {
+    setState(() {
+      final allIds = _songs.where((s) => s.id != null).map((s) => s.id!).toSet();
+      if (_selectedSongIds.containsAll(allIds)) {
+        _selectedSongIds.removeAll(allIds);
+      } else {
+        _selectedSongIds.addAll(allIds);
+      }
+    });
+  }
+
+  void _toggleSelectSong(int id) {
+    setState(() {
+      if (_selectedSongIds.contains(id)) {
+        _selectedSongIds.remove(id);
+      } else {
+        _selectedSongIds.add(id);
+      }
+    });
+  }
+
+  Future<void> _batchUploadSelected() async {
+    if (_selectedSongIds.isEmpty) return;
+    setState(() => _isBatchProcessing = true);
+    try {
+      final count = await apiService.batchUploadSongs(_selectedSongIds.toList());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Enqueued $count song${count > 1 ? 's' : ''} for upload!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      _selectedSongIds.clear();
+      await _loadSongs();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Batch upload failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isBatchProcessing = false);
+    }
+  }
+
+  Future<void> _batchDeleteSelected() async {
+    if (_selectedSongIds.isEmpty) return;
+    final count = _selectedSongIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF181822),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            const Icon(Icons.delete_forever, color: Colors.redAccent, size: 22),
+            const SizedBox(width: 8),
+            Text('Remove $count Song${count > 1 ? 's' : ''}?'),
+          ],
+        ),
+        content: Text(
+          'Remove $count selected track${count > 1 ? 's' : ''} from the library database? (Audio files on disk will NOT be deleted).',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Remove All'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isBatchProcessing = true);
+      try {
+        final deleted = await apiService.batchDeleteSongs(_selectedSongIds.toList());
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Removed $deleted song${deleted > 1 ? 's' : ''} from library.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+        _selectedSongIds.clear();
+        await _loadSongs();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Batch delete failed: $e'), backgroundColor: Colors.redAccent),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _isBatchProcessing = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -155,9 +264,90 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
                 tooltip: 'Refresh list',
                 onPressed: _loadSongs,
               ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white70,
+                  side: const BorderSide(color: Colors.white24),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                ),
+                onPressed: _toggleSelectAll,
+                icon: Icon(
+                  _songs.isNotEmpty && _selectedSongIds.containsAll(_songs.where((s) => s.id != null).map((s) => s.id!))
+                      ? Icons.deselect
+                      : Icons.select_all,
+                  size: 16,
+                ),
+                label: Text(
+                  _songs.isNotEmpty && _selectedSongIds.containsAll(_songs.where((s) => s.id != null).map((s) => s.id!))
+                      ? 'Deselect All'
+                      : 'Select All',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
             ],
           ),
         ),
+
+        // Multi-Select Action Bar (shown when 1 or more tracks selected)
+        if (_selectedSongIds.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1B1B28),
+              border: Border(bottom: BorderSide(color: const Color(0xFF00B4D8).withValues(alpha: 0.3))),
+            ),
+            child: Row(
+              children: [
+                Checkbox(
+                  value: _songs.isNotEmpty && _selectedSongIds.containsAll(_songs.where((s) => s.id != null).map((s) => s.id!)),
+                  activeColor: const Color(0xFF00B4D8),
+                  checkColor: Colors.black,
+                  side: const BorderSide(color: Colors.white38),
+                  onChanged: (_) => _toggleSelectAll(),
+                ),
+                Text(
+                  '${_selectedSongIds.length} tracks selected',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                TextButton(
+                  onPressed: () => setState(() => _selectedSongIds.clear()),
+                  child: const Text('Clear Selection', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                ),
+                const Spacer(),
+                if (_isBatchProcessing)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8)),
+                  )
+                else ...[
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF00B4D8),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    ),
+                    onPressed: _batchUploadSelected,
+                    icon: const Icon(Icons.cloud_upload, size: 16),
+                    label: Text('Upload Selected (${_selectedSongIds.length})'),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    ),
+                    onPressed: _batchDeleteSelected,
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: Text('Remove Selected (${_selectedSongIds.length})'),
+                  ),
+                ],
+              ],
+            ),
+          ),
 
         // Content Area
         Expanded(
@@ -194,13 +384,34 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
   }
 
   Widget _buildSongRow(MusicFile song) {
+    final isSelected = song.id != null && _selectedSongIds.contains(song.id!);
     return InkWell(
-      onTap: () => _showSongDetails(song),
+      onTap: () {
+        if (_selectedSongIds.isNotEmpty && song.id != null) {
+          _toggleSelectSong(song.id!);
+        } else {
+          _showSongDetails(song);
+        }
+      },
       borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 8.0),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF181F2C) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
         child: Row(
           children: [
+            if (song.id != null) ...[
+              Checkbox(
+                value: isSelected,
+                activeColor: const Color(0xFF00B4D8),
+                checkColor: Colors.black,
+                side: const BorderSide(color: Colors.white38),
+                onChanged: (_) => _toggleSelectSong(song.id!),
+              ),
+              const SizedBox(width: 4),
+            ],
             // Track format & track number icon / box
             Container(
               width: 52,

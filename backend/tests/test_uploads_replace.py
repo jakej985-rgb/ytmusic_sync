@@ -193,3 +193,84 @@ async def test_delete_ytm_upload_endpoint(temp_db):
 
         assert resp.status_code == 200
         assert (await temp_db.get_ytm_upload_by_entity_id("ent_delete_me")) is None
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_ytm_uploads_endpoint(temp_db):
+    await temp_db.upsert_ytm_upload({"entity_id": "ent_batch_1", "video_id": "vid_b1", "title": "B1"})
+    await temp_db.upsert_ytm_upload({"entity_id": "ent_batch_2", "video_id": "vid_b2", "title": "B2"})
+
+    with patch("ytm_service.main.ytm_client.delete_upload", AsyncMock(return_value={"success": True})):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/ytm/uploads/batch-delete",
+                json={"entity_ids": ["ent_batch_1", "ent_batch_2"]}
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] == 2
+        assert (await temp_db.get_ytm_upload_by_entity_id("ent_batch_1")) is None
+        assert (await temp_db.get_ytm_upload_by_entity_id("ent_batch_2")) is None
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_songs_endpoint(temp_db):
+    song1_id = await temp_db.upsert_music_file({
+        "path": "/music/s1.mp3",
+        "filename": "s1.mp3",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 100.0
+    })
+    song2_id = await temp_db.upsert_music_file({
+        "path": "/music/s2.mp3",
+        "filename": "s2.mp3",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 100.0
+    })
+
+    with patch("ytm_service.main.queue_manager.enqueue_song", AsyncMock(return_value=123)):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/upload/batch",
+                json={"file_ids": [song1_id, song2_id]}
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enqueued_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_songs_endpoint(temp_db):
+    song1_id = await temp_db.upsert_music_file({
+        "path": "/music/d1.mp3",
+        "filename": "d1.mp3",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 100.0
+    })
+    song2_id = await temp_db.upsert_music_file({
+        "path": "/music/d2.mp3",
+        "filename": "d2.mp3",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 100.0
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/songs/batch-delete",
+            json={"file_ids": [song1_id, song2_id]}
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] == 2
+    assert (await temp_db.get_music_file_by_id(song1_id)) is None
+    assert (await temp_db.get_music_file_by_id(song2_id)) is None

@@ -470,6 +470,25 @@ async def sync_remote_and_match(bg_tasks: BackgroundTasks):
     bg_tasks.add_task(_run_sync)
     return {"status": "started", "message": "Library synchronization started"}
 
+class BatchUploadRequest(BaseModel):
+    file_ids: list[int]
+
+@app.post("/api/upload/batch")
+async def upload_batch(req: BatchUploadRequest):
+    enqueued = 0
+    for fid in req.file_ids:
+        try:
+            await queue_manager.enqueue_song(fid)
+            enqueued += 1
+        except Exception as e:
+            logger.warning(f"Failed to enqueue song {fid}: {e}")
+    return {"status": "enqueued", "enqueued_count": enqueued}
+
+@app.post("/api/upload/all-missing")
+async def upload_all_missing():
+    count = await queue_manager.enqueue_all_missing()
+    return {"status": "enqueued", "enqueued_count": count}
+
 @app.post("/api/upload/{file_id}")
 async def upload_single(file_id: int):
     file = await db.get_music_file_by_id(file_id)
@@ -478,10 +497,20 @@ async def upload_single(file_id: int):
     job_id = await queue_manager.enqueue_song(file_id)
     return {"status": "enqueued", "job_id": job_id, "filename": file.filename}
 
-@app.post("/api/upload/all-missing")
-async def upload_all_missing():
-    count = await queue_manager.enqueue_all_missing()
-    return {"status": "enqueued", "enqueued_count": count}
+class BatchDeleteSongsRequest(BaseModel):
+    file_ids: list[int]
+
+@app.post("/api/songs/batch-delete")
+async def batch_delete_songs(req: BatchDeleteSongsRequest):
+    deleted = 0
+    async with db.get_connection() as conn:
+        for fid in req.file_ids:
+            await conn.execute("DELETE FROM matches WHERE music_file_id = ?", (fid,))
+            await conn.execute("DELETE FROM sync_jobs WHERE music_file_id = ?", (fid,))
+            await conn.execute("DELETE FROM music_files WHERE id = ?", (fid,))
+            deleted += 1
+        await conn.commit()
+    return {"status": "success", "deleted": deleted}
 
 @app.get("/api/uploads", response_model=list[YtmUpload])
 async def get_uploads() -> list[YtmUpload]:
@@ -767,9 +796,31 @@ async def delete_ytm_upload(entity_id: str):
     try:
         await ytm_client.delete_upload(entity_id)
         await db.delete_ytm_upload_record(entity_id)
+        ytm_client.mark_deleted(entity_id)
         return {"status": "success", "message": f"Deleted upload entity {entity_id}."}
     except Exception as e:
         logger.error(f"Failed to delete upload {entity_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete upload: {str(e)}")
+
+class BatchDeleteUploadsRequest(BaseModel):
+    entity_ids: list[str]
+
+@app.post("/api/ytm/uploads/batch-delete")
+async def batch_delete_ytm_uploads(req: BatchDeleteUploadsRequest):
+    """Batch delete uploads directly from YouTube Music and from the local database."""
+    deleted = 0
+    failed = 0
+    for eid in req.entity_ids:
+        try:
+            await ytm_client.delete_upload(eid)
+            await db.delete_ytm_upload_record(eid)
+            ytm_client.mark_deleted(eid)
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"Failed to delete upload {eid}: {e}")
+            failed += 1
+    return {"status": "success", "deleted": deleted, "failed": failed}
+
 @app.get("/api/artwork/{filename}")
 async def get_artwork_file(filename: str):
     """Serve custom uploaded artwork images."""

@@ -21,6 +21,9 @@ class _UploadsViewState extends State<UploadsView> {
   int _totalCount = 0;
   final int _pageSize = 30;
 
+  final Set<String> _selectedEntityIds = {};
+  bool _isBatchProcessing = false;
+
   bool _isLoading = false;
   bool _isSyncing = false;
   String? _errorMessage;
@@ -204,6 +207,171 @@ class _UploadsViewState extends State<UploadsView> {
             SnackBar(content: Text('Error deleting upload: $e'), backgroundColor: Colors.redAccent),
           );
         }
+      }
+    }
+  }
+
+  void _toggleSelectAllPage() {
+    setState(() {
+      final pageIds = _uploads.map((u) => u.entityId).toSet();
+      if (_selectedEntityIds.containsAll(pageIds)) {
+        _selectedEntityIds.removeAll(pageIds);
+      } else {
+        _selectedEntityIds.addAll(pageIds);
+      }
+    });
+  }
+
+  void _toggleSelectItem(String entityId) {
+    setState(() {
+      if (_selectedEntityIds.contains(entityId)) {
+        _selectedEntityIds.remove(entityId);
+      } else {
+        _selectedEntityIds.add(entityId);
+      }
+    });
+  }
+
+  Future<void> _batchDeleteSelected() async {
+    if (_selectedEntityIds.isEmpty) return;
+    final count = _selectedEntityIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF181822),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            const Icon(Icons.delete_forever, color: Colors.redAccent, size: 22),
+            const SizedBox(width: 8),
+            Text('Delete $count Upload${count > 1 ? 's' : ''}?'),
+          ],
+        ),
+        content: Text(
+          'Are you sure you want to permanently delete $count selected upload${count > 1 ? 's' : ''} from YouTube Music? This action cannot be undone.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Delete All'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isBatchProcessing = true);
+      try {
+        final toDelete = _selectedEntityIds.toList();
+        final res = await apiService.batchDeleteYtmUploads(toDelete);
+        final deletedCount = res['deleted'] ?? toDelete.length;
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Successfully deleted $deletedCount upload${deletedCount > 1 ? 's' : ''} from YouTube Music.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+        _selectedEntityIds.clear();
+        await _loadSummaryAndData(page: _currentPage);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to batch delete: $e'), backgroundColor: Colors.redAccent),
+          );
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _isBatchProcessing = false);
+        }
+      }
+    }
+  }
+
+  Future<void> _batchAutoUploadSelected() async {
+    if (_selectedEntityIds.isEmpty) return;
+    final selectedUploads = _uploads.where((u) => _selectedEntityIds.contains(u.entityId)).toList();
+    if (selectedUploads.isEmpty) return;
+
+    final count = selectedUploads.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF181822),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            const Icon(Icons.cloud_upload, color: Color(0xFF00B4D8), size: 22),
+            const SizedBox(width: 8),
+            Text('Auto-Tag & Upload $count Song${count > 1 ? 's' : ''}?'),
+          ],
+        ),
+        content: Text(
+          'This will automatically clean up titles, fetch high-res artwork, and replace/upload the $count selected song${count > 1 ? 's' : ''} to YouTube Music in sequence.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF00B4D8)),
+            child: const Text('Start Upload'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isBatchProcessing = true);
+      int successful = 0;
+      int failed = 0;
+      for (final upload in selectedUploads) {
+        try {
+          String cleanTitle = upload.title.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+          String cleanArtist = upload.artist ?? '';
+          if (cleanTitle.contains(' - ') && cleanArtist.isEmpty) {
+            final parts = cleanTitle.split(' - ');
+            cleanArtist = parts[0].trim();
+            cleanTitle = parts[1].trim();
+          }
+          final res = await apiService.replaceYtmUpload(
+            upload.entityId,
+            title: cleanTitle,
+            artist: cleanArtist.isNotEmpty ? cleanArtist : null,
+            album: upload.album,
+            coverUrl: upload.thumbnail,
+          );
+          if (res['success'] == true) {
+            successful++;
+          } else {
+            failed++;
+          }
+        } catch (_) {
+          failed++;
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Batch upload complete: $successful processed, $failed failed.'),
+            backgroundColor: successful > 0 ? Colors.green : Colors.redAccent,
+          ),
+        );
+      }
+      _selectedEntityIds.clear();
+      await _loadSummaryAndData(page: _currentPage);
+      if (mounted) {
+        setState(() => _isBatchProcessing = false);
       }
     }
   }
@@ -399,8 +567,103 @@ class _UploadsViewState extends State<UploadsView> {
                     ),
                   ),
                 ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white70,
+                    side: const BorderSide(color: Colors.white24),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  ),
+                  onPressed: _toggleSelectAllPage,
+                  icon: Icon(
+                    _uploads.isNotEmpty && _selectedEntityIds.containsAll(_uploads.map((u) => u.entityId))
+                        ? Icons.deselect
+                        : Icons.select_all,
+                    size: 16,
+                  ),
+                  label: Text(
+                    _uploads.isNotEmpty && _selectedEntityIds.containsAll(_uploads.map((u) => u.entityId))
+                        ? 'Deselect Page'
+                        : 'Select Page',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
               ],
             ),
+            if (_selectedEntityIds.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1B1B28),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.4)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Checkbox(
+                      value: _uploads.isNotEmpty && _selectedEntityIds.containsAll(_uploads.map((u) => u.entityId)),
+                      activeColor: const Color(0xFF00B4D8),
+                      checkColor: Colors.black,
+                      side: const BorderSide(color: Colors.white38),
+                      onChanged: (_) => _toggleSelectAllPage(),
+                    ),
+                    Text(
+                      '${_selectedEntityIds.length} selected',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                    ),
+                    const SizedBox(width: 12),
+                    TextButton(
+                      onPressed: () => setState(() => _selectedEntityIds.clear()),
+                      child: const Text('Deselect All', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                    ),
+                    const Spacer(),
+                    if (_isBatchProcessing)
+                      const Row(
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8)),
+                          ),
+                          SizedBox(width: 10),
+                          Text('Processing batch...', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                        ],
+                      )
+                    else ...[
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF00B4D8),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        ),
+                        onPressed: _batchAutoUploadSelected,
+                        icon: const Icon(Icons.cloud_upload, size: 16),
+                        label: Text('Upload Selected (${_selectedEntityIds.length})'),
+                      ),
+                      const SizedBox(width: 10),
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        ),
+                        onPressed: _batchDeleteSelected,
+                        icon: const Icon(Icons.delete_forever, size: 16),
+                        label: Text('Delete Selected (${_selectedEntityIds.length})'),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
 
             // Content Area
@@ -545,6 +808,7 @@ class _UploadsViewState extends State<UploadsView> {
       separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) {
         final upload = _uploads[index];
+        final isSelected = _selectedEntityIds.contains(upload.entityId);
         final isUntagged = upload.isMissingMetadata;
         final isRawFilename = upload.hasFileExt;
         final hasNoArtist = upload.hasNoArtist;
@@ -552,16 +816,29 @@ class _UploadsViewState extends State<UploadsView> {
         final hasNoArtwork = upload.hasNoArtwork;
 
         return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
-            color: const Color(0xFF14141C),
+            color: isSelected ? const Color(0xFF181F2C) : const Color(0xFF14141C),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: isUntagged ? Colors.amber.withValues(alpha: 0.3) : Colors.white10,
+              color: isSelected
+                  ? const Color(0xFF00B4D8)
+                  : (isUntagged ? Colors.amber.withValues(alpha: 0.3) : Colors.white10),
+              width: isSelected ? 1.5 : 1.0,
             ),
           ),
           child: Row(
             children: [
+              // Checkbox
+              Checkbox(
+                value: isSelected,
+                activeColor: const Color(0xFF00B4D8),
+                checkColor: Colors.black,
+                side: const BorderSide(color: Colors.white38),
+                onChanged: (_) => _toggleSelectItem(upload.entityId),
+              ),
+              const SizedBox(width: 6),
+
               // Icon or Cover Thumbnail
               ClipRRect(
                 borderRadius: BorderRadius.circular(6),

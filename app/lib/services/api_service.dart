@@ -419,6 +419,44 @@ class ApiService {
     final response = await http.delete(Uri.parse('$baseUrl/api/ytm/uploads/$entityId'));
     return response.statusCode == 200;
   }
+
+  Future<Map<String, dynamic>> batchDeleteYtmUploads(List<String> entityIds) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/ytm/uploads/batch-delete'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'entity_ids': entityIds}),
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Failed to batch delete uploads');
+  }
+
+  Future<int> batchUploadSongs(List<int> fileIds) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/upload/batch'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'file_ids': fileIds}),
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['enqueued_count'] ?? 0;
+    }
+    throw Exception('Failed to batch upload songs');
+  }
+
+  Future<int> batchDeleteSongs(List<int> fileIds) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/songs/batch-delete'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'file_ids': fileIds}),
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['deleted'] ?? 0;
+    }
+    throw Exception('Failed to batch delete songs');
+  }
 }
 
 final apiService = ApiService();
