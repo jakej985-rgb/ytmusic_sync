@@ -628,7 +628,8 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         # 1. Download audio file from YTM if not available locally
         if not downloaded_path:
             logger.info(f"Phase 1: Downloading untagged upload {entity_id} (video: {upload.video_id})")
-            downloaded_path = await download_ytm_upload(upload.video_id)
+            search_query = f"{req.artist or ''} {req.title}".strip()
+            downloaded_path = await download_ytm_upload(upload.video_id, fallback_query=search_query)
 
         # 2. Write new metadata tags using Mutagen
         logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}', CoverURL='{req.cover_url}'")

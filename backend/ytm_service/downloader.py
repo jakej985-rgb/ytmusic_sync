@@ -111,8 +111,8 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
     return None
 
 
-def _download_sync(video_id: str, output_path: Path) -> Path:
-    """Download audio stream. Tries ytmusicapi direct stream, standard youtube.com URL, and music.youtube.com URL."""
+def _download_sync(video_id: str, output_path: Path, fallback_query: Optional[str] = None) -> Path:
+    """Download audio stream. Tries ytmusicapi direct stream, standard youtube.com URL, music.youtube.com URL, and public ytsearch fallback."""
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,19 +172,23 @@ def _download_sync(video_id: str, output_path: Path) -> Path:
         if extra_paths:
             env["PATH"] = ":".join(extra_paths) + ":" + existing_path
 
-        # Try standard youtube.com first (doesn't trigger web_music GVS PO token requirement)
-        # and fallback to music.youtube.com
+        # Try URLs in order:
+        # 1. Standard youtube.com watch with android/ios/web clients (avoids web PO token requirements)
+        # 2. music.youtube.com watch
+        # 3. If direct upload video_id is forbidden (Google blocks private upload CDN streaming), search YouTube public audio
         urls_to_try = [
             f"https://www.youtube.com/watch?v={video_id}",
             f"https://music.youtube.com/watch?v={video_id}"
         ]
+        if fallback_query and fallback_query.strip():
+            urls_to_try.append(f"ytsearch1:{fallback_query.strip()}")
 
         last_error = "Unknown error"
         for target_url in urls_to_try:
             cmd = [
                 sys.executable, "-m", "yt_dlp",
                 "--remote-components", "ejs:github",
-                "--extractor-args", "youtube:formats=missing_pot",
+                "--extractor-args", "youtube:player_client=android,ios,web",
                 "-x", "--audio-format", "mp3",
                 "--no-playlist",
                 "--user-agent", user_agent,
@@ -196,7 +200,7 @@ def _download_sync(video_id: str, output_path: Path) -> Path:
             if cookie_file:
                 cmd.extend(["--cookies", cookie_file])
 
-            logger.info(f"Downloading YTM upload {video_id} via {target_url}...")
+            logger.info(f"Downloading audio via {target_url}...")
             res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
 
             if res.returncode == 0:
@@ -206,7 +210,7 @@ def _download_sync(video_id: str, output_path: Path) -> Path:
                     if candidates:
                         final_file = candidates[0]
                 if final_file.exists() and final_file.stat().st_size > 0:
-                    logger.info(f"Successfully downloaded {video_id} to {final_file} ({final_file.stat().st_size} bytes)")
+                    logger.info(f"Successfully downloaded {target_url} to {final_file} ({final_file.stat().st_size} bytes)")
                     return final_file
 
             last_error = res.stderr.strip() or res.stdout.strip() or "Unknown error"
@@ -222,13 +226,17 @@ def _download_sync(video_id: str, output_path: Path) -> Path:
                 pass
 
 
-async def download_ytm_upload(video_id: str, dest_dir: Optional[Path] = None) -> Path:
+async def download_ytm_upload(
+    video_id: str,
+    dest_dir: Optional[Path] = None,
+    fallback_query: Optional[str] = None
+) -> Path:
     """Download an uploaded YouTube Music track by its video_id and return the local path."""
     target_dir = dest_dir or (settings.data_dir / "staging")
     target_dir.mkdir(parents=True, exist_ok=True)
     target_base = target_dir / f"ytm_{video_id}"
 
-    return await asyncio.to_thread(_download_sync, video_id, target_base)
+    return await asyncio.to_thread(_download_sync, video_id, target_base, fallback_query)
 
 
 def extract_playlist_info_sync(playlist_url_or_id: str) -> dict:

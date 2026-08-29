@@ -85,8 +85,9 @@ async def download_and_upload_playlist_track(
     temp_base = staging_dir / f"pl_{video_id}"
 
     # 1. Download audio file
+    search_query = f"{raw_artist or ''} {raw_title}".strip()
     logger.info(f"Downloading track {video_id} ('{raw_title}') via yt-dlp...")
-    downloaded_file = await asyncio.to_thread(_download_sync, video_id, temp_base)
+    downloaded_file = await asyncio.to_thread(_download_sync, video_id, temp_base, search_query)
     if not downloaded_file or not downloaded_file.exists() or downloaded_file.stat().st_size == 0:
         raise RuntimeError(f"Failed to download audio for video {video_id}")
 
