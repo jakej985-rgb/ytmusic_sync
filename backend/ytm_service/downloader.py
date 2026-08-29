@@ -112,14 +112,17 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
 
 
 def _download_sync(video_id: str, output_path: Path) -> Path:
-    """Download audio stream. First tries ytmusicapi direct stream, then falls back to yt-dlp with web_music client."""
+    """Download audio stream. Tries ytmusicapi direct stream, standard youtube.com URL, and music.youtube.com URL."""
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. First attempt direct download via authenticated ytmusicapi session
-    direct_file = _download_via_ytmusicapi(video_id, output_path)
-    if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
-        return direct_file
+    try:
+        direct_file = _download_via_ytmusicapi(video_id, output_path)
+        if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
+            return direct_file
+    except Exception as e:
+        logger.debug(f"Direct ytmusicapi stream failed: {e}")
 
     logger.info(f"Direct ytmusicapi stream not available; falling back to yt-dlp for upload {video_id}...")
 
@@ -169,41 +172,47 @@ def _download_sync(video_id: str, output_path: Path) -> Path:
         if extra_paths:
             env["PATH"] = ":".join(extra_paths) + ":" + existing_path
 
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
-            "--remote-components", "ejs:github",
-            "--extractor-args", "youtube:player_client=web_music,web,mweb",
-            "-x", "--audio-format", "mp3",
-            "--no-playlist",
-            "--user-agent", user_agent,
-            "-o", str(output_path.with_suffix(".%(ext)s")),
+        # Try standard youtube.com first (doesn't trigger web_music GVS PO token requirement)
+        # and fallback to music.youtube.com
+        urls_to_try = [
+            f"https://www.youtube.com/watch?v={video_id}",
             f"https://music.youtube.com/watch?v={video_id}"
         ]
-        if auth_header:
-            cmd.extend(["--add-header", f"Authorization: {auth_header}"])
-        if cookie_file:
-            cmd.extend(["--cookies", cookie_file])
 
-        logger.info(f"Downloading YTM upload {video_id} using yt-dlp with web_music client...")
-        res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+        last_error = "Unknown error"
+        for target_url in urls_to_try:
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                "--remote-components", "ejs:github",
+                "--extractor-args", "youtube:formats=missing_pot",
+                "-x", "--audio-format", "mp3",
+                "--no-playlist",
+                "--user-agent", user_agent,
+                "-o", str(output_path.with_suffix(".%(ext)s")),
+                target_url
+            ]
+            if auth_header:
+                cmd.extend(["--add-header", f"Authorization: {auth_header}"])
+            if cookie_file:
+                cmd.extend(["--cookies", cookie_file])
 
-        if res.returncode != 0:
-            err_msg = res.stderr.strip() or res.stdout.strip() or "Unknown error"
-            logger.error(f"yt-dlp failed for video {video_id}: {err_msg[:400]}")
-            raise RuntimeError(f"Failed to download audio: {err_msg[:300]}")
+            logger.info(f"Downloading YTM upload {video_id} via {target_url}...")
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
 
-        # The extracted file will have .mp3 extension
-        final_file = output_path.with_suffix(".mp3")
-        if not final_file.exists() or final_file.stat().st_size == 0:
-            # Check if downloaded under another extension
-            candidates = list(output_dir.glob(f"{output_path.stem}.*"))
-            if candidates:
-                final_file = candidates[0]
-            else:
-                raise FileNotFoundError(f"Downloaded audio file not found at {final_file}")
+            if res.returncode == 0:
+                final_file = output_path.with_suffix(".mp3")
+                if not final_file.exists() or final_file.stat().st_size == 0:
+                    candidates = list(output_dir.glob(f"{output_path.stem}.*"))
+                    if candidates:
+                        final_file = candidates[0]
+                if final_file.exists() and final_file.stat().st_size > 0:
+                    logger.info(f"Successfully downloaded {video_id} to {final_file} ({final_file.stat().st_size} bytes)")
+                    return final_file
 
-        logger.info(f"Successfully downloaded {video_id} to {final_file} ({final_file.stat().st_size} bytes)")
-        return final_file
+            last_error = res.stderr.strip() or res.stdout.strip() or "Unknown error"
+            logger.warning(f"Download attempt for {target_url} failed: {last_error[:300]}")
+
+        raise RuntimeError(f"Failed to download audio: {last_error[:300]}")
 
     finally:
         if cookie_file and os.path.exists(cookie_file):

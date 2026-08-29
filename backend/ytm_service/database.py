@@ -536,6 +536,22 @@ class Database:
             await db.execute("DELETE FROM matches")
             await db.commit()
 
+    async def get_local_filepath_for_upload(self, entity_id: str) -> Optional[str]:
+        """Check if an upload entity is already matched to a local music file."""
+        async with self.get_connection() as db:
+            async with db.execute(
+                """
+                SELECT mf.path 
+                FROM matches m 
+                JOIN music_files mf ON m.music_file_id = mf.id 
+                WHERE m.ytm_upload_id = ? AND mf.path IS NOT NULL
+                LIMIT 1
+                """,
+                (entity_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+
     # Sync Jobs & Queue
     async def create_sync_job(self, music_file_id: int) -> int:
         async with self.get_connection() as db:

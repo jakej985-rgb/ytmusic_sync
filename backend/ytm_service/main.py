@@ -477,9 +477,45 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
 
     downloaded_path: Optional[Path] = None
     try:
-        # 1. Download audio file from YTM
-        logger.info(f"Phase 1: Downloading untagged upload {entity_id} (video: {upload.video_id})")
-        downloaded_path = await download_ytm_upload(upload.video_id)
+        staging_dir = settings.data_dir / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        target_staging = staging_dir / f"ytm_{upload.video_id}_clean.mp3"
+
+        # Phase 0: Check if this file already exists locally in DB matches, music_files, or /music
+        local_fp = await db.get_local_filepath_for_upload(entity_id)
+        if not local_fp:
+            async with db.get_connection() as conn:
+                clean_name = upload.title.strip()
+                stem = Path(clean_name).stem
+                async with conn.execute(
+                    "SELECT path FROM music_files WHERE filename = ? OR filename = ? OR title = ? LIMIT 1",
+                    (clean_name, f"{stem}.mp3", clean_name)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        local_fp = row[0]
+
+        if local_fp and Path(local_fp).exists():
+            logger.info(f"Found local file for upload {entity_id} via library: {local_fp}")
+            shutil.copy2(local_fp, target_staging)
+            downloaded_path = target_staging
+
+        if not downloaded_path and Path("/music").is_dir():
+            clean_name = upload.title.strip()
+            stem = Path(clean_name).stem
+            candidates = list(Path("/music").rglob(f"{clean_name}*"))
+            if not candidates:
+                candidates = list(Path("/music").rglob(f"{stem}.*"))
+            valid = [c for c in candidates if c.is_file()]
+            if valid:
+                logger.info(f"Found local file for upload {entity_id} in /music: {valid[0]}")
+                shutil.copy2(valid[0], target_staging)
+                downloaded_path = target_staging
+
+        # 1. Download audio file from YTM if not available locally
+        if not downloaded_path:
+            logger.info(f"Phase 1: Downloading untagged upload {entity_id} (video: {upload.video_id})")
+            downloaded_path = await download_ytm_upload(upload.video_id)
 
         # 2. Write new metadata tags using Mutagen
         logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}', CoverURL='{req.cover_url}'")
