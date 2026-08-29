@@ -380,6 +380,27 @@ class Database:
             await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (entity_id,))
             await db.commit()
 
+    async def prune_deleted_ytm_uploads(self, active_entity_ids: set[str], excluded_entity_ids: set[str]):
+        """Prune uploads from the local database that no longer exist on YouTube Music."""
+        async with self.get_connection() as db:
+            # 1. Delete all excluded/blacklisted entity IDs
+            for eid in excluded_entity_ids:
+                await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (eid,))
+                await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (eid,))
+
+            # 2. Prune local uploads that are no longer in active_entity_ids (if active set is populated)
+            if len(active_entity_ids) > 10:
+                async with db.execute("SELECT entity_id FROM ytm_uploads") as cursor:
+                    rows = await cursor.fetchall()
+                    local_eids = {r[0] for r in rows}
+
+                stale_eids = local_eids - active_entity_ids
+                for s_eid in stale_eids:
+                    await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (s_eid,))
+                    await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (s_eid,))
+
+            await db.commit()
+
     async def get_ytm_uploads_summary(self) -> dict:
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
@@ -388,9 +409,10 @@ class Database:
                 SELECT 
                     COUNT(*) as total,
                     COUNT(CASE WHEN (
-                        artist IS NULL OR artist = '' OR artist = 'Unknown Artist'
-                        OR album IS NULL OR album = ''
-                        OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus'
+                        artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+                        OR title IS NULL OR title = ''
+                        OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
+                        OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
                     ) THEN 1 END) as missing_metadata
                 FROM ytm_uploads
                 """
@@ -416,9 +438,10 @@ class Database:
 
         missing_condition = """
         (
-            artist IS NULL OR artist = '' OR artist = 'Unknown Artist'
-            OR album IS NULL OR album = ''
-            OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus'
+            artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+            OR title IS NULL OR title = ''
+            OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
+            OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
         )
         """
 

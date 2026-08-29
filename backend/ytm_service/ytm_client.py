@@ -3,6 +3,7 @@ import stat
 import json
 import logging
 import asyncio
+import time
 from pathlib import Path
 from typing import Optional, Any
 from ytmusicapi import YTMusic, setup
@@ -46,6 +47,20 @@ def preprocess_headers(raw: str) -> str:
 class YTMClient:
     def __init__(self):
         self._ytm: Optional[YTMusic] = None
+        self._recently_deleted: dict[str, float] = {}
+
+    def mark_deleted(self, entity_id: str):
+        """Mark an entity_id as deleted so stale YTM continuation caches cannot re-insert it."""
+        self._recently_deleted[entity_id] = time.time()
+
+    def is_recently_deleted(self, entity_id: str) -> bool:
+        """Check if an entity was deleted within the last 30 minutes."""
+        if entity_id not in self._recently_deleted:
+            return False
+        if time.time() - self._recently_deleted[entity_id] > 1800:
+            del self._recently_deleted[entity_id]
+            return False
+        return True
 
     def is_auth_configured(self) -> bool:
         return settings.auth_file.exists() and settings.auth_file.stat().st_size > 10
@@ -118,11 +133,14 @@ class YTMClient:
 
         raw_uploads = await asyncio.to_thread(_fetch_sync)
         cached = []
+        active_entity_ids: set[str] = set()
         for item in raw_uploads:
             # Parse item structure
             entity_id = item.get("entityId")
-            if not entity_id:
+            if not entity_id or self.is_recently_deleted(entity_id):
                 continue
+
+            active_entity_ids.add(entity_id)
 
             title = item.get("title", "")
             artists_list = item.get("artists")
@@ -158,6 +176,9 @@ class YTMClient:
             await db.upsert_ytm_upload(upload_record)
             cached.append(upload_record)
 
+        # Prune records from SQLite DB that were deleted on YTM or recently replaced
+        await db.prune_deleted_ytm_uploads(active_entity_ids, set(self._recently_deleted.keys()))
+
         return cached
 
     async def upload_file(self, filepath: str) -> dict:
@@ -186,6 +207,8 @@ class YTMClient:
         """Delete an uploaded song from YouTube Music using its entity_id."""
         if not self.is_auth_configured():
             raise YTMusicUserError("Not authenticated.")
+
+        self.mark_deleted(entity_id)
 
         def _delete_sync():
             yt = self._get_client()

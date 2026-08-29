@@ -499,11 +499,21 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         except Exception as e:
             logger.warning(f"Failed to delete old upload {entity_id} from YTM (non-fatal): {e}")
 
+        # Mark deleted in memory so stale YTM continuation caches cannot resurrect it
+        ytm_client.mark_deleted(entity_id)
+
         # 5. Clean up old record from local DB
         await db.delete_ytm_upload_record(entity_id)
 
-        # Trigger background refresh of uploads to index the new upload
-        asyncio.create_task(ytm_client.fetch_and_cache_uploads())
+        # Trigger delayed background refresh so YTM has time to process the newly uploaded file
+        async def _delayed_refresh():
+            await asyncio.sleep(20)
+            try:
+                await ytm_client.fetch_and_cache_uploads()
+            except Exception as ex:
+                logger.debug(f"Delayed YTM uploads refresh notice: {ex}")
+
+        asyncio.create_task(_delayed_refresh())
 
         return {
             "status": "success",
@@ -515,12 +525,20 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         logger.exception(f"Failed to replace upload {entity_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to replace upload: {str(e)}")
     finally:
-        # Cleanup temporary audio file
+        # Aggressive cleanup of temporary/staging audio files
         if downloaded_path and downloaded_path.exists():
             try:
                 downloaded_path.unlink()
             except Exception:
                 pass
+        if upload and upload.video_id:
+            staging_dir = settings.data_dir / "staging"
+            if staging_dir.exists():
+                for tmp_f in staging_dir.glob(f"*{upload.video_id}*"):
+                    try:
+                        tmp_f.unlink()
+                    except Exception:
+                        pass
 
 @app.get("/api/songs/{file_id}/artwork")
 async def get_song_artwork(file_id: int):

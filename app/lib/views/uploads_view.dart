@@ -106,6 +106,17 @@ class _UploadsViewState extends State<UploadsView> {
   Future<void> _openRetagDialog(YtmUpload upload) async {
     final changed = await MetadataEditorDialog.showForYtmUpload(context, upload);
     if (changed == true) {
+      // Optimistically remove the replaced upload immediately from the list
+      setState(() {
+        _uploads.removeWhere((u) => u.entityId == upload.entityId);
+        final currentMissing = _summary['missing_metadata'] ?? 0;
+        final currentProper = _summary['proper'] ?? 0;
+        _summary = {
+          ..._summary,
+          'missing_metadata': currentMissing > 0 ? currentMissing - 1 : 0,
+          'proper': currentProper + 1,
+        };
+      });
       _loadSummaryAndData(page: _currentPage);
     }
   }
@@ -144,6 +155,16 @@ class _UploadsViewState extends State<UploadsView> {
       try {
         final ok = await apiService.deleteYtmUpload(upload.entityId);
         if (ok && mounted) {
+          setState(() {
+            _uploads.removeWhere((u) => u.entityId == upload.entityId);
+            final currentTotal = _summary['total'] ?? 0;
+            final currentMissing = _summary['missing_metadata'] ?? 0;
+            _summary = {
+              ..._summary,
+              'total': currentTotal > 0 ? currentTotal - 1 : 0,
+              'missing_metadata': currentMissing > 0 ? currentMissing - 1 : 0,
+            };
+          });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Deleted "${upload.displayTitle}" from YouTube Music.'), backgroundColor: Colors.green),
           );
