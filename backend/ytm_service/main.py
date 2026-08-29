@@ -663,6 +663,18 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         clean_artist = req.artist.strip() if req.artist else None
         clean_album = req.album.strip() if req.album else None
         clean_thumb = req.cover_url.strip() if req.cover_url else upload.thumbnail
+        if clean_thumb and clean_thumb.startswith("data:image/"):
+            try:
+                import base64
+                art_dir = settings.data_dir / "artwork"
+                art_dir.mkdir(parents=True, exist_ok=True)
+                _, b64_data = clean_thumb.split(",", 1)
+                art_bytes = base64.b64decode(b64_data)
+                art_file = art_dir / f"custom_{upload.video_id}.jpg"
+                art_file.write_bytes(art_bytes)
+                clean_thumb = f"/api/artwork/{art_file.name}"
+            except Exception as e:
+                logger.warning(f"Could not persist custom artwork: {e}")
 
         # Check if the retagged upload is still missing required metadata (artist, album, artwork, clean title)
         still_missing = (
@@ -758,7 +770,14 @@ async def delete_ytm_upload(entity_id: str):
         return {"status": "success", "message": f"Deleted upload entity {entity_id}."}
     except Exception as e:
         logger.error(f"Failed to delete upload {entity_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete upload: {str(e)}")
+@app.get("/api/artwork/{filename}")
+async def get_artwork_file(filename: str):
+    """Serve custom uploaded artwork images."""
+    from fastapi.responses import FileResponse
+    art_file = settings.data_dir / "artwork" / filename
+    if not art_file.exists():
+        raise HTTPException(status_code=404, detail="Artwork file not found")
+    return FileResponse(art_file)
 
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):

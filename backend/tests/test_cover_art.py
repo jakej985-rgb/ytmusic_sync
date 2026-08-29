@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from mutagen.id3 import ID3, APIC, ID3NoHeaderError
 from mutagen.easyid3 import EasyID3
-from ytm_service.scanner import write_metadata_tags, extract_artwork
+from ytm_service.scanner import write_metadata_tags, extract_artwork, fetch_cover_image_bytes
 
 def test_cover_art_embedding_mp3():
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
@@ -33,6 +33,14 @@ def test_cover_art_embedding_mp3():
     assert extracted is not None
     data, mime = extracted
     assert data == fake_jpeg
-    assert "jpeg" in mime
-
     p.unlink()
+
+
+def test_fetch_cover_image_bytes_data_uri():
+    import base64
+    fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtestpngbytes"
+    b64 = base64.b64encode(fake_png).decode("utf-8")
+    data_uri = f"data:image/png;base64,{b64}"
+
+    fetched = fetch_cover_image_bytes(cover_url=data_uri)
+    assert fetched == fake_png

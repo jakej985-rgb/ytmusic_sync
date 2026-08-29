@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../../models/models.dart';
 import '../../services/api_service.dart';
@@ -49,6 +52,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   late TextEditingController _searchQueryController;
 
   String? _selectedCoverUrl;
+  Uint8List? _customCoverBytes;
   bool _isSearchingCover = false;
 
   bool _isSaving = false;
@@ -514,6 +518,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
         setState(() {
           _isSearchingCover = false;
           if (url != null) {
+            _customCoverBytes = null;
             _selectedCoverUrl = url;
           }
         });
@@ -530,6 +535,115 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     } catch (_) {
       if (mounted) setState(() => _isSearchingCover = false);
     }
+  }
+
+  Future<void> _pickCustomImage() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['jpg', 'jpeg', 'png', 'webp'],
+      );
+      if (files.isNotEmpty) {
+        final file = files.first;
+        final bytes = await file.readAsBytes();
+        if (bytes.isNotEmpty) {
+          final ext = file.extension?.toLowerCase() ?? 'jpeg';
+          final mime = ext == 'png' ? 'image/png' : (ext == 'webp' ? 'image/webp' : 'image/jpeg');
+          final b64 = base64Encode(bytes);
+          setState(() {
+            _customCoverBytes = bytes;
+            _selectedCoverUrl = 'data:$mime;base64,$b64';
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Custom artwork loaded (${(bytes.lengthInBytes / 1024).round()} KB)'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not pick image: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
+  }
+
+  Future<void> _pasteCoverUrl() async {
+    final controller = TextEditingController(
+      text: (_selectedCoverUrl != null && _selectedCoverUrl!.startsWith('http')) ? _selectedCoverUrl : '',
+    );
+    final url = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Row(
+          children: [
+            Icon(Icons.link, color: Color(0xFF00B4D8), size: 20),
+            SizedBox(width: 8),
+            Text('Enter Image URL', style: TextStyle(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Paste a direct link to any JPG or PNG image on the web:',
+              style: TextStyle(color: Colors.white60, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'https://example.com/album-art.jpg',
+                hintStyle: const TextStyle(color: Colors.white38),
+                filled: true,
+                fillColor: const Color(0xFF121218),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF00B4D8)),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    if (url != null && url.isNotEmpty) {
+      setState(() {
+        _customCoverBytes = null;
+        _selectedCoverUrl = url;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Custom artwork URL attached!'), backgroundColor: Colors.green),
+        );
+      }
+    }
+  }
+
+  void _removeCoverArt() {
+    setState(() {
+      _customCoverBytes = null;
+      _selectedCoverUrl = null;
+    });
   }
 
   Future<void> _saveMetadata({bool enqueueUpload = false}) async {
@@ -1049,32 +1163,48 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   color: const Color(0xFF14141A),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: _selectedCoverUrl != null ? const Color(0xFF00B4D8).withValues(alpha: 0.3) : Colors.white10,
+                    color: (_customCoverBytes != null || (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty))
+                        ? const Color(0xFF00B4D8).withValues(alpha: 0.3)
+                        : Colors.white10,
                   ),
                 ),
                 child: Row(
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(6),
-                      child: (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
-                          ? Image.network(
-                              _selectedCoverUrl!,
-                              width: 54,
-                              height: 54,
+                      child: _customCoverBytes != null
+                          ? Image.memory(
+                              _customCoverBytes!,
+                              width: 56,
+                              height: 56,
                               fit: BoxFit.cover,
-                              errorBuilder: (context, error, stackTrace) => Container(
-                                width: 54,
-                                height: 54,
-                                color: const Color(0xFF22222E),
-                                child: const Icon(Icons.broken_image, size: 22, color: Colors.white38),
-                              ),
                             )
-                          : Container(
-                              width: 54,
-                              height: 54,
-                              color: const Color(0xFF22222E),
-                              child: const Icon(Icons.album, size: 28, color: Colors.white24),
-                            ),
+                          : (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                              ? (_selectedCoverUrl!.startsWith('data:image/')
+                                  ? Image.memory(
+                                      base64Decode(_selectedCoverUrl!.split(',')[1]),
+                                      width: 56,
+                                      height: 56,
+                                      fit: BoxFit.cover,
+                                    )
+                                  : Image.network(
+                                      _selectedCoverUrl!,
+                                      width: 56,
+                                      height: 56,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (context, error, stackTrace) => Container(
+                                        width: 56,
+                                        height: 56,
+                                        color: const Color(0xFF22222E),
+                                        child: const Icon(Icons.broken_image, size: 22, color: Colors.white38),
+                                      ),
+                                    ))
+                              : Container(
+                                  width: 56,
+                                  height: 56,
+                                  color: const Color(0xFF22222E),
+                                  child: const Icon(Icons.album, size: 28, color: Colors.white24),
+                                ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -1085,7 +1215,16 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                             children: [
                               const Text('Cover Art', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
                               const SizedBox(width: 6),
-                              if (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                              if (_customCoverBytes != null)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.cyan.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('Custom Image', style: TextStyle(fontSize: 10, color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
+                                )
+                              else if (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                                   decoration: BoxDecoration(
@@ -1107,7 +1246,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                            (_customCoverBytes != null || (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty))
                                 ? 'Cover art will be embedded into audio tags before uploading.'
                                 : 'Will be automatically searched and embedded when uploaded.',
                             style: const TextStyle(fontSize: 11, color: Colors.white60),
@@ -1116,19 +1255,61 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                       ),
                     ),
                     const SizedBox(width: 8),
+
+                    // Custom Image Upload Button
                     OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                        minimumSize: const Size(60, 30),
+                        minimumSize: const Size(50, 30),
                         side: const BorderSide(color: Color(0xFF00B4D8)),
                         foregroundColor: const Color(0xFF00B4D8),
+                      ),
+                      onPressed: _pickCustomImage,
+                      icon: const Icon(Icons.file_upload_outlined, size: 14),
+                      label: const Text('Upload Img', style: TextStyle(fontSize: 11)),
+                    ),
+                    const SizedBox(width: 6),
+
+                    // Paste URL Button
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        minimumSize: const Size(44, 30),
+                        side: const BorderSide(color: Colors.white24),
+                        foregroundColor: Colors.white70,
+                      ),
+                      onPressed: _pasteCoverUrl,
+                      icon: const Icon(Icons.link, size: 14),
+                      label: const Text('URL', style: TextStyle(fontSize: 11)),
+                    ),
+                    const SizedBox(width: 6),
+
+                    // Fetch Art Button
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        minimumSize: const Size(44, 30),
+                        side: const BorderSide(color: Colors.white24),
+                        foregroundColor: Colors.white70,
                       ),
                       onPressed: _isSearchingCover ? null : _fetchCoverArt,
                       icon: _isSearchingCover
                           ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8)))
                           : const Icon(Icons.image_search, size: 14),
-                      label: const Text('Fetch Art', style: TextStyle(fontSize: 11)),
+                      label: const Text('Fetch', style: TextStyle(fontSize: 11)),
                     ),
+
+                    if (_customCoverBytes != null || (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)) ...[
+                      const SizedBox(width: 4),
+                      IconButton(
+                        tooltip: 'Remove artwork',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        icon: const Icon(Icons.close, size: 16, color: Colors.white38),
+                        hoverColor: Colors.redAccent.withValues(alpha: 0.1),
+                        onPressed: _removeCoverArt,
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -91,13 +91,21 @@ def fetch_cover_image_bytes(
     title: Optional[str] = None,
     album: Optional[str] = None,
 ) -> Optional[bytes]:
-    """Fetch cover art image bytes from URL or auto-query iTunes for high-res artwork."""
+    """Fetch cover art image bytes from URL, base64 data URI, local path, or auto-query iTunes for high-res artwork."""
     try:
         if cover_url:
-            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
-                r = client.get(cover_url)
-                if r.status_code == 200 and r.content:
-                    return r.content
+            c_url = cover_url.strip()
+            if c_url.startswith("data:image/"):
+                import base64
+                _, b64_data = c_url.split(",", 1)
+                return base64.b64decode(b64_data)
+            elif c_url.startswith("http://") or c_url.startswith("https://"):
+                with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                    r = client.get(c_url)
+                    if r.status_code == 200 and r.content:
+                        return r.content
+            elif Path(c_url).is_file():
+                return Path(c_url).read_bytes()
 
         # Fallback: Auto-search iTunes by artist + title/album
         terms = []
@@ -200,6 +208,16 @@ def write_metadata_tags(
 
         if cover_bytes:
             try:
+                # If image is webp, convert to jpeg via ffmpeg
+                if cover_bytes.startswith(b'RIFF') and b'WEBP' in cover_bytes[:16]:
+                    conv = subprocess.run(
+                        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "mjpeg", "pipe:1"],
+                        input=cover_bytes,
+                        capture_output=True
+                    )
+                    if conv.returncode == 0 and conv.stdout:
+                        cover_bytes = conv.stdout
+
                 is_png = cover_bytes.startswith(b'\x89PNG')
                 mime_type = "image/png" if is_png else "image/jpeg"
 
