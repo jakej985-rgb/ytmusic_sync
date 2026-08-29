@@ -20,6 +20,8 @@ from .ytm_client import ytm_client
 from .matcher import matcher
 from .uploader import queue_manager
 from .musicbrainz import musicbrainz_client
+from .downloader import download_ytm_upload
+from .scanner import write_metadata_tags
 from logging.handlers import RotatingFileHandler
 from fastapi.staticfiles import StaticFiles
 
@@ -439,6 +441,94 @@ async def search_musicbrainz(
 async def backup_db():
     backup_path = await db.backup_database()
     return {"status": "success", "backup_path": backup_path}
+
+@app.get("/api/ytm/uploads/summary")
+async def get_ytm_uploads_summary():
+    """Get summary counts of YTM uploads (total, missing metadata, properly tagged)."""
+    return await db.get_ytm_uploads_summary()
+
+@app.get("/api/ytm/uploads")
+async def get_ytm_uploads(
+    filter_type: str = Query("all", description="Filter: all, missing_metadata, proper"),
+    search: Optional[str] = Query(None, description="Search query"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200)
+):
+    """List YouTube Music uploads from DB with pagination, search, and health filters."""
+    return await db.get_ytm_uploads(filter_type=filter_type, search=search, page=page, page_size=page_size)
+
+@app.post("/api/ytm/uploads/{entity_id}/replace")
+async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
+    """Download untagged upload from YTM, tag with new metadata, upload new version, and delete old upload."""
+    upload = await db.get_ytm_upload_by_entity_id(entity_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload entity not found in database.")
+    if not upload.video_id:
+        raise HTTPException(status_code=400, detail="Upload does not have an associated video ID for streaming.")
+
+    downloaded_path: Optional[Path] = None
+    try:
+        # 1. Download audio file from YTM
+        logger.info(f"Phase 1: Downloading untagged upload {entity_id} (video: {upload.video_id})")
+        downloaded_path = await download_ytm_upload(upload.video_id)
+
+        # 2. Write new metadata tags using Mutagen
+        logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}'")
+        await asyncio.to_thread(
+            write_metadata_tags,
+            downloaded_path,
+            title=req.title.strip(),
+            artist=req.artist.strip() if req.artist else None,
+            album=req.album.strip() if req.album else None,
+            track_number=req.track_number
+        )
+
+        # 3. Upload new tagged version to YouTube Music
+        logger.info(f"Phase 3: Uploading newly tagged file {downloaded_path.name} to YTM")
+        up_res = await ytm_client.upload_file(str(downloaded_path))
+        if not up_res.get("success"):
+            raise HTTPException(status_code=500, detail=f"Upload failed: {up_res.get('response')}")
+
+        # 4. Delete old untagged upload from YouTube Music
+        logger.info(f"Phase 4: Deleting old untagged upload entity {entity_id} from YTM")
+        try:
+            await ytm_client.delete_upload(entity_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete old upload {entity_id} from YTM (non-fatal): {e}")
+
+        # 5. Clean up old record from local DB
+        await db.delete_ytm_upload_record(entity_id)
+
+        # Trigger background refresh of uploads to index the new upload
+        asyncio.create_task(ytm_client.fetch_and_cache_uploads())
+
+        return {
+            "status": "success",
+            "message": f"Successfully retagged and replaced '{req.title}' on YouTube Music."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to replace upload {entity_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to replace upload: {str(e)}")
+    finally:
+        # Cleanup temporary audio file
+        if downloaded_path and downloaded_path.exists():
+            try:
+                downloaded_path.unlink()
+            except Exception:
+                pass
+
+@app.delete("/api/ytm/uploads/{entity_id}")
+async def delete_ytm_upload(entity_id: str):
+    """Delete an upload directly from YouTube Music and from the local database."""
+    try:
+        await ytm_client.delete_upload(entity_id)
+        await db.delete_ytm_upload_record(entity_id)
+        return {"status": "success", "message": f"Deleted upload entity {entity_id}."}
+    except Exception as e:
+        logger.error(f"Failed to delete upload {entity_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete upload: {str(e)}")
 
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):

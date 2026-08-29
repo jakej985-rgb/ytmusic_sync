@@ -10,9 +10,14 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PORT=8080
 
-# Install runtime dependencies and curl for container health checks
+# Install runtime dependencies: curl, ffmpeg, unzip, and Deno for yt-dlp challenge solver
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ffmpeg \
+    unzip \
+    && curl -fsSL https://deno.land/install.sh | sh \
+    && mv /root/.deno/bin/deno /usr/local/bin/deno \
+    && rm -rf /root/.deno \
     && rm -rf /var/lib/apt/lists/*
 
 # Create application user and group

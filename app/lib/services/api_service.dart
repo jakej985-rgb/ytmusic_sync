@@ -262,6 +262,90 @@ class ApiService {
     }
     return [];
   }
+
+  Future<Map<String, int>> getYtmUploadsSummary() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/api/ytm/uploads/summary'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        return {
+          'total': (data['total'] as num?)?.toInt() ?? 0,
+          'missing_metadata': (data['missing_metadata'] as num?)?.toInt() ?? 0,
+          'proper': (data['proper'] as num?)?.toInt() ?? 0,
+        };
+      }
+    } catch (_) {}
+    return {'total': 0, 'missing_metadata': 0, 'proper': 0};
+  }
+
+  Future<Map<String, dynamic>> getYtmUploads({
+    String filterType = 'all',
+    String? search,
+    int page = 1,
+    int pageSize = 50,
+  }) async {
+    final Map<String, String> queryParams = {
+      'filter_type': filterType,
+      'page': page.toString(),
+      'page_size': pageSize.toString(),
+    };
+    if (search != null && search.trim().isNotEmpty) {
+      queryParams['search'] = search.trim();
+    }
+
+    final uri = Uri.parse('$baseUrl/api/ytm/uploads').replace(queryParameters: queryParams);
+    final response = await http.get(uri);
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final items = (data['items'] as List<dynamic>)
+          .map((item) => YtmUpload.fromJson(item as Map<String, dynamic>))
+          .toList();
+      return {
+        'items': items,
+        'total': (data['total'] as num?)?.toInt() ?? 0,
+        'page': (data['page'] as num?)?.toInt() ?? 1,
+        'page_size': (data['page_size'] as num?)?.toInt() ?? 50,
+        'total_pages': (data['total_pages'] as num?)?.toInt() ?? 1,
+      };
+    }
+    return {'items': <YtmUpload>[], 'total': 0, 'page': 1, 'page_size': 50, 'total_pages': 1};
+  }
+
+  Future<Map<String, dynamic>> replaceYtmUpload(
+    String entityId, {
+    required String title,
+    String? artist,
+    String? album,
+    int? trackNumber,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/ytm/uploads/$entityId/replace'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'title': title,
+        'artist': artist,
+        'album': album,
+        'track_number': trackNumber,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      return {'success': true, 'message': 'Upload successfully replaced'};
+    }
+    String error = 'Failed to replace upload';
+    try {
+      final err = jsonDecode(response.body);
+      if (err is Map && err['detail'] != null) {
+        error = err['detail'].toString();
+      }
+    } catch (_) {}
+    return {'success': false, 'error': error};
+  }
+
+  Future<bool> deleteYtmUpload(String entityId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/api/ytm/uploads/$entityId'));
+    return response.statusCode == 200;
+  }
 }
 
 final apiService = ApiService();

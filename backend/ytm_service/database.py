@@ -365,6 +365,104 @@ class Database:
                 rows = await cursor.fetchall()
                 return [YtmUpload(**dict(r)) for r in rows]
 
+    async def get_ytm_upload_by_entity_id(self, entity_id: str) -> Optional[YtmUpload]:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM ytm_uploads WHERE entity_id = ?", (entity_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return YtmUpload(**dict(row))
+                return None
+
+    async def delete_ytm_upload_record(self, entity_id: str):
+        async with self.get_connection() as db:
+            await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (entity_id,))
+            await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (entity_id,))
+            await db.commit()
+
+    async def get_ytm_uploads_summary(self) -> dict:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN (
+                        artist IS NULL OR artist = '' OR artist = 'Unknown Artist'
+                        OR album IS NULL OR album = ''
+                        OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus'
+                    ) THEN 1 END) as missing_metadata
+                FROM ytm_uploads
+                """
+            ) as cursor:
+                row = await cursor.fetchone()
+                total = row["total"] if row else 0
+                missing = row["missing_metadata"] if row else 0
+                return {
+                    "total": total,
+                    "missing_metadata": missing,
+                    "proper": max(0, total - missing)
+                }
+
+    async def get_ytm_uploads(
+        self,
+        filter_type: str = "all",
+        search: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50
+    ) -> dict:
+        where_clauses = []
+        params = []
+
+        missing_condition = """
+        (
+            artist IS NULL OR artist = '' OR artist = 'Unknown Artist'
+            OR album IS NULL OR album = ''
+            OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus'
+        )
+        """
+
+        if filter_type == "missing_metadata":
+            where_clauses.append(missing_condition)
+        elif filter_type == "proper":
+            where_clauses.append(f"NOT {missing_condition}")
+
+        if search:
+            where_clauses.append("(title LIKE ? OR artist LIKE ? OR album LIKE ?)")
+            s_param = f"%{search}%"
+            params.extend([s_param, s_param, s_param])
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            count_query = f"SELECT COUNT(*) as cnt FROM ytm_uploads {where_sql}"
+            async with db.execute(count_query, params) as cursor:
+                row = await cursor.fetchone()
+                total = row["cnt"] if row else 0
+
+            offset = (page - 1) * page_size
+            data_query = f"""
+                SELECT * FROM ytm_uploads
+                {where_sql}
+                ORDER BY first_seen DESC, title ASC
+                LIMIT ? OFFSET ?
+            """
+            data_params = list(params) + [page_size, offset]
+            async with db.execute(data_query, data_params) as cursor:
+                rows = await cursor.fetchall()
+                items = [YtmUpload(**dict(r)) for r in rows]
+
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
+            }
+
     # Matches
     async def save_match(self, file_id: int, ytm_upload_id: str, match_type: MatchType | str, score: float):
         m_val = match_type.value if isinstance(match_type, MatchType) else str(match_type)

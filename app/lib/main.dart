@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'views/dashboard_view.dart';
 import 'views/library_view.dart';
+import 'views/uploads_view.dart';
 import 'views/playlists_view.dart';
 import 'views/queue_view.dart';
 import 'views/history_view.dart';
@@ -61,6 +62,7 @@ class _MainShellState extends State<MainShell> {
     final views = [
       DashboardView(onNavigateTab: _navigateToTab),
       const LibraryView(),
+      const UploadsView(),
       const PlaylistsView(),
       const QueueView(),
       const HistoryView(),
@@ -128,6 +130,11 @@ class _MainShellState extends State<MainShell> {
                 icon: Icon(Icons.library_music_outlined),
                 selectedIcon: Icon(Icons.library_music, color: Color(0xFFFF0000)),
                 label: Text('Music Library'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.cloud_done_outlined),
+                selectedIcon: Icon(Icons.cloud_done, color: Color(0xFFFF0000)),
+                label: Text('YTM Uploads'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.playlist_play_outlined),

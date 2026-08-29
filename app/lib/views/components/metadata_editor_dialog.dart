@@ -17,14 +17,23 @@ class _ParsedFilenameParts {
 }
 
 class MetadataEditorDialog extends StatefulWidget {
-  final MusicFile song;
+  final MusicFile? song;
+  final YtmUpload? ytmUpload;
 
-  const MetadataEditorDialog({super.key, required this.song});
+  const MetadataEditorDialog({super.key, this.song, this.ytmUpload})
+      : assert(song != null || ytmUpload != null);
 
   static Future<bool?> show(BuildContext context, MusicFile song) {
     return showDialog<bool>(
       context: context,
       builder: (context) => MetadataEditorDialog(song: song),
+    );
+  }
+
+  static Future<bool?> showForYtmUpload(BuildContext context, YtmUpload upload) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => MetadataEditorDialog(ytmUpload: upload),
     );
   }
 
@@ -48,11 +57,19 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   @override
   void initState() {
     super.initState();
-    final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
-    String initialTitle = widget.song.title ?? rawName;
-    String initialArtist = widget.song.artist ?? '';
-    String initialAlbum = widget.song.album ?? '';
-    String initialTrackNum = widget.song.trackNumber != null ? widget.song.trackNumber.toString() : '';
+    final isYtm = widget.ytmUpload != null;
+    final rawFilename = isYtm ? widget.ytmUpload!.title : widget.song!.filename;
+    final rawName = rawFilename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    String initialTitle = (isYtm ? widget.ytmUpload!.title : widget.song!.title) ?? rawName;
+    if (initialTitle.toLowerCase().endsWith('.mp3') ||
+        initialTitle.toLowerCase().endsWith('.flac') ||
+        initialTitle.toLowerCase().endsWith('.m4a') ||
+        initialTitle.toLowerCase().endsWith('.wav')) {
+      initialTitle = rawName;
+    }
+    String initialArtist = (isYtm ? widget.ytmUpload!.artist : widget.song!.artist) ?? '';
+    String initialAlbum = (isYtm ? widget.ytmUpload!.album : widget.song!.album) ?? '';
+    String initialTrackNum = (!isYtm && widget.song?.trackNumber != null) ? widget.song!.trackNumber.toString() : '';
 
     // Auto-detect if artist is unknown or empty
     if (initialArtist.isEmpty || initialArtist.toLowerCase() == 'unknown artist') {
@@ -222,7 +239,8 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
 
   /// Automatically parses filename into Artist and Title based on requested order
   void _smartSplit({required bool artistFirst}) {
-    final rawName = widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
+    final rawFilename = widget.ytmUpload != null ? widget.ytmUpload!.title : (widget.song?.filename ?? '');
+    final rawName = rawFilename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
     final parts = _extractParts(rawName);
 
     if (parts != null) {
@@ -288,7 +306,8 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     try {
       final artist = _artistController.text.trim();
       final title = _titleController.text.trim();
-      final q = query ?? (artist.isNotEmpty && title.isNotEmpty ? null : widget.song.filename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), ''));
+      final fallbackName = (widget.ytmUpload != null ? widget.ytmUpload!.title : (widget.song?.filename ?? '')).replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+      final q = query ?? (artist.isNotEmpty && title.isNotEmpty ? null : fallbackName);
 
       final results = await apiService.searchMusicBrainz(
         query: q,
@@ -343,8 +362,6 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
       return;
     }
 
-    if (widget.song.id == null) return;
-
     setState(() {
       _isSaving = true;
       _errorMessage = null;
@@ -355,8 +372,35 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
       final album = _albumController.text.trim();
       final trackNum = int.tryParse(_trackNumController.text.trim());
 
+      if (widget.ytmUpload != null) {
+        // YTM Upload Replace Mode
+        final res = await apiService.replaceYtmUpload(
+          widget.ytmUpload!.entityId,
+          title: title,
+          artist: artist.isNotEmpty ? artist : null,
+          album: album.isNotEmpty ? album : null,
+          trackNumber: trackNum,
+        );
+        if (res['success'] != true) {
+          throw Exception(res['error'] ?? 'Failed to replace upload');
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Replaced & uploaded clean version of "$title" to YouTube Music!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          Navigator.of(context).pop(true);
+        }
+        return;
+      }
+
+      if (widget.song?.id == null) return;
+
       await apiService.updateSongMetadata(
-        widget.song.id!,
+        widget.song!.id!,
         title: title,
         artist: artist.isNotEmpty ? artist : null,
         album: album.isNotEmpty ? album : null,
@@ -364,7 +408,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
       );
 
       if (enqueueUpload) {
-        await apiService.uploadSong(widget.song.id!);
+        await apiService.uploadSong(widget.song!.id!);
       }
 
       if (mounted) {
@@ -408,13 +452,17 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.edit_note, color: Color(0xFFFF0000), size: 24),
-                      SizedBox(width: 10),
+                      Icon(
+                        widget.ytmUpload != null ? Icons.cloud_sync_outlined : Icons.edit_note,
+                        color: const Color(0xFFFF0000),
+                        size: 24,
+                      ),
+                      const SizedBox(width: 10),
                       Text(
-                        'Edit Track Metadata',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        widget.ytmUpload != null ? 'Retag & Replace YTM Upload' : 'Edit Track Metadata',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
@@ -440,11 +488,15 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.audio_file_outlined, size: 14, color: Colors.grey),
+                        Icon(
+                          widget.ytmUpload != null ? Icons.cloud_done_outlined : Icons.audio_file_outlined,
+                          size: 14,
+                          color: widget.ytmUpload != null ? const Color(0xFF00B4D8) : Colors.grey,
+                        ),
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            widget.song.filename,
+                            widget.ytmUpload != null ? widget.ytmUpload!.title : (widget.song?.filename ?? ''),
                             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -454,7 +506,9 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      widget.song.path,
+                      widget.ytmUpload != null
+                          ? 'YouTube Music Upload • ID: ${widget.ytmUpload!.videoId ?? widget.ytmUpload!.entityId}'
+                          : (widget.song?.path ?? ''),
                       style: TextStyle(fontSize: 10, color: Colors.grey[500], fontFamily: 'monospace'),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -780,6 +834,30 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                 Text(_errorMessage!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
               ],
 
+              if (_isSaving && widget.ytmUpload != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00B4D8).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.3)),
+                  ),
+                  child: const Row(
+                    children: [
+                      SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8))),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Downloading audio from YouTube Music, applying tags, and replacing upload... This may take up to a minute.',
+                          style: TextStyle(fontSize: 11, color: Color(0xFF00B4D8)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
               const SizedBox(height: 20),
 
               // Bottom Actions
@@ -791,29 +869,44 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                     child: const Text('Cancel'),
                   ),
                   const SizedBox(width: 10),
-                  FilledButton.tonal(
-                    onPressed: _isSaving ? null : () => _saveMetadata(enqueueUpload: false),
-                    child: _isSaving
-                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Text('Save Metadata'),
-                  ),
-                  const SizedBox(width: 10),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFFFF0000),
-                      foregroundColor: Colors.white,
+                  if (widget.ytmUpload != null) ...[
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF0000),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      ),
+                      onPressed: _isSaving ? null : () => _saveMetadata(),
+                      icon: _isSaving
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.published_with_changes, size: 16),
+                      label: Text(_isSaving ? 'Replacing on YTM...' : 'Retag & Replace on YTM'),
                     ),
-                    onPressed: _isSaving ? null : () => _saveMetadata(enqueueUpload: true),
-                    child: _isSaving
-                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Row(
-                            children: [
-                              Icon(Icons.cloud_upload, size: 16),
-                              SizedBox(width: 6),
-                              Text('Save & Upload'),
-                            ],
-                          ),
-                  ),
+                  ] else ...[
+                    FilledButton.tonal(
+                      onPressed: _isSaving ? null : () => _saveMetadata(enqueueUpload: false),
+                      child: _isSaving
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Text('Save Metadata'),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF0000),
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: _isSaving ? null : () => _saveMetadata(enqueueUpload: true),
+                      child: _isSaving
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Row(
+                              children: [
+                                Icon(Icons.cloud_upload, size: 16),
+                                SizedBox(width: 6),
+                                Text('Save & Upload'),
+                              ],
+                            ),
+                    ),
+                  ],
                 ],
               ),
             ],

@@ -412,3 +412,71 @@ class MusicBrainzMatch {
   }
 }
 
+class YtmUpload {
+  final int? id;
+  final String entityId;
+  final String? videoId;
+  final String title;
+  final String? artist;
+  final String? album;
+  final double? duration;
+  final String? likeStatus;
+  final String? thumbnail;
+  final String? firstSeen;
+  final String? lastSeen;
+
+  YtmUpload({
+    this.id,
+    required this.entityId,
+    this.videoId,
+    required this.title,
+    this.artist,
+    this.album,
+    this.duration,
+    this.likeStatus,
+    this.thumbnail,
+    this.firstSeen,
+    this.lastSeen,
+  });
+
+  factory YtmUpload.fromJson(Map<String, dynamic> json) {
+    return YtmUpload(
+      id: json['id'],
+      entityId: json['entity_id'] ?? '',
+      videoId: json['video_id'],
+      title: json['title'] ?? '',
+      artist: json['artist'],
+      album: json['album'],
+      duration: json['duration'] != null ? (json['duration'] as num).toDouble() : null,
+      likeStatus: json['like_status'],
+      thumbnail: json['thumbnail'],
+      firstSeen: json['first_seen'],
+      lastSeen: json['last_seen'],
+    );
+  }
+
+  bool get isMissingMetadata {
+    final hasNoArtist = artist == null || artist!.trim().isEmpty || artist == 'Unknown Artist';
+    final hasNoAlbum = album == null || album!.trim().isEmpty;
+    final lowerTitle = title.toLowerCase();
+    final hasFileExt = lowerTitle.endsWith('.mp3') ||
+        lowerTitle.endsWith('.flac') ||
+        lowerTitle.endsWith('.m4a') ||
+        lowerTitle.endsWith('.wav') ||
+        lowerTitle.endsWith('.opus');
+    return hasNoArtist || hasNoAlbum || hasFileExt;
+  }
+
+  String get displayTitle => title.isNotEmpty ? title : 'Untitled';
+  String get displayArtist => (artist != null && artist!.isNotEmpty) ? artist! : 'Unknown Artist';
+  String get displayAlbum => (album != null && album!.isNotEmpty) ? album! : 'Unknown Album';
+
+  String get formattedDuration {
+    if (duration == null || duration! <= 0) return '--:--';
+    final totalSec = duration!.round();
+    final mins = totalSec ~/ 60;
+    final secs = totalSec % 60;
+    return '$mins:${secs.toString().padLeft(2, '0')}';
+  }
+}
+

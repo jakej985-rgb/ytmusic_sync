@@ -101,7 +101,7 @@ class _DashboardViewState extends State<DashboardView> {
           SnackBar(content: Text('Enqueued $count missing tracks for upload!')),
         );
         _loadStats(silent: true);
-        widget.onNavigateTab(2); // Go to queue view
+        widget.onNavigateTab(4); // Go to queue view
       }
     } catch (e) {
       if (mounted) {
@@ -223,7 +223,7 @@ class _DashboardViewState extends State<DashboardView> {
                 count: stats.ytmUploadsCount,
                 icon: Icons.cloud_done,
                 color: Colors.purpleAccent,
-                onTap: () => widget.onNavigateTab(1),
+                onTap: () => widget.onNavigateTab(2), // YTM Cloud Uploads View
               ),
               _buildStatCard(
                 title: 'Missing From YTM',
@@ -244,14 +244,14 @@ class _DashboardViewState extends State<DashboardView> {
                 count: stats.inQueueCount,
                 icon: Icons.queue_music,
                 color: Colors.tealAccent,
-                onTap: () => widget.onNavigateTab(2),
+                onTap: () => widget.onNavigateTab(4),
               ),
               _buildStatCard(
                 title: 'Failed Uploads',
                 count: stats.failedCount,
                 icon: Icons.error_outline,
                 color: stats.failedCount > 0 ? Colors.redAccent : Colors.grey,
-                onTap: () => widget.onNavigateTab(3),
+                onTap: () => widget.onNavigateTab(5),
               ),
             ],
           ),
@@ -321,7 +321,7 @@ class _DashboardViewState extends State<DashboardView> {
           ),
           if (!stats.ytmConnected)
             ElevatedButton(
-              onPressed: () => widget.onNavigateTab(4), // Go to Settings
+              onPressed: () => widget.onNavigateTab(6), // Go to Settings
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFFF0000),
                 foregroundColor: Colors.white,

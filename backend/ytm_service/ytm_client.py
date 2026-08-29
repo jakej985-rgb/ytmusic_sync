@@ -182,6 +182,19 @@ class YTMClient:
             "response": result_str
         }
 
+    async def delete_upload(self, entity_id: str) -> dict:
+        """Delete an uploaded song from YouTube Music using its entity_id."""
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _delete_sync():
+            yt = self._get_client()
+            return yt.delete_upload_entity(entity_id)
+
+        res = await asyncio.to_thread(_delete_sync)
+        logger.info(f"Deleted upload entity {entity_id}: {res}")
+        return {"success": True, "response": str(res)}
+
     async def get_playlists(self) -> list[dict]:
         """Fetch user's YouTube Music library playlists."""
         if not self.is_auth_configured():
