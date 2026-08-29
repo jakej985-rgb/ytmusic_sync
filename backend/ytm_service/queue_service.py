@@ -51,9 +51,9 @@ class UnifiedQueueService:
         for job in recent_sync_jobs:
             if job.id in seen_job_ids:
                 continue
-            if job.status in (UploadStatus.COMPLETED, UploadStatus.VERIFIED, UploadStatus.FAILED):
+            if job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED, UploadStatus.FAILED):
                 mf = job.music_file
-                st = "completed" if job.status in (UploadStatus.COMPLETED, UploadStatus.VERIFIED) else "failed"
+                st = "completed" if job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED) else "failed"
                 step = "Uploaded to YouTube Music locker" if st == "completed" else f"Upload failed: {job.error or 'Unknown error'}"
                 local_items.append({
                     "id": f"local_job_{job.id}",

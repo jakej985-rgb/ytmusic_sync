@@ -105,3 +105,31 @@ async def test_unified_queue_with_metadata_and_playlist_tasks(temp_db):
 
         # Clean up
         playlist_sync_manager._status.is_running = False
+
+
+@pytest.mark.asyncio
+async def test_unified_queue_with_completed_sync_jobs(temp_db):
+    from ytm_service.models import UploadStatus
+
+    # Create a local file and sync jobs with UPLOADED and FAILED statuses
+    file_id = await temp_db.upsert_music_file({
+        "path": "/music/artist/album/song.mp3",
+        "filename": "song.mp3",
+        "title": "History Song",
+        "artist": "History Artist",
+        "album": "History Album",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 1000.0,
+    })
+
+    job_id = await temp_db.create_sync_job(file_id)
+    await temp_db.update_sync_job(job_id, status=UploadStatus.UPLOADED)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/queue?category=all&status=all&limit=250")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(item["title"] == "History Song" and item["status"] == "completed" for item in data["items"])
+

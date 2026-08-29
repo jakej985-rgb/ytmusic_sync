@@ -66,13 +66,18 @@ class _UploadsViewState extends State<UploadsView> {
 
       final summary = results[0] as Map<String, int>;
       final uploadsData = results[1];
+      final newTotalPages = (uploadsData['total_pages'] as int?) ?? 1;
+      if (page > newTotalPages && newTotalPages > 0) {
+        _loadSummaryAndData(page: newTotalPages);
+        return;
+      }
 
       setState(() {
         _summary = summary;
         _uploads = List<YtmUpload>.from(uploadsData['items']);
         _totalCount = uploadsData['total'] as int;
         _currentPage = uploadsData['page'] as int;
-        _totalPages = uploadsData['total_pages'] as int;
+        _totalPages = newTotalPages;
         _isLoading = false;
       });
     } catch (e) {
