@@ -500,6 +500,7 @@ class _UploadsViewState extends State<UploadsView> {
         final isUntagged = upload.isMissingMetadata;
         final isRawFilename = upload.hasFileExt;
         final hasNoArtist = upload.hasNoArtist;
+        final hasNoAlbum = upload.hasNoAlbum;
         final hasNoArtwork = upload.hasNoArtwork;
 
         return Container(
@@ -631,7 +632,25 @@ class _UploadsViewState extends State<UploadsView> {
                         ],
 
                         // Album Tag
-                        if (upload.album != null && upload.album!.isNotEmpty) ...[
+                        if (hasNoAlbum) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: Colors.deepPurpleAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.3)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.album_outlined, size: 10, color: Colors.deepPurpleAccent),
+                                SizedBox(width: 4),
+                                Text('Missing Album', style: TextStyle(fontSize: 10, color: Colors.deepPurpleAccent, fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          ),
+                        ] else ...[
                           const SizedBox(width: 8),
                           const Text('•', style: TextStyle(color: Colors.white30, fontSize: 12)),
                           const SizedBox(width: 8),

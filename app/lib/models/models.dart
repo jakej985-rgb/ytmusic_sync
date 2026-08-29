@@ -462,6 +462,7 @@ class YtmUpload {
   }
 
   bool get hasNoArtist => artist == null || artist!.trim().isEmpty || artist!.trim().toLowerCase() == 'unknown artist' || artist!.trim().toLowerCase() == 'unknown';
+  bool get hasNoAlbum => album == null || album!.trim().isEmpty || album!.trim().toLowerCase() == 'unknown album' || album!.trim().toLowerCase() == 'unknown';
   bool get hasNoArtwork => thumbnail == null || thumbnail!.trim().isEmpty;
   bool get hasFileExt {
     final lowerTitle = title.toLowerCase();
@@ -476,7 +477,7 @@ class YtmUpload {
         lowerTitle.startsWith('tuberipper');
   }
 
-  bool get isMissingMetadata => hasNoArtist || hasNoArtwork || hasFileExt;
+  bool get isMissingMetadata => hasNoArtist || hasNoAlbum || hasNoArtwork || hasFileExt;
 
   YtmUpload copyWith({
     int? id,

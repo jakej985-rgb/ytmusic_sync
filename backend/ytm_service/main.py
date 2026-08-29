@@ -514,9 +514,10 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         clean_album = req.album.strip() if req.album else None
         clean_thumb = req.cover_url.strip() if req.cover_url else upload.thumbnail
 
-        # Check if the retagged upload is still missing required metadata (artist, artwork, clean title)
+        # Check if the retagged upload is still missing required metadata (artist, album, artwork, clean title)
         still_missing = (
             not clean_artist or clean_artist.lower() in ('unknown artist', 'unknown') or
+            not clean_album or clean_album.lower() in ('unknown album', 'unknown') or
             not clean_thumb or
             clean_title.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.webm'))
         )

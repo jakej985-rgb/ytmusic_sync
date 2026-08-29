@@ -430,6 +430,7 @@ class Database:
                     COUNT(*) as total,
                     COUNT(CASE WHEN (
                         artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+                        OR album IS NULL OR album = '' OR TRIM(LOWER(album)) = 'unknown album' OR TRIM(LOWER(album)) = 'unknown'
                         OR thumbnail IS NULL OR thumbnail = ''
                         OR title IS NULL OR title = ''
                         OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
@@ -460,6 +461,7 @@ class Database:
         missing_condition = """
         (
             artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+            OR album IS NULL OR album = '' OR TRIM(LOWER(album)) = 'unknown album' OR TRIM(LOWER(album)) = 'unknown'
             OR thumbnail IS NULL OR thumbnail = ''
             OR title IS NULL OR title = ''
             OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
