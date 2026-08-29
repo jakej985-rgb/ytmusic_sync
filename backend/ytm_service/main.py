@@ -247,8 +247,8 @@ async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Option
     try:
         details = await ytm_client.get_playlist_details(playlist_id)
         tracks = details.get("tracks", [])
-        # Filter for tracks missing from cloud uploads
-        missing = [t for t in tracks if not t.get("in_uploads")]
+        # Filter for tracks missing from cloud uploads and not duplicates
+        missing = [t for t in tracks if not t.get("in_uploads") and not t.get("is_duplicate")]
         if not missing:
             return {"status": "ok", "message": "All tracks in this playlist are already in your cloud uploads!", "queued": 0}
 

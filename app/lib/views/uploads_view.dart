@@ -23,6 +23,7 @@ class _UploadsViewState extends State<UploadsView> {
 
   final Set<String> _selectedEntityIds = {};
   bool _isBatchProcessing = false;
+  int _activeRequestId = 0;
 
   bool _isLoading = false;
   bool _isSyncing = false;
@@ -41,6 +42,9 @@ class _UploadsViewState extends State<UploadsView> {
   }
 
   Future<void> _loadSummaryAndData({int page = 1}) async {
+    final requestId = ++_activeRequestId;
+    final requestedFilter = _activeFilter;
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -49,33 +53,34 @@ class _UploadsViewState extends State<UploadsView> {
     try {
       final summaryFuture = apiService.getYtmUploadsSummary();
       final uploadsFuture = apiService.getYtmUploads(
-        filterType: _activeFilter,
+        filterType: requestedFilter,
         search: _searchController.text.trim().isNotEmpty ? _searchController.text.trim() : null,
         page: page,
         pageSize: _pageSize,
       );
 
       final results = await Future.wait([summaryFuture, uploadsFuture]);
+      if (!mounted || requestId != _activeRequestId || _activeFilter != requestedFilter) {
+        return;
+      }
+
       final summary = results[0] as Map<String, int>;
       final uploadsData = results[1];
 
-      if (mounted) {
-        setState(() {
-          _summary = summary;
-          _uploads = List<YtmUpload>.from(uploadsData['items']);
-          _totalCount = uploadsData['total'] as int;
-          _currentPage = uploadsData['page'] as int;
-          _totalPages = uploadsData['total_pages'] as int;
-          _isLoading = false;
-        });
-      }
+      setState(() {
+        _summary = summary;
+        _uploads = List<YtmUpload>.from(uploadsData['items']);
+        _totalCount = uploadsData['total'] as int;
+        _currentPage = uploadsData['page'] as int;
+        _totalPages = uploadsData['total_pages'] as int;
+        _isLoading = false;
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _errorMessage = e.toString().replaceAll('Exception:', '').trim();
-          _isLoading = false;
-        });
-      }
+      if (!mounted || requestId != _activeRequestId) return;
+      setState(() {
+        _errorMessage = e.toString().replaceAll('Exception:', '').trim();
+        _isLoading = false;
+      });
     }
   }
 
@@ -731,7 +736,10 @@ class _UploadsViewState extends State<UploadsView> {
     return GestureDetector(
       onTap: () {
         if (_activeFilter != key) {
-          setState(() => _activeFilter = key);
+          setState(() {
+            _activeFilter = key;
+            _selectedEntityIds.clear();
+          });
           _loadSummaryAndData(page: 1);
         }
       },

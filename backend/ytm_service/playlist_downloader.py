@@ -228,6 +228,7 @@ class PlaylistSyncManager:
 
     async def _sync_worker(self, destination_dir: Optional[Path]):
         logger.info(f"Starting playlist sync for {len(self._queue)} tracks...")
+        seen_sync_keys = set()
         try:
             for track in self._queue:
                 video_id = track.get("video_id")
@@ -239,6 +240,23 @@ class PlaylistSyncManager:
                 artist = track.get("artist")
                 album = track.get("album")
                 thumb = track.get("thumbnail")
+
+                from .normalizer import normalize_text
+                sync_key = f"{normalize_text(artist)}|{normalize_text(title)}"
+                if sync_key in seen_sync_keys:
+                    logger.info(f"Skipping duplicate track in playlist queue: '{title}' by '{artist}'")
+                    self._status.completed_tracks += 1
+                    continue
+                seen_sync_keys.add(sync_key)
+
+                # Check if already present in database ytm_uploads
+                existing = await db.find_ytm_upload_by_title_artist(title, artist)
+                if not existing:
+                    existing = await db.get_ytm_upload_by_video_id(video_id)
+                if existing:
+                    logger.info(f"Skipping track '{title}' by '{artist}' - already in cloud uploads ({existing.title}).")
+                    self._status.completed_tracks += 1
+                    continue
 
                 self._status.current_track = f"{artist} - {title}" if artist else title
                 logger.info(f"Syncing ({self._status.completed_tracks + 1}/{self._status.total_tracks}): {self._status.current_track}")

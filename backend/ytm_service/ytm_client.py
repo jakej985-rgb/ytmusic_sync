@@ -283,6 +283,7 @@ class YTMClient:
 
         # Build normalized lookups for fast comparison
         from .normalizer import normalize_text
+        from .playlist_downloader import clean_youtube_title
 
         local_map = {}
         for f in local_files:
@@ -293,20 +294,41 @@ class YTMClient:
                 local_map[title_key] = f.get("path")
 
         uploads_set = set()
+        uploads_video_ids = set()
         for u in uploads:
             u_key = f"{normalize_text(u.artist)}|{normalize_text(u.title)}"
             uploads_set.add(u_key)
             u_title = normalize_text(u.title)
             if u_title:
                 uploads_set.add(u_title)
+            if u.video_id:
+                uploads_video_ids.add(u.video_id)
 
-        matched_tracks = []
+        def is_music_track(t: dict, raw_title: str) -> bool:
+            """Determine if track is an official audio release vs a video version."""
+            vtype = t.get("videoType") or ""
+            if vtype == "MUSIC_VIDEO_TYPE_ATV":
+                return True
+            if vtype in ("MUSIC_VIDEO_TYPE_OMV", "MUSIC_VIDEO_TYPE_UGC"):
+                return False
+
+            album = t.get("album")
+            has_album = bool(album and (album.get("name") if isinstance(album, dict) else album))
+            low_t = raw_title.lower()
+            has_video_noise = bool(re.search(r"\b(?:official\s+(?:music\s+)?video|music\s+video|lyric\s+video|visualizer|video)\b", low_t))
+            return has_album and not has_video_noise
+
+        parsed_candidates = []
         for t in tracks_raw:
             title = t.get("title", "")
             artists = t.get("artists", [])
             artist_name = None
             if artists and isinstance(artists, list) and len(artists) > 0:
                 artist_name = artists[0].get("name") if isinstance(artists[0], dict) else str(artists[0])
+
+            clean_t, detected_a = clean_youtube_title(title, artist_name)
+            effective_artist = artist_name or detected_a or "Unknown Artist"
+            effective_title = clean_t or title
 
             album = t.get("album")
             album_name = album.get("name") if isinstance(album, dict) else (album if isinstance(album, str) else None)
@@ -317,24 +339,61 @@ class YTMClient:
                 thumb = thumbs[-1].get("url")
 
             duration = t.get("duration") or t.get("duration_seconds")
+            music_flag = is_music_track(t, title)
+            norm_key = f"{normalize_text(effective_artist)}|{normalize_text(effective_title)}"
 
-            # Check match against local library & uploads
-            key = f"{normalize_text(artist_name)}|{normalize_text(title)}"
-            title_key = normalize_text(title)
-
-            local_path = local_map.get(key) or local_map.get(title_key)
-            in_local = local_path is not None
-            in_uploads = (key in uploads_set) or (title_key in uploads_set)
-
-            matched_tracks.append({
+            parsed_candidates.append({
                 "video_id": t.get("videoId"),
-                "title": title,
-                "artist": artist_name,
+                "title": effective_title,
+                "raw_title": title,
+                "artist": effective_artist,
                 "album": album_name,
                 "duration": duration,
                 "thumbnail": thumb,
+                "is_music": music_flag,
+                "norm_key": norm_key,
+            })
+
+        # Group tracks to prefer official music track over video version
+        groups: dict[str, list[dict]] = {}
+        for c in parsed_candidates:
+            groups.setdefault(c["norm_key"], []).append(c)
+
+        selected_video_ids = set()
+        for k, group in groups.items():
+            if len(group) == 1:
+                selected_video_ids.add(group[0]["video_id"])
+            else:
+                music_versions = [item for item in group if item["is_music"]]
+                if music_versions:
+                    # Pick official music version, ignore video versions
+                    selected_video_ids.add(music_versions[0]["video_id"])
+                else:
+                    # No music version available, only then grab video version
+                    selected_video_ids.add(group[0]["video_id"])
+
+        matched_tracks = []
+        for c in parsed_candidates:
+            vid = c["video_id"]
+            is_dup = vid not in selected_video_ids
+
+            norm_key = c["norm_key"]
+            title_key = normalize_text(c["title"])
+
+            local_path = local_map.get(norm_key) or local_map.get(title_key)
+            in_local = local_path is not None
+            in_uploads = (norm_key in uploads_set) or (title_key in uploads_set) or (vid in uploads_video_ids)
+
+            matched_tracks.append({
+                "video_id": vid,
+                "title": c["title"],
+                "artist": c["artist"],
+                "album": c["album"],
+                "duration": c["duration"],
+                "thumbnail": c["thumbnail"],
                 "in_local": in_local,
-                "in_uploads": in_uploads,
+                "in_uploads": in_uploads or is_dup,
+                "is_duplicate": is_dup,
                 "local_path": local_path
             })
 

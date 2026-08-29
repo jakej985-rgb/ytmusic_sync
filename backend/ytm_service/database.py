@@ -374,6 +374,39 @@ class Database:
                     return YtmUpload(**dict(row))
                 return None
 
+    async def get_ytm_upload_by_video_id(self, video_id: str) -> Optional[YtmUpload]:
+        """Lookup an upload by its YouTube video_id."""
+        if not video_id:
+            return None
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM ytm_uploads WHERE video_id = ? LIMIT 1", (video_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return YtmUpload(**dict(row))
+                return None
+
+    async def find_ytm_upload_by_title_artist(self, title: str, artist: Optional[str] = None) -> Optional[YtmUpload]:
+        """Find an existing upload matching normalized title and artist."""
+        from .normalizer import normalize_text
+        clean_title = normalize_text(title)
+        clean_artist = normalize_text(artist) if artist else ""
+        if not clean_title:
+            return None
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            # Search by title prefix for fast indexing
+            async with db.execute("SELECT * FROM ytm_uploads WHERE title LIKE ? LIMIT 50", (f"%{title[:20]}%",)) as cursor:
+                rows = await cursor.fetchall()
+                for r in rows:
+                    u = YtmUpload(**dict(r))
+                    u_title = normalize_text(u.title)
+                    u_artist = normalize_text(u.artist) if u.artist else ""
+                    if u_title == clean_title:
+                        if not clean_artist or not u_artist or u_artist == clean_artist:
+                            return u
+        return None
+
     async def delete_ytm_upload_record(self, entity_id: str):
         async with self.get_connection() as db:
             await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (entity_id,))
@@ -422,29 +455,65 @@ class Database:
             await db.commit()
 
     async def get_ytm_uploads_summary(self) -> dict:
+        missing_condition = """
+        (
+            artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
+            OR album IS NULL OR album = '' OR TRIM(LOWER(album)) = 'unknown album' OR TRIM(LOWER(album)) = 'unknown'
+            OR thumbnail IS NULL OR thumbnail = ''
+            OR title IS NULL OR title = ''
+            OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
+            OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
+        )
+        """
+
+        skits_condition = """
+        (
+            (duration IS NOT NULL AND duration > 0 AND duration < 60)
+            OR (duration IS NOT NULL AND duration < 90 AND (
+                LOWER(title) LIKE '%skit%' 
+                OR LOWER(title) LIKE '%interlude%' 
+                OR LOWER(title) LIKE '%intro%'
+                OR LOWER(title) LIKE '%outro%'
+            ))
+        )
+        """
+
+        duplicates_condition = """
+        (
+            (
+                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+            ) IN (
+                SELECT 
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                    COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+                FROM ytm_uploads
+                WHERE title IS NOT NULL AND TRIM(title) != ''
+                GROUP BY 
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                    COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+                HAVING COUNT(*) > 1
+            )
+            OR
+            (video_id IS NOT NULL AND TRIM(video_id) != '' AND video_id IN (
+                SELECT video_id
+                FROM ytm_uploads
+                WHERE video_id IS NOT NULL AND TRIM(video_id) != ''
+                GROUP BY video_id
+                HAVING COUNT(*) > 1
+            ))
+        )
+        """
+
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """
+                f"""
                 SELECT 
                     COUNT(*) as total,
-                    COUNT(CASE WHEN (
-                        artist IS NULL OR artist = '' OR TRIM(LOWER(artist)) = 'unknown artist' OR TRIM(LOWER(artist)) = 'unknown'
-                        OR album IS NULL OR album = '' OR TRIM(LOWER(album)) = 'unknown album' OR TRIM(LOWER(album)) = 'unknown'
-                        OR thumbnail IS NULL OR thumbnail = ''
-                        OR title IS NULL OR title = ''
-                        OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
-                        OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
-                    ) THEN 1 END) as missing_metadata,
-                    COUNT(CASE WHEN (
-                        (duration IS NOT NULL AND duration > 0 AND duration < 60)
-                        OR (duration IS NOT NULL AND duration < 90 AND (
-                            LOWER(title) LIKE '%skit%' 
-                            OR LOWER(title) LIKE '%interlude%' 
-                            OR LOWER(title) LIKE '%intro%'
-                            OR LOWER(title) LIKE '%outro%'
-                        ))
-                    ) THEN 1 END) as skits
+                    COUNT(CASE WHEN {missing_condition} THEN 1 END) as missing_metadata,
+                    COUNT(CASE WHEN {skits_condition} THEN 1 END) as skits,
+                    COUNT(CASE WHEN {duplicates_condition} THEN 1 END) as duplicates
                 FROM ytm_uploads
                 """
             ) as cursor:
@@ -452,28 +521,7 @@ class Database:
                 total = row["total"] if row else 0
                 missing = row["missing_metadata"] if row else 0
                 skits = row["skits"] if row else 0
-
-            dups_count = 0
-            async with db.execute(
-                """
-                SELECT COUNT(DISTINCT u1.entity_id)
-                FROM ytm_uploads u1
-                JOIN ytm_uploads u2 ON u1.entity_id != u2.entity_id
-                WHERE (
-                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u1.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''))) = 
-                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u2.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', '')))
-                    AND (
-                        COALESCE(LOWER(TRIM(u1.artist)), '') = COALESCE(LOWER(TRIM(u2.artist)), '')
-                        OR u1.artist IS NULL OR u2.artist IS NULL
-                        OR u1.artist = 'Unknown Artist' OR u2.artist = 'Unknown Artist'
-                    )
-                )
-                OR (u1.video_id IS NOT NULL AND u1.video_id = u2.video_id)
-                """
-            ) as cursor:
-                drow = await cursor.fetchone()
-                if drow:
-                    dups_count = drow[0]
+                dups_count = row["duplicates"] if row else 0
 
             return {
                 "total": total,
@@ -517,20 +565,29 @@ class Database:
         """
 
         duplicates_condition = """
-        entity_id IN (
-            SELECT u1.entity_id
-            FROM ytm_uploads u1
-            JOIN ytm_uploads u2 ON u1.entity_id != u2.entity_id
-            WHERE (
-                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u1.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''))) = 
-                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u2.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', '')))
-                AND (
-                    COALESCE(LOWER(TRIM(u1.artist)), '') = COALESCE(LOWER(TRIM(u2.artist)), '')
-                    OR u1.artist IS NULL OR u2.artist IS NULL
-                    OR u1.artist = 'Unknown Artist' OR u2.artist = 'Unknown Artist'
-                )
+        (
+            (
+                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+            ) IN (
+                SELECT 
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                    COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+                FROM ytm_uploads
+                WHERE title IS NOT NULL AND TRIM(title) != ''
+                GROUP BY 
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''), '.opus', ''), '.webm', ''))),
+                    COALESCE(NULLIF(TRIM(LOWER(artist)), 'unknown artist'), '')
+                HAVING COUNT(*) > 1
             )
-            OR (u1.video_id IS NOT NULL AND u1.video_id = u2.video_id)
+            OR
+            (video_id IS NOT NULL AND TRIM(video_id) != '' AND video_id IN (
+                SELECT video_id
+                FROM ytm_uploads
+                WHERE video_id IS NOT NULL AND TRIM(video_id) != ''
+                GROUP BY video_id
+                HAVING COUNT(*) > 1
+            ))
         )
         """
 
