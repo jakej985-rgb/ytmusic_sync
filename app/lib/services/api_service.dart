@@ -249,12 +249,16 @@ class ApiService {
     String? query,
     String? artist,
     String? title,
-    int limit = 5,
+    String? provider,
+    int limit = 6,
   }) async {
     final Map<String, String> queryParams = {'limit': limit.toString()};
     if (query != null && query.isNotEmpty) queryParams['query'] = query;
     if (artist != null && artist.isNotEmpty) queryParams['artist'] = artist;
     if (title != null && title.isNotEmpty) queryParams['title'] = title;
+    if (provider != null && provider.isNotEmpty && provider != 'all') {
+      queryParams['provider'] = provider;
+    }
 
     final uri = Uri.parse('$baseUrl/api/musicbrainz/search').replace(queryParameters: queryParams);
     final response = await http.get(uri);

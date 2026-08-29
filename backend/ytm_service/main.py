@@ -430,10 +430,17 @@ async def search_musicbrainz(
     query: Optional[str] = Query(None, description="Free-text search query"),
     artist: Optional[str] = Query(None, description="Artist name"),
     title: Optional[str] = Query(None, description="Song title"),
-    limit: int = Query(5, ge=1, le=10, description="Max results")
+    provider: Optional[str] = Query("all", description="Metadata provider: all, ytm, deezer, itunes, musicbrainz"),
+    limit: int = Query(6, ge=1, le=12, description="Max results")
 ):
     try:
-        matches = await musicbrainz_client.search(query=query, artist=artist, title=title, limit=limit)
+        matches = await musicbrainz_client.search(
+            query=query,
+            artist=artist,
+            title=title,
+            provider=provider,
+            limit=limit
+        )
         return matches
     except Exception as e:
         logger.error(f"Error in musicbrainz search endpoint: {e}", exc_info=True)

@@ -57,6 +57,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   bool _isSearchingMb = false;
   List<MusicBrainzMatch>? _mbMatches;
   String? _mbSearchMessage;
+  String _selectedProvider = 'all';
 
   static String _cleanRipperJunk(String name) {
     var s = name.replaceAll(
@@ -365,6 +366,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
         query: q,
         artist: artist.isNotEmpty ? artist : null,
         title: title.isNotEmpty ? title : null,
+        provider: _selectedProvider,
         limit: 6,
       );
 
@@ -372,7 +374,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
         _mbMatches = results;
         _isSearchingMb = false;
         if (results.isEmpty) {
-          _mbSearchMessage = 'No matching tracks found. Try adjusting the search box above or typing Artist Name.';
+          _mbSearchMessage = 'No matching tracks found. Try adjusting the search box above or switching providers.';
         }
       });
     } catch (e) {
@@ -381,6 +383,88 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
         _mbSearchMessage = 'Error searching metadata: $e';
       });
     }
+  }
+
+  String _getProviderLoadingText() {
+    switch (_selectedProvider) {
+      case 'ytm':
+        return 'Searching YouTube Music...';
+      case 'musicbrainz':
+        return 'Searching MusicBrainz database...';
+      case 'deezer':
+        return 'Searching Deezer catalog...';
+      case 'itunes':
+        return 'Searching Apple Music & iTunes...';
+      default:
+        return 'Searching YouTube Music, Deezer, Apple Music & MusicBrainz...';
+    }
+  }
+
+  Widget _buildProviderChips() {
+    final providers = [
+      {'id': 'all', 'label': 'All Sources', 'icon': Icons.hub_outlined, 'color': const Color(0xFF00B4D8)},
+      {'id': 'ytm', 'label': 'YouTube Music', 'icon': Icons.play_circle_fill, 'color': const Color(0xFFFF0000)},
+      {'id': 'musicbrainz', 'label': 'MusicBrainz', 'icon': Icons.album, 'color': const Color(0xFFBA68C8)},
+      {'id': 'deezer', 'label': 'Deezer', 'icon': Icons.graphic_eq, 'color': const Color(0xFFFF007F)},
+      {'id': 'itunes', 'label': 'Apple Music', 'icon': Icons.apple, 'color': const Color(0xFFFC3C44)},
+    ];
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: providers.map((p) {
+          final id = p['id'] as String;
+          final label = p['label'] as String;
+          final icon = p['icon'] as IconData;
+          final brandColor = p['color'] as Color;
+          final isSelected = _selectedProvider == id;
+
+          return Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: InkWell(
+              onTap: () {
+                if (_selectedProvider != id) {
+                  setState(() => _selectedProvider = id);
+                  _searchMusicBrainz();
+                }
+              },
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: isSelected ? brandColor.withValues(alpha: 0.18) : const Color(0xFF14141A),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: isSelected ? brandColor : Colors.white12,
+                    width: isSelected ? 1.5 : 1.0,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      icon,
+                      size: 13,
+                      color: isSelected ? brandColor : Colors.white54,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        color: isSelected ? Colors.white : Colors.white70,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
   }
 
   void _applyMbMatch(MusicBrainzMatch match, {bool andUpload = false}) {
@@ -717,7 +801,11 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
+
+              // Provider Filter Chips
+              _buildProviderChips(),
+              const SizedBox(height: 12),
 
               // MusicBrainz Loading Indicator
               if (_isSearchingMb) ...[
@@ -729,12 +817,12 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.3)),
                   ),
-                  child: const Row(
+                  child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8))),
-                      SizedBox(width: 10),
-                      Text('Searching MusicBrainz & iTunes databases...', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                      const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8))),
+                      const SizedBox(width: 10),
+                      Text(_getProviderLoadingText(), style: const TextStyle(fontSize: 12, color: Colors.white70)),
                     ],
                   ),
                 ),

@@ -100,3 +100,36 @@ async def test_api_musicbrainz_endpoint():
             assert data[0]["artist"] == "C-Mob"
             assert data[0]["title"] == "For Some Strange Reason ft. Brotha Lynch Hung"
             assert data[0]["album"] == "Masterpiece of Mind"
+
+@pytest.mark.asyncio
+async def test_provider_filter_selection():
+    mb_client = MusicBrainzClient()
+    with patch.object(mb_client, "_search_ytmusic", new_callable=AsyncMock, return_value=[]) as mock_ytm, \
+         patch.object(mb_client, "_search_deezer", new_callable=AsyncMock, return_value=[]) as mock_deezer, \
+         patch.object(mb_client, "_search_itunes", new_callable=AsyncMock, return_value=[]) as mock_itunes, \
+         patch.object(mb_client, "_search_musicbrainz", new_callable=AsyncMock, return_value=[]) as mock_mb:
+
+        # 1. Search with provider='deezer'
+        await mb_client.search(artist="Test", title="Song", provider="deezer")
+        mock_deezer.assert_called_once()
+        mock_ytm.assert_not_called()
+        mock_itunes.assert_not_called()
+        mock_mb.assert_not_called()
+
+        mock_deezer.reset_mock()
+
+        # 2. Search with provider='ytm'
+        await mb_client.search(artist="Test", title="Song", provider="ytm")
+        mock_ytm.assert_called_once()
+        mock_deezer.assert_not_called()
+        mock_itunes.assert_not_called()
+        mock_mb.assert_not_called()
+
+        mock_ytm.reset_mock()
+
+        # 3. Search with provider='musicbrainz'
+        await mb_client.search(artist="Test", title="Song", provider="musicbrainz")
+        mock_mb.assert_called_once()
+        mock_ytm.assert_not_called()
+        mock_deezer.assert_not_called()
+        mock_itunes.assert_not_called()

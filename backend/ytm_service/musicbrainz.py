@@ -421,12 +421,15 @@ class MusicBrainzClient:
         query: Optional[str] = None,
         artist: Optional[str] = None,
         title: Optional[str] = None,
+        provider: Optional[str] = "all",
         limit: int = 6
     ) -> List[MusicBrainzMatch]:
         """
         Unified multi-source metadata search across YouTube Music, Deezer, Apple Music, and MusicBrainz.
+        Optionally filtered to a specific provider: 'all', 'ytm', 'deezer', 'itunes', 'musicbrainz'.
         """
-        cache_key = f"{query or ''}|{artist or ''}|{title or ''}|{limit}"
+        prov = (provider or "all").lower().strip()
+        cache_key = f"{query or ''}|{artist or ''}|{title or ''}|{prov}|{limit}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -453,13 +456,26 @@ class MusicBrainzClient:
             # Strip ft. ... from target_t to isolate primary title
             target_t = re.sub(r'\s*(?:\(|\[)?(?:feat\.|ft\.|featuring).*$', '', target_t).strip()
 
-        # Run multi-source searches in parallel
-        tasks = [
-            self._search_ytmusic(query=query, artist=artist, title=title, limit=limit),
-            self._search_deezer(query=query, artist=artist, title=title, limit=limit),
-            self._search_itunes(query=query, artist=artist, title=title, limit=limit),
-            self._search_musicbrainz(query=query, artist=artist, title=title, limit=limit),
-        ]
+        # Run multi-source searches in parallel according to provider filter
+        tasks = []
+        if prov in ("all", "ytm", "youtube", "youtube music", "yt"):
+            tasks.append(self._search_ytmusic(query=query, artist=artist, title=title, limit=limit))
+        if prov in ("all", "deezer"):
+            tasks.append(self._search_deezer(query=query, artist=artist, title=title, limit=limit))
+        if prov in ("all", "itunes", "apple", "apple music"):
+            tasks.append(self._search_itunes(query=query, artist=artist, title=title, limit=limit))
+        if prov in ("all", "musicbrainz", "mb"):
+            tasks.append(self._search_musicbrainz(query=query, artist=artist, title=title, limit=limit))
+
+        if not tasks:
+            # Fallback to all providers if unknown string
+            tasks = [
+                self._search_ytmusic(query=query, artist=artist, title=title, limit=limit),
+                self._search_deezer(query=query, artist=artist, title=title, limit=limit),
+                self._search_itunes(query=query, artist=artist, title=title, limit=limit),
+                self._search_musicbrainz(query=query, artist=artist, title=title, limit=limit),
+            ]
+
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_candidates: List[MusicBrainzMatch] = []
