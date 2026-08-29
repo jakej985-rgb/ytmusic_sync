@@ -435,18 +435,53 @@ class Database:
                         OR title IS NULL OR title = ''
                         OR title LIKE '%.mp3' OR title LIKE '%.flac' OR title LIKE '%.m4a' OR title LIKE '%.wav' OR title LIKE '%.opus' OR title LIKE '%.webm'
                         OR title LIKE 'y2mate%' OR title LIKE 'snapsave%' OR title LIKE 'tuberipper%'
-                    ) THEN 1 END) as missing_metadata
+                    ) THEN 1 END) as missing_metadata,
+                    COUNT(CASE WHEN (
+                        (duration IS NOT NULL AND duration > 0 AND duration < 60)
+                        OR (duration IS NOT NULL AND duration < 90 AND (
+                            LOWER(title) LIKE '%skit%' 
+                            OR LOWER(title) LIKE '%interlude%' 
+                            OR LOWER(title) LIKE '%intro%'
+                            OR LOWER(title) LIKE '%outro%'
+                        ))
+                    ) THEN 1 END) as skits
                 FROM ytm_uploads
                 """
             ) as cursor:
                 row = await cursor.fetchone()
                 total = row["total"] if row else 0
                 missing = row["missing_metadata"] if row else 0
-                return {
-                    "total": total,
-                    "missing_metadata": missing,
-                    "proper": max(0, total - missing)
-                }
+                skits = row["skits"] if row else 0
+
+            dups_count = 0
+            async with db.execute(
+                """
+                SELECT COUNT(DISTINCT u1.entity_id)
+                FROM ytm_uploads u1
+                JOIN ytm_uploads u2 ON u1.entity_id != u2.entity_id
+                WHERE (
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u1.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''))) = 
+                    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u2.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', '')))
+                    AND (
+                        COALESCE(LOWER(TRIM(u1.artist)), '') = COALESCE(LOWER(TRIM(u2.artist)), '')
+                        OR u1.artist IS NULL OR u2.artist IS NULL
+                        OR u1.artist = 'Unknown Artist' OR u2.artist = 'Unknown Artist'
+                    )
+                )
+                OR (u1.video_id IS NOT NULL AND u1.video_id = u2.video_id)
+                """
+            ) as cursor:
+                drow = await cursor.fetchone()
+                if drow:
+                    dups_count = drow[0]
+
+            return {
+                "total": total,
+                "missing_metadata": missing,
+                "duplicates": dups_count,
+                "skits": skits,
+                "proper": max(0, total - missing)
+            }
 
     async def get_ytm_uploads(
         self,
@@ -469,8 +504,45 @@ class Database:
         )
         """
 
+        skits_condition = """
+        (
+            (duration IS NOT NULL AND duration > 0 AND duration < 60)
+            OR (duration IS NOT NULL AND duration < 90 AND (
+                LOWER(title) LIKE '%skit%' 
+                OR LOWER(title) LIKE '%interlude%' 
+                OR LOWER(title) LIKE '%intro%'
+                OR LOWER(title) LIKE '%outro%'
+            ))
+        )
+        """
+
+        duplicates_condition = """
+        entity_id IN (
+            SELECT u1.entity_id
+            FROM ytm_uploads u1
+            JOIN ytm_uploads u2 ON u1.entity_id != u2.entity_id
+            WHERE (
+                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u1.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', ''))) = 
+                LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(u2.title, '.mp3', ''), '.flac', ''), '.m4a', ''), '.wav', '')))
+                AND (
+                    COALESCE(LOWER(TRIM(u1.artist)), '') = COALESCE(LOWER(TRIM(u2.artist)), '')
+                    OR u1.artist IS NULL OR u2.artist IS NULL
+                    OR u1.artist = 'Unknown Artist' OR u2.artist = 'Unknown Artist'
+                )
+            )
+            OR (u1.video_id IS NOT NULL AND u1.video_id = u2.video_id)
+        )
+        """
+
+        order_by = "first_seen DESC, title ASC"
         if filter_type == "missing_metadata":
             where_clauses.append(missing_condition)
+        elif filter_type == "duplicates":
+            where_clauses.append(duplicates_condition)
+            order_by = "LOWER(TRIM(REPLACE(title, '.mp3', ''))) ASC, duration ASC, first_seen DESC"
+        elif filter_type == "skits":
+            where_clauses.append(skits_condition)
+            order_by = "duration ASC, title ASC"
         elif filter_type == "proper":
             where_clauses.append(f"NOT {missing_condition}")
 
@@ -494,7 +566,7 @@ class Database:
             data_query = f"""
                 SELECT * FROM ytm_uploads
                 {where_sql}
-                ORDER BY first_seen DESC, title ASC
+                ORDER BY {order_by}
                 LIMIT ? OFFSET ?
             """
             data_params = list(params) + [page_size, offset]

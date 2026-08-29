@@ -211,6 +211,8 @@ class _UploadsViewState extends State<UploadsView> {
   @override
   Widget build(BuildContext context) {
     final missingCount = _summary['missing_metadata'] ?? 0;
+    final duplicatesCount = _summary['duplicates'] ?? 0;
+    final skitsCount = _summary['skits'] ?? 0;
     final totalCount = _summary['total'] ?? 0;
     final properCount = _summary['proper'] ?? 0;
 
@@ -258,11 +260,55 @@ class _UploadsViewState extends State<UploadsView> {
                             ),
                           ),
                         ],
+                        if (duplicatesCount > 0) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.deepOrangeAccent.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.deepOrangeAccent.withValues(alpha: 0.5)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.copy_outlined, size: 14, color: Colors.deepOrangeAccent),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '$duplicatesCount Duplicates',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepOrangeAccent),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        if (skitsCount > 0) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.purpleAccent.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.5)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.timer_outlined, size: 14, color: Colors.purpleAccent),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '$skitsCount Skits (<1m)',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.purpleAccent),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 4),
                     const Text(
-                      'Audit metadata health, retag & replace uploaded songs, or clean up untagged uploads.',
+                      'Audit metadata health, find duplicate songs, clean up skits (<1m), or retag & replace uploaded songs.',
                       style: TextStyle(fontSize: 13, color: Colors.white54),
                     ),
                   ],
@@ -312,8 +358,10 @@ class _UploadsViewState extends State<UploadsView> {
                   child: Row(
                     children: [
                       _buildFilterChip('missing_metadata', 'Missing Metadata', missingCount, Colors.amber),
-                      _buildFilterChip('all', 'All Uploads', totalCount, const Color(0xFF3EA6FF)),
+                      _buildFilterChip('duplicates', 'Duplicates', duplicatesCount, Colors.deepOrangeAccent),
+                      _buildFilterChip('skits', 'Short / Skits (< 1m)', skitsCount, Colors.purpleAccent),
                       _buildFilterChip('proper', 'Properly Tagged', properCount, Colors.greenAccent),
+                      _buildFilterChip('all', 'All Uploads', totalCount, const Color(0xFF3EA6FF)),
                     ],
                   ),
                 ),
@@ -670,6 +718,48 @@ class _UploadsViewState extends State<UploadsView> {
                           const Text('•', style: TextStyle(color: Colors.white30, fontSize: 12)),
                           const SizedBox(width: 8),
                           Text(upload.formattedDuration, style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                        ],
+
+                        // Skit / Short Tag
+                        if (upload.isSkitOrShort) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: Colors.purpleAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.3)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.timer_outlined, size: 10, color: Colors.purpleAccent),
+                                SizedBox(width: 4),
+                                Text('Skit / Short (<1m)', style: TextStyle(fontSize: 10, color: Colors.purpleAccent, fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          ),
+                        ],
+
+                        // Duplicate Match Tag
+                        if (_activeFilter == 'duplicates') ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: Colors.deepOrangeAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.deepOrangeAccent.withValues(alpha: 0.3)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.copy_outlined, size: 10, color: Colors.deepOrangeAccent),
+                                SizedBox(width: 4),
+                                Text('Duplicate Match', style: TextStyle(fontSize: 10, color: Colors.deepOrangeAccent, fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          ),
                         ],
                       ],
                     ),

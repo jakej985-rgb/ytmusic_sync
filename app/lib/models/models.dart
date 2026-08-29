@@ -542,6 +542,15 @@ class YtmUpload {
     final secs = totalSec % 60;
     return '$mins:${secs.toString().padLeft(2, '0')}';
   }
+
+  bool get isSkitOrShort =>
+      (duration != null && duration! > 0 && duration! < 60) ||
+      (duration != null &&
+          duration! < 90 &&
+          (title.toLowerCase().contains('skit') ||
+              title.toLowerCase().contains('interlude') ||
+              title.toLowerCase().contains('intro') ||
+              title.toLowerCase().contains('outro')));
 }
 
 class PlaylistSyncStatusModel {

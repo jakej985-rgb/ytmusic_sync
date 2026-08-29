@@ -48,18 +48,44 @@ async def test_ytm_uploads_filtering_and_summary(temp_db):
         "duration": 210.0
     })
 
+    # 4. Skit upload (under 1 minute)
+    await temp_db.upsert_ytm_upload({
+        "entity_id": "ent_skit_1",
+        "video_id": "vid_skit",
+        "title": "Album Intro (Skit)",
+        "artist": "Good Artist",
+        "album": "Great Album",
+        "thumbnail": "https://example.com/cover.jpg",
+        "duration": 42.0
+    })
+
+    # 5. Duplicate of Clean Song
+    await temp_db.upsert_ytm_upload({
+        "entity_id": "ent_dup_1",
+        "video_id": "vid_dup",
+        "title": "Clean Song.mp3",
+        "artist": "Good Artist",
+        "album": None,
+        "duration": 210.0
+    })
+
     summary = await temp_db.get_ytm_uploads_summary()
-    assert summary["total"] == 3
-    assert summary["missing_metadata"] == 2
-    assert summary["proper"] == 1
+    assert summary["total"] == 5
+    assert summary["missing_metadata"] == 3
+    assert summary["proper"] == 2
+    assert summary["skits"] == 1
+    assert summary["duplicates"] == 2
 
     missing_res = await temp_db.get_ytm_uploads(filter_type="missing_metadata")
-    assert missing_res["total"] == 2
-    assert {x.entity_id for x in missing_res["items"]} == {"ent_untagged_1", "ent_untagged_2"}
+    assert missing_res["total"] == 3
 
-    proper_res = await temp_db.get_ytm_uploads(filter_type="proper")
-    assert proper_res["total"] == 1
-    assert proper_res["items"][0].entity_id == "ent_proper_1"
+    skit_res = await temp_db.get_ytm_uploads(filter_type="skits")
+    assert skit_res["total"] == 1
+    assert skit_res["items"][0].entity_id == "ent_skit_1"
+
+    dup_res = await temp_db.get_ytm_uploads(filter_type="duplicates")
+    assert dup_res["total"] == 2
+    assert {x.entity_id for x in dup_res["items"]} == {"ent_proper_1", "ent_dup_1"}
 
 @pytest.mark.asyncio
 async def test_replace_ytm_upload_endpoint(temp_db, tmp_path):
