@@ -22,9 +22,22 @@ class _ParsedFilenameParts {
 class MetadataEditorDialog extends StatefulWidget {
   final MusicFile? song;
   final YtmUpload? ytmUpload;
+  final String? trackVideoId;
+  final String? initialTitle;
+  final String? initialArtist;
+  final String? initialAlbum;
+  final String? initialThumbnail;
 
-  const MetadataEditorDialog({super.key, this.song, this.ytmUpload})
-      : assert(song != null || ytmUpload != null);
+  const MetadataEditorDialog({
+    super.key,
+    this.song,
+    this.ytmUpload,
+    this.trackVideoId,
+    this.initialTitle,
+    this.initialArtist,
+    this.initialAlbum,
+    this.initialThumbnail,
+  }) : assert(song != null || ytmUpload != null || trackVideoId != null);
 
   static Future<bool?> show(BuildContext context, MusicFile song) {
     return showDialog<bool>(
@@ -37,6 +50,26 @@ class MetadataEditorDialog extends StatefulWidget {
     return showDialog<dynamic>(
       context: context,
       builder: (context) => MetadataEditorDialog(ytmUpload: upload),
+    );
+  }
+
+  static Future<dynamic> showForTrack(
+    BuildContext context, {
+    required String videoId,
+    required String title,
+    String? artist,
+    String? album,
+    String? thumbnail,
+  }) {
+    return showDialog<dynamic>(
+      context: context,
+      builder: (context) => MetadataEditorDialog(
+        trackVideoId: videoId,
+        initialTitle: title,
+        initialArtist: artist,
+        initialAlbum: album,
+        initialThumbnail: thumbnail,
+      ),
     );
   }
 
@@ -85,23 +118,36 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   @override
   void initState() {
     super.initState();
+    final isTrack = widget.trackVideoId != null;
     final isYtm = widget.ytmUpload != null;
-    final rawFilename = isYtm ? widget.ytmUpload!.title : widget.song!.filename;
+    final rawFilename = isTrack
+        ? (widget.initialTitle ?? 'Track')
+        : (isYtm ? widget.ytmUpload!.title : widget.song!.filename);
     String rawName = rawFilename.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '').trim();
     rawName = _cleanRipperJunk(rawName);
 
-    String initialTitle = (isYtm ? widget.ytmUpload!.title : widget.song!.title) ?? rawName;
+    String initialTitle = isTrack
+        ? (widget.initialTitle ?? rawName)
+        : ((isYtm ? widget.ytmUpload!.title : widget.song!.title) ?? rawName);
     if (initialTitle.toLowerCase().endsWith('.mp3') ||
         initialTitle.toLowerCase().endsWith('.flac') ||
         initialTitle.toLowerCase().endsWith('.m4a') ||
         initialTitle.toLowerCase().endsWith('.wav')) {
       initialTitle = rawName;
     }
-    String initialArtist = (isYtm ? widget.ytmUpload!.artist : widget.song!.artist) ?? '';
-    String initialAlbum = (isYtm ? widget.ytmUpload!.album : widget.song!.album) ?? '';
-    String initialTrackNum = (!isYtm && widget.song?.trackNumber != null) ? widget.song!.trackNumber.toString() : '';
+    String initialArtist = isTrack
+        ? (widget.initialArtist ?? '')
+        : ((isYtm ? widget.ytmUpload!.artist : widget.song!.artist) ?? '');
+    String initialAlbum = isTrack
+        ? (widget.initialAlbum ?? '')
+        : ((isYtm ? widget.ytmUpload!.album : widget.song!.album) ?? '');
+    String initialTrackNum = (!isYtm && !isTrack && widget.song?.trackNumber != null)
+        ? widget.song!.trackNumber.toString()
+        : '';
 
-    if (isYtm && widget.ytmUpload!.thumbnail != null && widget.ytmUpload!.thumbnail!.isNotEmpty) {
+    if (isTrack && widget.initialThumbnail != null && widget.initialThumbnail!.isNotEmpty) {
+      _selectedCoverUrl = widget.initialThumbnail;
+    } else if (isYtm && widget.ytmUpload!.thumbnail != null && widget.ytmUpload!.thumbnail!.isNotEmpty) {
       _selectedCoverUrl = widget.ytmUpload!.thumbnail;
     }
 
@@ -690,6 +736,36 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
             'artist': artist.isNotEmpty ? artist : null,
             'album': album.isNotEmpty ? album : null,
             'coverUrl': _selectedCoverUrl,
+          });
+        }
+        return;
+      }
+
+      if (widget.trackVideoId != null) {
+        // Track Needs-Help Resolve Mode
+        final res = await apiService.resolveNeedsHelpTrack(
+          widget.trackVideoId!,
+          title: title,
+          artist: artist.isNotEmpty ? artist : null,
+          album: album.isNotEmpty ? album : null,
+          thumbnail: _selectedCoverUrl,
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Resolved & uploaded "$title" with verified metadata to YouTube Music!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          Navigator.of(context).pop({
+            'saved': true,
+            'resolved': true,
+            'title': title,
+            'artist': artist.isNotEmpty ? artist : null,
+            'album': album.isNotEmpty ? album : null,
+            'coverUrl': _selectedCoverUrl,
+            'res': res,
           });
         }
         return;
@@ -1434,7 +1510,20 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                     child: const Text('Cancel'),
                   ),
                   const SizedBox(width: 10),
-                  if (widget.ytmUpload != null) ...[
+                  if (widget.trackVideoId != null) ...[
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF0000),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      ),
+                      onPressed: _isSaving ? null : () => _saveMetadata(),
+                      icon: _isSaving
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.cloud_download, size: 16),
+                      label: Text(_isSaving ? 'Resolving & Uploading...' : 'Download & Upload with Match'),
+                    ),
+                  ] else if (widget.ytmUpload != null) ...[
                     FilledButton.icon(
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFFFF0000),

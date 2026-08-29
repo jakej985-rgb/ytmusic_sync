@@ -544,6 +544,50 @@ async def cancel_all_queue():
     await unified_queue_service.cancel_all()
     return {"status": "ok"}
 
+class ResolveNeedsHelpRequest(BaseModel):
+    title: str
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    thumbnail: Optional[str] = None
+    destination_dir: Optional[str] = None
+
+@app.get("/api/needs-help")
+async def get_needs_help_tracks():
+    """List all tracks skipped during download because metadata match was missing."""
+    return await db.get_needs_help_tracks()
+
+@app.delete("/api/needs-help/{video_id}")
+async def dismiss_needs_help_track(video_id: str):
+    """Dismiss a track from needs-help list."""
+    await db.delete_needs_help_track(video_id)
+    return {"status": "ok"}
+
+@app.post("/api/needs-help/{video_id}/resolve")
+async def resolve_needs_help_track(video_id: str, req: ResolveNeedsHelpRequest):
+    """Resolve a needs-help track with user-selected metadata, download, and upload."""
+    dest_path = Path(req.destination_dir) if req.destination_dir else None
+    res = await download_and_upload_playlist_track(
+        video_id=video_id,
+        raw_title=req.title,
+        raw_artist=req.artist,
+        raw_album=req.album,
+        raw_thumbnail=req.thumbnail,
+        destination_dir=dest_path,
+        enrich_metadata=False,
+        require_full_match=False
+    )
+    if res.get("status") == "success":
+        await db.delete_needs_help_track(video_id)
+        metadata_tracker.log_change(
+            title=res.get("title") or req.title,
+            artist=res.get("artist") or req.artist,
+            album=res.get("album") or req.album,
+            thumbnail=res.get("cover_url") or req.thumbnail,
+            source="Needs Help Matcher",
+            detail="Resolved metadata & uploaded to YouTube Music locker"
+        )
+    return res
+
 @app.get("/api/uploads", response_model=list[YtmUpload])
 async def get_uploads() -> list[YtmUpload]:
     return await db.get_all_ytm_uploads()

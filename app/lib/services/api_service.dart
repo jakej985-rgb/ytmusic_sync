@@ -193,6 +193,44 @@ class ApiService {
     }
   }
 
+  Future<List<dynamic>> getNeedsHelpTracks() async {
+    final response = await http.get(Uri.parse('$baseUrl/api/needs-help'));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as List<dynamic>;
+    }
+    throw Exception('Failed to fetch needs-help tracks');
+  }
+
+  Future<void> dismissNeedsHelpTrack(String videoId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/api/needs-help/$videoId'));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to dismiss track');
+    }
+  }
+
+  Future<Map<String, dynamic>> resolveNeedsHelpTrack(
+    String videoId, {
+    required String title,
+    String? artist,
+    String? album,
+    String? thumbnail,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/needs-help/$videoId/resolve'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'title': title,
+        'artist': artist,
+        'album': album,
+        'thumbnail': thumbnail,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Failed to resolve track: ${response.body}');
+  }
+
   Future<List<SyncJob>> getHistory() async {
     final response = await http.get(Uri.parse('$baseUrl/api/history'));
     if (response.statusCode == 200) {

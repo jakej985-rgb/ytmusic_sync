@@ -71,11 +71,24 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS needs_help_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT,
+    album TEXT,
+    thumbnail TEXT,
+    source TEXT,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_music_files_path ON music_files(path);
 CREATE INDEX IF NOT EXISTS idx_music_files_artist_title ON music_files(artist, title);
 CREATE INDEX IF NOT EXISTS idx_ytm_uploads_entity ON ytm_uploads(entity_id);
 CREATE INDEX IF NOT EXISTS idx_matches_music_file ON matches(music_file_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_status ON sync_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_needs_help_video ON needs_help_tracks(video_id);
 """
 
 class Database:
@@ -851,6 +864,55 @@ class Database:
         async with self.get_connection() as db:
             await db.execute("DELETE FROM sync_jobs WHERE status = 'queued'")
             await db.commit()
+
+    async def upsert_needs_help_track(
+        self,
+        video_id: str,
+        title: str,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        thumbnail: Optional[str] = None,
+        source: Optional[str] = None,
+        reason: Optional[str] = None
+    ):
+        async with self.get_connection() as db:
+            await db.execute(
+                """
+                INSERT INTO needs_help_tracks (video_id, title, artist, album, thumbnail, source, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(video_id) DO UPDATE SET
+                    title = excluded.title,
+                    artist = excluded.artist,
+                    album = excluded.album,
+                    thumbnail = excluded.thumbnail,
+                    source = excluded.source,
+                    reason = excluded.reason,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (video_id, title, artist, album, thumbnail, source, reason)
+            )
+            await db.commit()
+
+    async def get_needs_help_tracks(self, limit: int = 200) -> list[dict]:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM needs_help_tracks ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def delete_needs_help_track(self, video_id: str):
+        async with self.get_connection() as db:
+            await db.execute("DELETE FROM needs_help_tracks WHERE video_id = ?", (video_id,))
+            await db.commit()
+
+    async def count_needs_help_tracks(self) -> int:
+        async with self.get_connection() as db:
+            async with db.execute("SELECT COUNT(*) FROM needs_help_tracks") as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
 
     # Stats
     async def get_dashboard_counts(self) -> dict:

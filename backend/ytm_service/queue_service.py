@@ -73,19 +73,39 @@ class UnifiedQueueService:
         # 3. Fetch metadata changes
         meta_items = metadata_tracker.get_recent(limit=100)
 
+        # 4. Fetch tracks needing help (no match found during download)
+        db_help_tracks = await db.get_needs_help_tracks(limit=100)
+        help_items: List[Dict[str, Any]] = []
+        seen_help_vids = set()
+        for h in db_help_tracks:
+            vid = h["video_id"]
+            help_items.append({
+                "id": f"help_{vid}",
+                "video_id": vid,
+                "category": "needs_help",
+                "title": h["title"],
+                "artist": h.get("artist"),
+                "album": h.get("album"),
+                "thumbnail": h.get("thumbnail"),
+                "status": "needs_help",
+                "current_step": f"Needs Help: {h.get('reason') or 'Missing verified metadata match'}",
+                "source": h.get("source") or "Playlist Sync",
+                "created_at": h.get("created_at"),
+                "error": h.get("reason")
+            })
+            seen_help_vids.add(vid)
+
         # Summary count computation
-        # Category "download": pl_items that are in_progress or queued
-        # Category "local_upload": local_items that are in_progress or queued
-        # Category "upload": both pl_items and local_items that are in_progress or queued
-        # Category "metadata_change": count of meta_items
         active_downloads = len([x for x in pl_items if x.get("status") in ("in_progress", "queued")])
         active_local_uploads = len([x for x in local_items if x.get("status") in ("in_progress", "queued")])
         active_uploads = active_downloads + active_local_uploads
         total_meta = len(meta_items)
+        total_help = len(help_items)
         active_total = active_downloads + active_local_uploads
 
         summary = {
-            "all": active_total + total_meta,
+            "all": active_total + total_meta + total_help,
+            "needs_help": total_help,
             "metadata_change": total_meta,
             "download": active_downloads,
             "upload": active_uploads,
@@ -95,15 +115,17 @@ class UnifiedQueueService:
 
         # Combine all items with prioritized ordering:
         # 1. in_progress items first
-        # 2. queued items second
-        # 3. metadata changes
-        # 4. completed / failed items
+        # 2. needs_help items second (requiring user attention!)
+        # 3. queued items third
+        # 4. metadata changes
+        # 5. completed / failed items
         in_progress_items = [x for x in pl_items + local_items if x.get("status") == "in_progress"]
         queued_items = [x for x in pl_items + local_items if x.get("status") == "queued"]
-        finished_items = [x for x in pl_items + local_items if x.get("status") in ("completed", "failed")]
+        finished_items = [x for x in pl_items + local_items if x.get("status") in ("completed", "failed") and x.get("video_id") not in seen_help_vids]
 
         combined: List[Dict[str, Any]] = []
         combined.extend(in_progress_items)
+        combined.extend(help_items)
         combined.extend(queued_items)
         combined.extend(meta_items)
         combined.extend(finished_items)
@@ -113,10 +135,14 @@ class UnifiedQueueService:
         for item in combined:
             cat = item.get("category", "")
             src = item.get("source", "")
+            st = item.get("status", "")
             if category == "all":
                 filtered.append(item)
+            elif category == "needs_help":
+                if cat == "needs_help" or st == "needs_help":
+                    filtered.append(item)
             elif category == "download":
-                if cat == "download" or src.startswith("Playlist:"):
+                if cat in ("download", "needs_help") or src.startswith("Playlist:"):
                     filtered.append(item)
             elif category == "upload":
                 if cat in ("upload", "local_upload") or src.startswith("Playlist:"):
@@ -130,8 +156,8 @@ class UnifiedQueueService:
 
         # Filter by status
         if status == "active":
-            filtered = [x for x in filtered if x.get("status") in ("in_progress", "queued")]
-        elif status in ("completed", "failed"):
+            filtered = [x for x in filtered if x.get("status") in ("in_progress", "queued", "needs_help")]
+        elif status in ("completed", "failed", "needs_help"):
             filtered = [x for x in filtered if x.get("status") == status]
 
         is_active = playlist_sync_manager.status.is_running or local_upload_queue.is_running

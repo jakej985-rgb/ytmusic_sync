@@ -25,6 +25,7 @@ class PlaylistSyncStatus(BaseModel):
     total_tracks: int = 0
     completed_tracks: int = 0
     failed_tracks: int = 0
+    needs_help_tracks: int = 0
     current_track: Optional[str] = None
     errors: list[str] = []
 
@@ -38,8 +39,8 @@ def clean_youtube_title(title: str, channel_name: Optional[str] = None) -> tuple
 
     # Remove brackets with common noise: [Official Audio], (Official Music Video), [HD], (Lyrics), etc.
     noise_patterns = [
-        r"\[(?:official\s+audio|official\s+video|official\s+music\s+video|audio|video|hd|hq|4k|lyrics)\]",
-        r"\((?:official\s+audio|official\s+video|official\s+music\s+video|audio|video|hd|hq|4k|lyrics|visualizer)\)",
+        r"\[(?:official\s+audio|official\s+video|official\s+music\s+video|audio|video|hd|hq|4k|lyrics|live|live\s+audio)\]",
+        r"\((?:official\s+audio|official\s+video|official\s+music\s+video|audio|video|hd|hq|4k|lyrics|visualizer|live|live\s+audio)\)",
         r"\b(?:official\s+music\s+video|official\s+video|official\s+audio)\b",
     ]
     for pat in noise_patterns:
@@ -74,53 +75,118 @@ async def download_and_upload_playlist_track(
     raw_album: Optional[str] = None,
     raw_thumbnail: Optional[str] = None,
     destination_dir: Optional[Path] = None,
-    enrich_metadata: bool = True
+    enrich_metadata: bool = True,
+    require_full_match: bool = True
 ) -> dict:
     """
     Download a single playlist track via yt-dlp, enrich/clean its metadata,
     write tags & artwork, upload to YouTube Music cloud locker, and save to local library.
+    If require_full_match is True and no match for artist, title, and album can be found:
+    skip download/upload and mark as 'needs_help'.
     """
+    # 1. Clean title and artist candidates
+    clean_title, detected_artist = clean_youtube_title(raw_title, raw_artist)
+    final_artist = raw_artist or detected_artist
+    final_title = clean_title or raw_title
+    final_album = raw_album
+    final_cover_url = raw_thumbnail
+
+    def is_known(val: Optional[str], forbidden=("unknown", "unknown artist", "unknown album", "single")) -> bool:
+        if not val or not str(val).strip():
+            return False
+        return str(val).strip().lower() not in forbidden
+
+    # 2. Metadata enrichment & search if needed
+    if enrich_metadata and final_title:
+        try:
+            search_query = final_title
+            search_artist = final_artist if is_known(final_artist) else None
+            logger.info(f"Searching metadata match for '{final_title}' (Artist: '{search_artist or 'Unknown'}')...")
+            matches = await musicbrainz_client.search(
+                query=search_query,
+                artist=search_artist,
+                provider="all"
+            )
+            if matches:
+                # Prefer a match that has verified artist, title, and album
+                full_matches = [
+                    m for m in matches 
+                    if is_known(m.title, forbidden=()) 
+                    and is_known(m.artist, forbidden=("unknown", "unknown artist")) 
+                    and is_known(m.album, forbidden=("unknown", "unknown album"))
+                ]
+                if full_matches:
+                    best = full_matches[0]
+                    final_title = best.title
+                    final_artist = best.artist
+                    final_album = best.album
+                    if best.cover_url:
+                        final_cover_url = best.cover_url
+                    logger.info(f"Found full metadata match: '{final_title}' by '{final_artist}' on album '{final_album}'")
+                elif matches[0].album and matches[0].artist:
+                    best = matches[0]
+                    final_title = best.title or final_title
+                    final_artist = best.artist or final_artist
+                    final_album = best.album or final_album
+                    if best.cover_url:
+                        final_cover_url = best.cover_url
+        except Exception as ex:
+            logger.debug(f"Metadata search exception: {ex}")
+
+    # 3. Check if we have a complete match for artist, title, and album
+    has_artist_match = is_known(final_artist, forbidden=("unknown", "unknown artist"))
+    has_title_match = bool(final_title and final_title.strip())
+    has_album_match = is_known(final_album, forbidden=("unknown", "unknown album"))
+
+    if require_full_match and (not has_artist_match or not has_title_match or not has_album_match):
+        missing_parts = []
+        if not has_artist_match:
+            missing_parts.append("artist")
+        if not has_title_match:
+            missing_parts.append("title")
+        if not has_album_match:
+            missing_parts.append("album")
+        reason = f"No match found for: {', '.join(missing_parts)}"
+        logger.info(f"Skipping download/upload for track {video_id} ('{final_title}') - Needs Help ({reason})")
+
+        # Save to database needs_help_tracks
+        await db.upsert_needs_help_track(
+            video_id=video_id,
+            title=final_title,
+            artist=final_artist,
+            album=final_album,
+            thumbnail=final_cover_url,
+            source="Playlist Sync",
+            reason=reason
+        )
+
+        return {
+            "status": "needs_help",
+            "video_id": video_id,
+            "title": final_title,
+            "artist": final_artist or "Unknown Artist",
+            "album": final_album or "Unknown Album",
+            "thumbnail": final_cover_url,
+            "reason": reason
+        }
+
+    # If we have all 3, ensure final_album and final_artist have valid fallbacks
+    final_artist = final_artist or "Unknown Artist"
+    final_album = final_album or "Single"
+
+    # 4. Proceed to download audio file via yt-dlp
     staging_dir = settings.data_dir / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
     temp_base = staging_dir / f"pl_{video_id}"
 
-    # 1. Download audio file
-    search_query = f"{raw_artist or ''} {raw_title}".strip()
-    logger.info(f"Downloading track {video_id} ('{raw_title}') via yt-dlp...")
+    search_query = f"{final_artist} {final_title}".strip()
+    logger.info(f"Downloading track {video_id} ('{final_title}' by '{final_artist}') via yt-dlp...")
     downloaded_file = await asyncio.to_thread(_download_sync, video_id, temp_base, search_query)
     if not downloaded_file or not downloaded_file.exists() or downloaded_file.stat().st_size == 0:
         raise RuntimeError(f"Failed to download audio for video {video_id}")
 
     try:
-        # 2. Clean title and artist
-        clean_title, detected_artist = clean_youtube_title(raw_title, raw_artist)
-        final_artist = raw_artist or detected_artist or "Unknown Artist"
-        final_title = clean_title or raw_title
-        final_album = raw_album or "Single"
-        final_cover_url = raw_thumbnail
-
-        # 3. Optional metadata enrichment (query MusicBrainz / Deezer / YTM)
-        if enrich_metadata and final_title and final_artist != "Unknown Artist":
-            try:
-                logger.info(f"Enriching metadata for '{final_title}' by '{final_artist}'...")
-                matches = await musicbrainz_client.search(
-                    query=final_title,
-                    artist=final_artist,
-                    provider="all"
-                )
-                if matches and len(matches) > 0:
-                    best = matches[0]
-                    final_title = best.title or final_title
-                    final_artist = best.artist or final_artist
-                    if best.album:
-                        final_album = best.album
-                    if best.cover_url:
-                        final_cover_url = best.cover_url
-                    logger.info(f"Matched with '{final_title}' by '{final_artist}' (Album: '{final_album}')")
-            except Exception as ex:
-                logger.debug(f"Metadata enrichment skipped: {ex}")
-
-        # 4. Write metadata tags & embed cover art
+        # Write metadata tags & embed cover art
         logger.info(f"Tagging audio: Title='{final_title}', Artist='{final_artist}', Album='{final_album}'")
         await asyncio.to_thread(
             write_metadata_tags,
@@ -131,18 +197,17 @@ async def download_and_upload_playlist_track(
             cover_url=final_cover_url
         )
 
-        # 5. Upload newly tagged song to YouTube Music cloud locker
+        # Upload newly tagged song to YouTube Music cloud locker
         logger.info(f"Uploading tagged track '{final_title}' to YouTube Music locker...")
         up_res = await ytm_client.upload_file(str(downloaded_file))
         if not up_res.get("success"):
             raise RuntimeError(f"YouTube Music upload failed: {up_res.get('response')}")
 
-        # 6. Save a local copy to /music if directory exists and is writable
+        # Save a local copy to /music if directory exists and is writable
         local_saved_path: Optional[str] = None
         target_music_dir = destination_dir or Path("/music")
         if target_music_dir.exists() and os.access(str(target_music_dir), os.W_OK):
             try:
-                # Organize by /music/<Artist>/<Album>/<Title>.mp3
                 safe_artist = re.sub(r'[\\/*?:"<>|]', "", final_artist).strip() or "Unknown Artist"
                 safe_album = re.sub(r'[\\/*?:"<>|]', "", final_album).strip() or "Unknown Album"
                 safe_title = re.sub(r'[\\/*?:"<>|]', "", final_title).strip() or "Track"
@@ -161,7 +226,7 @@ async def download_and_upload_playlist_track(
             except Exception as e:
                 logger.warning(f"Could not save local copy to {target_music_dir}: {e}")
 
-        # 7. Upsert into ytm_uploads so it appears immediately in locker
+        # Upsert into ytm_uploads so it appears immediately in locker
         await db.upsert_ytm_upload({
             "entity_id": f"up_{video_id}",
             "video_id": video_id,
@@ -170,6 +235,9 @@ async def download_and_upload_playlist_track(
             "album": final_album,
             "thumbnail": final_cover_url
         })
+
+        # Remove from needs_help_tracks if previously marked
+        await db.delete_needs_help_track(video_id)
 
         return {
             "status": "success",
@@ -272,29 +340,46 @@ class PlaylistSyncManager:
                 logger.info(f"Syncing ({self._status.completed_tracks + 1}/{self._status.total_tracks}): {self._status.current_track}")
 
                 try:
-                    await download_and_upload_playlist_track(
+                    res = await download_and_upload_playlist_track(
                         video_id=video_id,
                         raw_title=title,
                         raw_artist=artist,
                         raw_album=album,
                         raw_thumbnail=thumb,
                         destination_dir=destination_dir,
-                        enrich_metadata=True
+                        enrich_metadata=True,
+                        require_full_match=True
                     )
-                    self._status.completed_tracks += 1
-                    self._history.appendleft({
-                        "id": f"pl_done_{video_id}",
-                        "category": "download",
-                        "title": title,
-                        "artist": artist,
-                        "album": album,
-                        "thumbnail": thumb,
-                        "status": "completed",
-                        "current_step": "Downloaded & uploaded to cloud locker",
-                        "source": f"Playlist: {self._status.playlist_title}",
-                        "created_at": datetime.now().isoformat(),
-                        "error": None
-                    })
+                    if res.get("status") == "needs_help":
+                        self._status.needs_help_tracks += 1
+                        self._history.appendleft({
+                            "id": f"pl_help_{video_id}",
+                            "category": "download",
+                            "title": res.get("title") or title,
+                            "artist": res.get("artist") or artist,
+                            "album": res.get("album") or album,
+                            "thumbnail": thumb,
+                            "status": "needs_help",
+                            "current_step": f"Needs Help: {res.get('reason')}",
+                            "source": f"Playlist: {self._status.playlist_title}",
+                            "created_at": datetime.now().isoformat(),
+                            "error": res.get("reason")
+                        })
+                    else:
+                        self._status.completed_tracks += 1
+                        self._history.appendleft({
+                            "id": f"pl_done_{video_id}",
+                            "category": "download",
+                            "title": res.get("title") or title,
+                            "artist": res.get("artist") or artist,
+                            "album": res.get("album") or album,
+                            "thumbnail": thumb,
+                            "status": "completed",
+                            "current_step": "Downloaded & uploaded to cloud locker",
+                            "source": f"Playlist: {self._status.playlist_title}",
+                            "created_at": datetime.now().isoformat(),
+                            "error": None
+                        })
                 except Exception as ex:
                     logger.error(f"Failed to sync track {video_id} ('{title}'): {ex}")
                     self._status.failed_tracks += 1

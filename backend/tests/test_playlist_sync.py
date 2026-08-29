@@ -249,3 +249,76 @@ async def test_sync_worker_skips_existing_uploads(temp_db, tmp_path):
         mock_down.assert_not_called()
         assert mgr.status.completed_tracks == 2
 
+
+@pytest.mark.asyncio
+async def test_download_track_skips_when_no_match_and_marks_needs_help(temp_db, tmp_path):
+    with patch("ytm_service.playlist_downloader.musicbrainz_client.search", return_value=[]), \
+         patch("ytm_service.playlist_downloader._download_sync") as mock_yt_dl, \
+         patch("ytm_service.playlist_downloader.ytm_client.upload_file") as mock_up:
+
+        # Track with no album and no artist match in MusicBrainz
+        res = await download_and_upload_playlist_track(
+            video_id="vid_unknown_meta",
+            raw_title="Unrecognized Track (Live Audio)",
+            raw_artist=None,
+            raw_album=None,
+            enrich_metadata=True,
+            require_full_match=True
+        )
+
+        assert res["status"] == "needs_help"
+        assert "No match found for" in res["reason"]
+        # yt-dlp download and YTM upload must NOT have been called!
+        mock_yt_dl.assert_not_called()
+        mock_up.assert_not_called()
+
+        # Must be saved to database needs_help_tracks
+        help_tracks = await temp_db.get_needs_help_tracks()
+        assert len(help_tracks) == 1
+        assert help_tracks[0]["video_id"] == "vid_unknown_meta"
+        assert "Live Audio" not in help_tracks[0]["title"]  # Cleaned
+
+
+@pytest.mark.asyncio
+async def test_resolve_needs_help_track(temp_db, tmp_path):
+    from httpx import AsyncClient, ASGITransport
+    from ytm_service.main import app
+
+    # Insert a needs-help track
+    await temp_db.upsert_needs_help_track(
+        video_id="vid_resolve_1",
+        title="Unknown Song",
+        artist=None,
+        album=None,
+        reason="Missing metadata"
+    )
+
+    fake_file = tmp_path / "song.mp3"
+    fake_file.write_bytes(b"dummy")
+
+    with patch("ytm_service.playlist_downloader._download_sync", return_value=fake_file), \
+         patch("ytm_service.playlist_downloader.write_metadata_tags"), \
+         patch("ytm_service.playlist_downloader.ytm_client.upload_file", return_value={"success": True, "response": "ok"}):
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/needs-help/vid_resolve_1/resolve",
+                json={
+                    "title": "Cleaned Title",
+                    "artist": "Known Artist",
+                    "album": "Known Album"
+                }
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "success"
+            assert data["title"] == "Cleaned Title"
+            assert data["artist"] == "Known Artist"
+            assert data["album"] == "Known Album"
+
+            # Should be deleted from needs_help_tracks
+            remaining = await temp_db.get_needs_help_tracks()
+            assert len(remaining) == 0
+
+

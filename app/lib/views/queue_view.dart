@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import 'components/metadata_editor_dialog.dart';
 
 class QueueView extends StatefulWidget {
   const QueueView({super.key});
@@ -11,9 +12,10 @@ class QueueView extends StatefulWidget {
 }
 
 class _QueueViewState extends State<QueueView> {
-  String _activeCategory = 'all'; // all, metadata_change, download, upload, local_upload
+  String _activeCategory = 'all'; // all, needs_help, metadata_change, download, upload, local_upload
   Map<String, int> _summary = {
     'all': 0,
+    'needs_help': 0,
     'metadata_change': 0,
     'download': 0,
     'upload': 0,
@@ -133,8 +135,23 @@ class _QueueViewState extends State<QueueView> {
     }
   }
 
+  Future<void> _dismissHelp(String videoId) async {
+    try {
+      await apiService.dismissNeedsHelpTrack(videoId);
+      _loadQueue();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
+  }
+
   Color _getCategoryColor(String category) {
     switch (category) {
+      case 'needs_help':
+        return Colors.amberAccent;
       case 'metadata_change':
         return Colors.orangeAccent;
       case 'download':
@@ -149,6 +166,8 @@ class _QueueViewState extends State<QueueView> {
 
   IconData _getCategoryIcon(String category) {
     switch (category) {
+      case 'needs_help':
+        return Icons.help_outline_rounded;
       case 'metadata_change':
         return Icons.edit_note_rounded;
       case 'download':
@@ -163,6 +182,8 @@ class _QueueViewState extends State<QueueView> {
 
   String _getCategoryLabel(String key) {
     switch (key) {
+      case 'needs_help':
+        return 'Needs Help';
       case 'metadata_change':
         return 'Metadata Change';
       case 'download':
@@ -335,6 +356,7 @@ class _QueueViewState extends State<QueueView> {
             child: Row(
               children: [
                 _buildCategoryChip('all'),
+                _buildCategoryChip('needs_help'),
                 _buildCategoryChip('metadata_change'),
                 _buildCategoryChip('download'),
                 _buildCategoryChip('upload'),
@@ -381,6 +403,7 @@ class _QueueViewState extends State<QueueView> {
                           final isInProgress = item.status == 'in_progress';
                           final isCompleted = item.status == 'completed';
                           final isFailed = item.status == 'failed';
+                          final isNeedsHelp = item.status == 'needs_help';
                           final catColor = _getCategoryColor(item.category);
 
                           return Container(
@@ -391,10 +414,12 @@ class _QueueViewState extends State<QueueView> {
                               border: Border.all(
                                 color: isInProgress
                                     ? catColor.withValues(alpha: 0.5)
-                                    : isFailed
-                                        ? Colors.redAccent.withValues(alpha: 0.4)
-                                        : Colors.white10,
-                                width: isInProgress ? 1.5 : 1,
+                                    : isNeedsHelp
+                                        ? Colors.amberAccent.withValues(alpha: 0.5)
+                                        : isFailed
+                                            ? Colors.redAccent.withValues(alpha: 0.4)
+                                            : Colors.white10,
+                                width: (isInProgress || isNeedsHelp) ? 1.5 : 1,
                               ),
                             ),
                             child: Row(
@@ -520,65 +545,124 @@ class _QueueViewState extends State<QueueView> {
                                   const SizedBox(width: 12),
                                 ],
 
-                                // Status Badge
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                  decoration: BoxDecoration(
-                                    color: isInProgress
-                                        ? catColor.withValues(alpha: 0.18)
-                                        : isCompleted
-                                            ? Colors.green.withValues(alpha: 0.15)
-                                            : isFailed
-                                                ? Colors.red.withValues(alpha: 0.18)
-                                                : Colors.amber.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (isInProgress) ...[
-                                        SizedBox(
-                                          width: 12,
-                                          height: 12,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: catColor,
+                                // Status Badge & Actions
+                                if (isNeedsHelp) ...[
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.amber.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.4)),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.help_outline_rounded, size: 14, color: Colors.amberAccent),
+                                        SizedBox(width: 6),
+                                        Text(
+                                          'Needs Help',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.amberAccent,
                                           ),
                                         ),
-                                        const SizedBox(width: 8),
-                                      ] else if (isCompleted) ...[
-                                        const Icon(Icons.check_circle_outline, size: 14, color: Colors.greenAccent),
-                                        const SizedBox(width: 6),
-                                      ] else if (isFailed) ...[
-                                        const Icon(Icons.error_outline, size: 14, color: Colors.redAccent),
-                                        const SizedBox(width: 6),
-                                      ] else ...[
-                                        Icon(Icons.schedule, size: 14, color: Colors.amber[300]),
-                                        const SizedBox(width: 6),
                                       ],
-                                      Text(
-                                        isInProgress
-                                            ? 'Processing'
-                                            : isCompleted
-                                                ? 'Done'
-                                                : isFailed
-                                                    ? 'Failed'
-                                                    : 'Queued',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold,
-                                          color: isInProgress
-                                              ? catColor
-                                              : isCompleted
-                                                  ? Colors.greenAccent
-                                                  : isFailed
-                                                      ? Colors.redAccent
-                                                      : Colors.amber[300],
-                                        ),
-                                      ),
-                                    ],
+                                    ),
                                   ),
-                                ),
+                                  const SizedBox(width: 8),
+                                  FilledButton.tonalIcon(
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: Colors.amberAccent.withValues(alpha: 0.15),
+                                      foregroundColor: Colors.amberAccent,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                    ),
+                                    onPressed: () async {
+                                      final videoId = item.videoId ?? item.id.replaceFirst('help_', '').replaceFirst('pl_help_', '');
+                                      final res = await MetadataEditorDialog.showForTrack(
+                                        context,
+                                        videoId: videoId,
+                                        title: item.title,
+                                        artist: item.artist,
+                                        album: item.album,
+                                        thumbnail: item.thumbnail,
+                                      );
+                                      if (res != null) {
+                                        _loadQueue();
+                                      }
+                                    },
+                                    icon: const Icon(Icons.search_rounded, size: 15),
+                                    label: const Text('Find Match', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    tooltip: 'Dismiss',
+                                    icon: const Icon(Icons.close_rounded, size: 16, color: Colors.white54),
+                                    onPressed: () {
+                                      final videoId = item.videoId ?? item.id.replaceFirst('help_', '').replaceFirst('pl_help_', '');
+                                      _dismissHelp(videoId);
+                                    },
+                                  ),
+                                ] else ...[
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: isInProgress
+                                          ? catColor.withValues(alpha: 0.18)
+                                          : isCompleted
+                                              ? Colors.green.withValues(alpha: 0.15)
+                                              : isFailed
+                                                  ? Colors.red.withValues(alpha: 0.18)
+                                                  : Colors.amber.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (isInProgress) ...[
+                                          SizedBox(
+                                            width: 12,
+                                            height: 12,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: catColor,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ] else if (isCompleted) ...[
+                                          const Icon(Icons.check_circle_outline, size: 14, color: Colors.greenAccent),
+                                          const SizedBox(width: 6),
+                                        ] else if (isFailed) ...[
+                                          const Icon(Icons.error_outline, size: 14, color: Colors.redAccent),
+                                          const SizedBox(width: 6),
+                                        ] else ...[
+                                          Icon(Icons.schedule, size: 14, color: Colors.amber[300]),
+                                          const SizedBox(width: 6),
+                                        ],
+                                        Text(
+                                          isInProgress
+                                              ? 'Processing'
+                                              : isCompleted
+                                                  ? 'Done'
+                                                  : isFailed
+                                                      ? 'Failed'
+                                                      : 'Queued',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: isInProgress
+                                                ? catColor
+                                                : isCompleted
+                                                    ? Colors.greenAccent
+                                                    : isFailed
+                                                        ? Colors.redAccent
+                                                        : Colors.amber[300],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           );

@@ -560,6 +560,7 @@ class PlaylistSyncStatusModel {
   final int totalTracks;
   final int completedTracks;
   final int failedTracks;
+  final int needsHelpTracks;
   final String? currentTrack;
   final List<String> errors;
 
@@ -570,6 +571,7 @@ class PlaylistSyncStatusModel {
     required this.totalTracks,
     required this.completedTracks,
     required this.failedTracks,
+    this.needsHelpTracks = 0,
     this.currentTrack,
     required this.errors,
   });
@@ -582,6 +584,7 @@ class PlaylistSyncStatusModel {
       totalTracks: json['total_tracks'] ?? 0,
       completedTracks: json['completed_tracks'] ?? 0,
       failedTracks: json['failed_tracks'] ?? 0,
+      needsHelpTracks: json['needs_help_tracks'] ?? 0,
       currentTrack: json['current_track'],
       errors: (json['errors'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
     );
@@ -592,12 +595,13 @@ class PlaylistSyncStatusModel {
 
 class UnifiedQueueItem {
   final String id;
-  final String category; // 'download', 'upload', 'local_upload', 'metadata_change'
+  final String? videoId;
+  final String category; // 'download', 'upload', 'local_upload', 'metadata_change', 'needs_help'
   final String title;
   final String? artist;
   final String? album;
   final String? thumbnail;
-  final String status; // 'in_progress', 'queued', 'completed', 'failed'
+  final String status; // 'in_progress', 'queued', 'completed', 'failed', 'needs_help'
   final String? currentStep;
   final String? source;
   final String? createdAt;
@@ -605,6 +609,7 @@ class UnifiedQueueItem {
 
   UnifiedQueueItem({
     required this.id,
+    this.videoId,
     required this.category,
     required this.title,
     this.artist,
@@ -620,6 +625,7 @@ class UnifiedQueueItem {
   factory UnifiedQueueItem.fromJson(Map<String, dynamic> json) {
     return UnifiedQueueItem(
       id: json['id'] ?? '',
+      videoId: json['video_id'],
       category: json['category'] ?? 'upload',
       title: json['title'] ?? 'Untitled',
       artist: json['artist'],
@@ -651,6 +657,7 @@ class UnifiedQueueResponse {
     final rawSummary = json['summary'] as Map<String, dynamic>? ?? {};
     final summary = <String, int>{
       'all': rawSummary['all'] ?? 0,
+      'needs_help': rawSummary['needs_help'] ?? 0,
       'metadata_change': rawSummary['metadata_change'] ?? 0,
       'download': rawSummary['download'] ?? 0,
       'upload': rawSummary['upload'] ?? 0,
