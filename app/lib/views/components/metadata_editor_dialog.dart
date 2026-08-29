@@ -46,6 +46,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   late TextEditingController _artistController;
   late TextEditingController _albumController;
   late TextEditingController _trackNumController;
+  late TextEditingController _searchQueryController;
 
   bool _isSaving = false;
   String? _errorMessage;
@@ -95,6 +96,11 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     _albumController = TextEditingController(text: initialAlbum);
     _trackNumController = TextEditingController(text: initialTrackNum);
 
+    final initialSearch = (initialArtist.isNotEmpty && initialTitle.isNotEmpty)
+        ? '$initialArtist - $initialTitle'
+        : (initialTitle.isNotEmpty ? initialTitle : rawName);
+    _searchQueryController = TextEditingController(text: initialSearch);
+
     // If initial artist has feat/ft, normalize immediately
     _normalizeFeaturedArtists();
   }
@@ -105,6 +111,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     _artistController.dispose();
     _albumController.dispose();
     _trackNumController.dispose();
+    _searchQueryController.dispose();
     super.dispose();
   }
 
@@ -306,27 +313,37 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     try {
       final artist = _artistController.text.trim();
       final title = _titleController.text.trim();
-      final fallbackName = (widget.ytmUpload != null ? widget.ytmUpload!.title : (widget.song?.filename ?? '')).replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
-      final q = query ?? (artist.isNotEmpty && title.isNotEmpty ? null : fallbackName);
+      final searchBox = _searchQueryController.text.trim();
+
+      String? q = query ?? (searchBox.isNotEmpty ? searchBox : null);
+      if (q == null) {
+        if (artist.isNotEmpty && title.isNotEmpty) {
+          q = '$artist - $title';
+        } else if (title.isNotEmpty) {
+          q = title;
+        } else {
+          q = (widget.ytmUpload != null ? widget.ytmUpload!.title : (widget.song?.filename ?? '')).replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+        }
+      }
 
       final results = await apiService.searchMusicBrainz(
         query: q,
         artist: artist.isNotEmpty ? artist : null,
         title: title.isNotEmpty ? title : null,
-        limit: 5,
+        limit: 6,
       );
 
       setState(() {
         _mbMatches = results;
         _isSearchingMb = false;
         if (results.isEmpty) {
-          _mbSearchMessage = 'No matching tracks found on MusicBrainz.';
+          _mbSearchMessage = 'No matching tracks found. Try adjusting the search box above or typing Artist Name.';
         }
       });
     } catch (e) {
       setState(() {
         _isSearchingMb = false;
-        _mbSearchMessage = 'Error searching MusicBrainz: $e';
+        _mbSearchMessage = 'Error searching metadata: $e';
       });
     }
   }
@@ -335,6 +352,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     setState(() {
       _titleController.text = match.title;
       _artistController.text = match.artist;
+      _searchQueryController.text = '${match.artist} - ${match.title}';
       if (match.album != null && match.album!.isNotEmpty) {
         _albumController.text = match.album!;
       }
@@ -345,7 +363,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Applied MusicBrainz tags: "${match.title}"!'),
+        content: Text('Applied tags: "${match.title}" by ${match.artist}!'),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -571,13 +589,56 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                       side: const BorderSide(color: Color(0xFF00B4D8)),
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     ),
-                    onPressed: _isSearchingMb ? null : _searchMusicBrainz,
+                    onPressed: _isSearchingMb ? null : () => _searchMusicBrainz(),
                     icon: _isSearchingMb
                         ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8)))
                         : const Icon(Icons.search, size: 15),
-                    label: const Text('Search MusicBrainz', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    label: const Text('Search Online', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+
+              // Dedicated Search Bar
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF14141A),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchQueryController,
+                        onSubmitted: (val) => _searchMusicBrainz(query: val),
+                        style: const TextStyle(fontSize: 13),
+                        decoration: InputDecoration(
+                          hintText: 'Search online metadata (e.g. Billy Joel - Uptown Girl)',
+                          hintStyle: const TextStyle(fontSize: 12, color: Colors.white38),
+                          prefixIcon: const Icon(Icons.search, size: 18, color: Color(0xFF00B4D8)),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF00B4D8),
+                        foregroundColor: Colors.white,
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.horizontal(right: Radius.circular(8)),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      ),
+                      onPressed: _isSearchingMb ? null : () => _searchMusicBrainz(query: _searchQueryController.text.trim()),
+                      child: _isSearchingMb
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Text('Search', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 14),
 
@@ -589,14 +650,14 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   decoration: BoxDecoration(
                     color: const Color(0xFF14141A),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFF00B4D8).withOpacity(0.3)),
+                    border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.3)),
                   ),
                   child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8))),
                       SizedBox(width: 10),
-                      Text('Searching MusicBrainz database...', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                      Text('Searching MusicBrainz & iTunes databases...', style: TextStyle(fontSize: 12, color: Colors.white70)),
                     ],
                   ),
                 ),
@@ -609,9 +670,9 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   decoration: BoxDecoration(
-                    color: Colors.amber.withOpacity(0.1),
+                    color: Colors.amber.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                    border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     children: [
@@ -638,7 +699,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                   decoration: BoxDecoration(
                     color: const Color(0xFF14141A),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFF00B4D8).withOpacity(0.4)),
+                    border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.4)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -695,7 +756,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                                         Container(
                                           padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                                           decoration: BoxDecoration(
-                                            color: match.score >= 90 ? Colors.green.withOpacity(0.2) : Colors.amber.withOpacity(0.2),
+                                            color: match.score >= 90 ? Colors.green.withValues(alpha: 0.2) : Colors.amber.withValues(alpha: 0.2),
                                             borderRadius: BorderRadius.circular(4),
                                           ),
                                           child: Text(
@@ -765,14 +826,20 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
               // Title Field
               TextField(
                 controller: _titleController,
+                onSubmitted: (_) => _searchMusicBrainz(),
                 decoration: InputDecoration(
                   labelText: 'Song Title *',
-                  hintText: 'e.g. For Some Strange Reason ft. Brotha Lynch Hung',
+                  hintText: 'e.g. Uptown Girl',
                   isDense: true,
                   filled: true,
                   fillColor: const Color(0xFF14141A),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                   prefixIcon: const Icon(Icons.title, size: 18),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.search, size: 18, color: Color(0xFF00B4D8)),
+                    tooltip: 'Search online with this title & artist',
+                    onPressed: () => _searchMusicBrainz(),
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -780,14 +847,20 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
               // Artist Field
               TextField(
                 controller: _artistController,
+                onSubmitted: (_) => _searchMusicBrainz(),
                 decoration: InputDecoration(
                   labelText: 'Artist Name *',
-                  hintText: 'e.g. C-Mob',
+                  hintText: 'e.g. Billy Joel',
                   isDense: true,
                   filled: true,
                   fillColor: const Color(0xFF14141A),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                   prefixIcon: const Icon(Icons.person_outline, size: 18),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.search, size: 18, color: Color(0xFF00B4D8)),
+                    tooltip: 'Search online with this artist & title',
+                    onPressed: () => _searchMusicBrainz(),
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
