@@ -48,6 +48,9 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
   late TextEditingController _trackNumController;
   late TextEditingController _searchQueryController;
 
+  String? _selectedCoverUrl;
+  bool _isSearchingCover = false;
+
   bool _isSaving = false;
   String? _errorMessage;
 
@@ -71,6 +74,10 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
     String initialArtist = (isYtm ? widget.ytmUpload!.artist : widget.song!.artist) ?? '';
     String initialAlbum = (isYtm ? widget.ytmUpload!.album : widget.song!.album) ?? '';
     String initialTrackNum = (!isYtm && widget.song?.trackNumber != null) ? widget.song!.trackNumber.toString() : '';
+
+    if (isYtm && widget.ytmUpload!.thumbnail != null && widget.ytmUpload!.thumbnail!.isNotEmpty) {
+      _selectedCoverUrl = widget.ytmUpload!.thumbnail;
+    }
 
     // Auto-detect if artist is unknown or empty
     if (initialArtist.isEmpty || initialArtist.toLowerCase() == 'unknown artist') {
@@ -359,6 +366,9 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
       if (match.trackNumber != null) {
         _trackNumController.text = match.trackNumber.toString();
       }
+      if (match.coverUrl != null && match.coverUrl!.isNotEmpty) {
+        _selectedCoverUrl = match.coverUrl;
+      }
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -370,6 +380,43 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
 
     if (andUpload) {
       _saveMetadata(enqueueUpload: true);
+    }
+  }
+
+  Future<void> _fetchCoverArt() async {
+    final artist = _artistController.text.trim();
+    if (artist.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter an Artist Name first.')),
+      );
+      return;
+    }
+    setState(() => _isSearchingCover = true);
+    try {
+      final url = await apiService.fetchCoverArtUrl(
+        artist: artist,
+        title: _titleController.text.trim(),
+        album: _albumController.text.trim(),
+      );
+      if (mounted) {
+        setState(() {
+          _isSearchingCover = false;
+          if (url != null) {
+            _selectedCoverUrl = url;
+          }
+        });
+        if (url != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Album cover art found & attached!')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No cover art found for this track.')),
+          );
+        }
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isSearchingCover = false);
     }
   }
 
@@ -398,6 +445,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
           artist: artist.isNotEmpty ? artist : null,
           album: album.isNotEmpty ? album : null,
           trackNumber: trackNum,
+          coverUrl: _selectedCoverUrl,
         );
         if (res['success'] != true) {
           throw Exception(res['error'] ?? 'Failed to replace upload');
@@ -423,6 +471,7 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
         artist: artist.isNotEmpty ? artist : null,
         album: album.isNotEmpty ? album : null,
         trackNumber: trackNum,
+        coverUrl: _selectedCoverUrl,
       );
 
       if (enqueueUpload) {
@@ -738,6 +787,30 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                           ),
                           child: Row(
                             children: [
+                              // Candidate Cover Art Thumbnail
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: (match.coverUrl != null && match.coverUrl!.isNotEmpty)
+                                    ? Image.network(
+                                        match.coverUrl!,
+                                        width: 44,
+                                        height: 44,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (context, error, stackTrace) => Container(
+                                          width: 44,
+                                          height: 44,
+                                          color: const Color(0xFF14141C),
+                                          child: const Icon(Icons.album, size: 22, color: Colors.white38),
+                                        ),
+                                      )
+                                    : Container(
+                                        width: 44,
+                                        height: 44,
+                                        color: const Color(0xFF14141C),
+                                        child: const Icon(Icons.album, size: 22, color: Colors.white38),
+                                      ),
+                              ),
+                              const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -822,6 +895,98 @@ class _MetadataEditorDialogState extends State<MetadataEditorDialog> {
                 ),
                 const SizedBox(height: 14),
               ],
+
+              // Cover Artwork Preview Card
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF14141A),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _selectedCoverUrl != null ? const Color(0xFF00B4D8).withValues(alpha: 0.3) : Colors.white10,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                          ? Image.network(
+                              _selectedCoverUrl!,
+                              width: 54,
+                              height: 54,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) => Container(
+                                width: 54,
+                                height: 54,
+                                color: const Color(0xFF22222E),
+                                child: const Icon(Icons.broken_image, size: 22, color: Colors.white38),
+                              ),
+                            )
+                          : Container(
+                              width: 54,
+                              height: 54,
+                              color: const Color(0xFF22222E),
+                              child: const Icon(Icons.album, size: 28, color: Colors.white24),
+                            ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Text('Cover Art', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
+                              const SizedBox(width: 6),
+                              if (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.green.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('Attached', style: TextStyle(fontSize: 10, color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+                                )
+                              else
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('Auto-fetches on upload', style: TextStyle(fontSize: 10, color: Colors.amberAccent)),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            (_selectedCoverUrl != null && _selectedCoverUrl!.isNotEmpty)
+                                ? 'Cover art will be embedded into audio tags before uploading.'
+                                : 'Will be automatically searched and embedded when uploaded.',
+                            style: const TextStyle(fontSize: 11, color: Colors.white60),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        minimumSize: const Size(60, 30),
+                        side: const BorderSide(color: Color(0xFF00B4D8)),
+                        foregroundColor: const Color(0xFF00B4D8),
+                      ),
+                      onPressed: _isSearchingCover ? null : _fetchCoverArt,
+                      icon: _isSearchingCover
+                          ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00B4D8)))
+                          : const Icon(Icons.image_search, size: 14),
+                      label: const Text('Fetch Art', style: TextStyle(fontSize: 11)),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
 
               // Title Field
               TextField(

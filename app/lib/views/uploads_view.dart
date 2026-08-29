@@ -467,21 +467,46 @@ class _UploadsViewState extends State<UploadsView> {
           ),
           child: Row(
             children: [
-              // Icon or Thumbnail
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: isUntagged ? Colors.amber.withValues(alpha: 0.1) : const Color(0xFF22222E),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Center(
-                  child: Icon(
-                    isUntagged ? Icons.warning_amber_rounded : Icons.music_note,
-                    color: isUntagged ? Colors.amber : const Color(0xFF00B4D8),
-                    size: 22,
-                  ),
-                ),
+              // Icon or Cover Thumbnail
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: (upload.thumbnail != null && upload.thumbnail!.isNotEmpty)
+                    ? Image.network(
+                        upload.thumbnail!,
+                        width: 44,
+                        height: 44,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) => Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: isUntagged ? Colors.amber.withValues(alpha: 0.1) : const Color(0xFF22222E),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Center(
+                            child: Icon(
+                              isUntagged ? Icons.warning_amber_rounded : Icons.music_note,
+                              color: isUntagged ? Colors.amber : const Color(0xFF00B4D8),
+                              size: 22,
+                            ),
+                          ),
+                        ),
+                      )
+                    : Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: isUntagged ? Colors.amber.withValues(alpha: 0.1) : const Color(0xFF22222E),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Center(
+                          child: Icon(
+                            isUntagged ? Icons.warning_amber_rounded : Icons.music_note,
+                            color: isUntagged ? Colors.amber : const Color(0xFF00B4D8),
+                            size: 22,
+                          ),
+                        ),
+                      ),
               ),
               const SizedBox(width: 14),
 

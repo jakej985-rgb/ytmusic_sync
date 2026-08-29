@@ -111,6 +111,7 @@ class ApiService {
     String? artist,
     String? album,
     int? trackNumber,
+    String? coverUrl,
   }) async {
     final response = await http.post(
       Uri.parse('$baseUrl/api/songs/$fileId/metadata'),
@@ -120,6 +121,7 @@ class ApiService {
         'artist': (artist != null && artist.isNotEmpty) ? artist : null,
         'album': (album != null && album.isNotEmpty) ? album : null,
         'track_number': trackNumber,
+        'cover_url': (coverUrl != null && coverUrl.isNotEmpty) ? coverUrl : null,
       }),
     );
     if (response.statusCode == 200) {
@@ -317,6 +319,7 @@ class ApiService {
     String? artist,
     String? album,
     int? trackNumber,
+    String? coverUrl,
   }) async {
     final response = await http.post(
       Uri.parse('$baseUrl/api/ytm/uploads/$entityId/replace'),
@@ -326,6 +329,7 @@ class ApiService {
         'artist': artist,
         'album': album,
         'track_number': trackNumber,
+        'cover_url': (coverUrl != null && coverUrl.isNotEmpty) ? coverUrl : null,
       }),
     );
 
@@ -340,6 +344,25 @@ class ApiService {
       }
     } catch (_) {}
     return {'success': false, 'error': error};
+  }
+
+  Future<String?> fetchCoverArtUrl({
+    required String artist,
+    String? title,
+    String? album,
+  }) async {
+    try {
+      final Map<String, String> queryParams = {'artist': artist};
+      if (title != null && title.isNotEmpty) queryParams['title'] = title;
+      if (album != null && album.isNotEmpty) queryParams['album'] = album;
+      final uri = Uri.parse('$baseUrl/api/metadata/cover-art').replace(queryParameters: queryParams);
+      final response = await http.get(uri);
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['cover_url'] as String?;
+      }
+    } catch (_) {}
+    return null;
   }
 
   Future<bool> deleteYtmUpload(String entityId) async {

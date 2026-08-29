@@ -383,6 +383,7 @@ class MusicBrainzMatch {
   final String? album;
   final int? trackNumber;
   final String? releaseDate;
+  final String? coverUrl;
   final int score;
 
   MusicBrainzMatch({
@@ -394,6 +395,7 @@ class MusicBrainzMatch {
     this.album,
     this.trackNumber,
     this.releaseDate,
+    this.coverUrl,
     required this.score,
   });
 
@@ -407,6 +409,7 @@ class MusicBrainzMatch {
       album: json['album'],
       trackNumber: json['track_number'],
       releaseDate: json['release_date'],
+      coverUrl: json['cover_url'],
       score: json['score'] ?? 100,
     );
   }

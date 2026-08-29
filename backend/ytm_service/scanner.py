@@ -83,14 +83,87 @@ def extract_metadata(filepath: Path) -> dict:
     )
     return metadata
 
+import httpx
+
+def fetch_cover_image_bytes(
+    cover_url: Optional[str] = None,
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    album: Optional[str] = None,
+) -> Optional[bytes]:
+    """Fetch cover art image bytes from URL or auto-query iTunes for high-res artwork."""
+    try:
+        if cover_url:
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                r = client.get(cover_url)
+                if r.status_code == 200 and r.content:
+                    return r.content
+
+        # Fallback: Auto-search iTunes by artist + title/album
+        terms = []
+        if title:
+            terms.append(title)
+        if artist:
+            terms.append(artist)
+        if album and not terms:
+            terms.append(album)
+        term = " ".join(terms).strip()
+        if term:
+            with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+                r = client.get("https://itunes.apple.com/search", params={"term": term, "entity": "song", "limit": 1})
+                if r.status_code == 200:
+                    items = r.json().get("results", [])
+                    if items:
+                        art = items[0].get("artworkUrl100", "").replace("100x100bb", "600x600bb")
+                        if art:
+                            img_res = client.get(art)
+                            if img_res.status_code == 200 and img_res.content:
+                                return img_res.content
+    except Exception as e:
+        logger.warning(f"Could not fetch cover art: {e}")
+    return None
+
+def extract_artwork(filepath: Path) -> Optional[tuple[bytes, str]]:
+    """Extract embedded cover art bytes and mime type from an audio file."""
+    try:
+        p = Path(filepath)
+        if not p.exists():
+            return None
+        ext = p.suffix.lower()
+        if ext == ".mp3":
+            from mutagen.id3 import ID3
+            id3 = ID3(str(p))
+            for k in id3.keys():
+                if k.startswith("APIC"):
+                    frame = id3[k]
+                    return frame.data, frame.mime or "image/jpeg"
+        elif ext == ".flac":
+            from mutagen.flac import FLAC
+            flac = FLAC(str(p))
+            if flac.pictures:
+                pic = flac.pictures[0]
+                return pic.data, pic.mime or "image/jpeg"
+        elif ext in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4, MP4Cover
+            mp4 = MP4(str(p))
+            if "covr" in mp4 and mp4["covr"]:
+                covr = mp4["covr"][0]
+                mime = "image/png" if getattr(covr, "imageformat", None) == MP4Cover.FORMAT_PNG else "image/jpeg"
+                return bytes(covr), mime
+    except Exception as e:
+        logger.debug(f"Could not extract artwork from {filepath}: {e}")
+    return None
+
 def write_metadata_tags(
     filepath: Path,
     title: Optional[str] = None,
     artist: Optional[str] = None,
     album: Optional[str] = None,
-    track_number: Optional[int] = None
+    track_number: Optional[int] = None,
+    cover_url: Optional[str] = None,
+    cover_bytes: Optional[bytes] = None,
 ) -> bool:
-    """Write audio metadata tags using mutagen (EasyID3, FLAC, MP4, OggVorbis)."""
+    """Write audio metadata tags and embed album cover art using mutagen."""
     try:
         p = Path(filepath)
         if not p.exists():
@@ -120,6 +193,51 @@ def write_metadata_tags(
             audio["tracknumber"] = [str(track_number)]
 
         audio.save()
+
+        # Cover Art Embedding
+        if cover_bytes is None:
+            cover_bytes = fetch_cover_image_bytes(cover_url=cover_url, artist=artist, title=title, album=album)
+
+        if cover_bytes:
+            try:
+                is_png = cover_bytes.startswith(b'\x89PNG')
+                mime_type = "image/png" if is_png else "image/jpeg"
+
+                if ext == ".mp3":
+                    from mutagen.id3 import ID3, APIC
+                    id3 = ID3(str(p))
+                    id3.delall("APIC")
+                    id3.add(APIC(
+                        encoding=3,
+                        mime=mime_type,
+                        type=3,  # Front Cover
+                        desc="Cover",
+                        data=cover_bytes
+                    ))
+                    id3.save(str(p), v2_version=3)
+                    logger.info(f"Embedded cover art ({len(cover_bytes)} bytes) into MP3: {p.name}")
+                elif ext == ".flac":
+                    from mutagen.flac import FLAC, Picture
+                    flac_audio = FLAC(str(p))
+                    pic = Picture()
+                    pic.type = 3
+                    pic.mime = mime_type
+                    pic.desc = "Cover"
+                    pic.data = cover_bytes
+                    flac_audio.clear_pictures()
+                    flac_audio.add_picture(pic)
+                    flac_audio.save()
+                    logger.info(f"Embedded cover art ({len(cover_bytes)} bytes) into FLAC: {p.name}")
+                elif ext in (".m4a", ".mp4"):
+                    from mutagen.mp4 import MP4, MP4Cover
+                    mp4_audio = MP4(str(p))
+                    fmt = MP4Cover.FORMAT_PNG if is_png else MP4Cover.FORMAT_JPEG
+                    mp4_audio["covr"] = [MP4Cover(cover_bytes, imageformat=fmt)]
+                    mp4_audio.save()
+                    logger.info(f"Embedded cover art ({len(cover_bytes)} bytes) into M4A: {p.name}")
+            except Exception as e:
+                logger.warning(f"Could not embed cover art into {filepath}: {e}")
+
         return True
     except Exception as e:
         logger.warning(f"Could not write metadata tags to {filepath}: {e}")

@@ -58,7 +58,7 @@ class MusicBrainzClient:
         featured_str = ", ".join(featured_parts) if featured_parts else None
         return (primary_artist, featured_str)
 
-    def _select_best_release(self, releases: list) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    def _select_best_release(self, releases: list) -> tuple[Optional[str], Optional[str], Optional[int], Optional[str]]:
         """
         Selects the best studio album from a list of release dictionaries.
         Prioritizes:
@@ -68,7 +68,7 @@ class MusicBrainzClient:
           4. First available release
         """
         if not releases:
-            return None, None, None
+            return None, None, None, None
 
         best_rel = None
 
@@ -113,7 +113,10 @@ class MusicBrainzClient:
         elif media and "tracks" in media[0] and media[0]["tracks"]:
             track_number = int(media[0]["tracks"][0].get("number", 1))
 
-        return album, release_date, track_number
+        release_id = best_rel.get("id")
+        cover_url = f"https://coverartarchive.org/release/{release_id}/front-500" if release_id else None
+
+        return album, release_date, track_number, cover_url
 
     async def search(
         self,
@@ -225,7 +228,7 @@ class MusicBrainzClient:
                                 display_title = primary_title
 
                             releases = rec.get("releases", [])
-                            album, release_date, track_number = self._select_best_release(releases)
+                            album, release_date, track_number, cover_url = self._select_best_release(releases)
 
                             matches.append(
                                 MusicBrainzMatch(
@@ -237,6 +240,7 @@ class MusicBrainzClient:
                                     album=album,
                                     track_number=track_number,
                                     release_date=release_date,
+                                    cover_url=cover_url,
                                     score=score
                                 )
                             )
@@ -309,6 +313,8 @@ class MusicBrainzClient:
                         primary_title = feat_match.group(1).strip()
                         featured_artists = feat_match.group(2).strip()
 
+                    cover_url = item.get("artworkUrl100", "").replace("100x100bb", "600x600bb") or None
+
                     matches.append(
                         MusicBrainzMatch(
                             mbid=f"itunes:{item.get('trackId')}",
@@ -319,6 +325,7 @@ class MusicBrainzClient:
                             album=album_name,
                             track_number=track_num,
                             release_date=rel_date,
+                            cover_url=cover_url,
                             score=98
                         )
                     )
@@ -328,5 +335,30 @@ class MusicBrainzClient:
         except Exception as e:
             logger.warning(f"iTunes fallback query failed: {e}")
             return []
+
+    async def fetch_cover_art_url(self, artist: str, title: Optional[str] = None, album: Optional[str] = None) -> Optional[str]:
+        """Query iTunes for high resolution 600x600 album artwork URL."""
+        terms = []
+        if title:
+            terms.append(title)
+        if artist:
+            terms.append(artist)
+        if album and not terms:
+            terms.append(album)
+        term = " ".join(terms).strip()
+        if not term:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(ITUNES_API_URL, params={"term": term, "entity": "song", "limit": 1})
+                if r.status_code == 200:
+                    items = r.json().get("results", [])
+                    if items:
+                        art = items[0].get("artworkUrl100", "").replace("100x100bb", "600x600bb")
+                        if art:
+                            return art
+        except Exception as e:
+            logger.warning(f"Error fetching cover art URL: {e}")
+        return None
 
 musicbrainz_client = MusicBrainzClient()

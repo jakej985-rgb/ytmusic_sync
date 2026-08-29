@@ -294,6 +294,7 @@ class MetadataUpdateRequest(BaseModel):
     artist: Optional[str] = None
     album: Optional[str] = None
     track_number: Optional[int] = None
+    cover_url: Optional[str] = None
 
 @app.post("/api/songs/{file_id}/metadata", response_model=MusicFile)
 async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
@@ -321,7 +322,8 @@ async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
                 title=req.title.strip(),
                 artist=req.artist.strip() if req.artist else None,
                 album=req.album.strip() if req.album else None,
-                track_number=req.track_number
+                track_number=req.track_number,
+                cover_url=req.cover_url
             )
         except Exception as e:
             logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
@@ -473,14 +475,15 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
         downloaded_path = await download_ytm_upload(upload.video_id)
 
         # 2. Write new metadata tags using Mutagen
-        logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}'")
+        logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}', CoverURL='{req.cover_url}'")
         await asyncio.to_thread(
             write_metadata_tags,
             downloaded_path,
             title=req.title.strip(),
             artist=req.artist.strip() if req.artist else None,
             album=req.album.strip() if req.album else None,
-            track_number=req.track_number
+            track_number=req.track_number,
+            cover_url=req.cover_url
         )
 
         # 3. Upload new tagged version to YouTube Music
@@ -518,6 +521,30 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
                 downloaded_path.unlink()
             except Exception:
                 pass
+
+@app.get("/api/songs/{file_id}/artwork")
+async def get_song_artwork(file_id: int):
+    """Serve embedded cover art from a local music file."""
+    file = await db.get_music_file_by_id(file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="Song not found")
+    from .scanner import extract_artwork
+    res = await asyncio.to_thread(extract_artwork, Path(file.path))
+    if not res:
+        raise HTTPException(status_code=404, detail="No embedded artwork found")
+    data, mime = res
+    from fastapi.responses import Response
+    return Response(content=data, media_type=mime)
+
+@app.get("/api/metadata/cover-art")
+async def get_cover_art_url(
+    artist: str = Query(...),
+    title: Optional[str] = Query(None),
+    album: Optional[str] = Query(None),
+):
+    """Fetch high-res album artwork URL for a track or album."""
+    url = await musicbrainz_client.fetch_cover_art_url(artist=artist, title=title, album=album)
+    return {"cover_url": url}
 
 @app.delete("/api/ytm/uploads/{entity_id}")
 async def delete_ytm_upload(entity_id: str):

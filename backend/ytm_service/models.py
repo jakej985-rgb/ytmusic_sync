@@ -105,5 +105,6 @@ class MusicBrainzMatch(BaseModel):
     album: Optional[str] = None
     track_number: Optional[int] = None
     release_date: Optional[str] = None
+    cover_url: Optional[str] = None
     score: int = 100
 
