@@ -144,7 +144,7 @@ class _MainShellState extends State<MainShell> {
               NavigationRailDestination(
                 icon: Icon(Icons.queue_music_outlined),
                 selectedIcon: Icon(Icons.queue_music, color: Color(0xFFFF0000)),
-                label: Text('Upload Queue'),
+                label: Text('Queue'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.history_outlined),

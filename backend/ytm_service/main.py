@@ -24,6 +24,8 @@ from .musicbrainz import musicbrainz_client
 from .downloader import download_ytm_upload, extract_playlist_info
 from .scanner import write_metadata_tags
 from .playlist_downloader import playlist_sync_manager, download_and_upload_playlist_track
+from .queue_service import unified_queue_service
+from .metadata_tracker import metadata_tracker
 from logging.handlers import RotatingFileHandler
 from fastapi.staticfiles import StaticFiles
 
@@ -448,7 +450,16 @@ async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
             logger.warning(f"Matching re-evaluation failed: {e}")
 
         refreshed = await db.get_music_file_by_id(file_id)
-        return refreshed or updated
+        final_obj = refreshed or updated
+        metadata_tracker.log_change(
+            title=final_obj.title or req.title,
+            artist=final_obj.artist,
+            album=final_obj.album,
+            thumbnail=req.cover_url,
+            source="Local Song Metadata Editor",
+            detail="Updated ID3 tags & metadata on disk"
+        )
+        return final_obj
     except HTTPException:
         raise
     except Exception as e:
@@ -511,6 +522,27 @@ async def batch_delete_songs(req: BatchDeleteSongsRequest):
             deleted += 1
         await conn.commit()
     return {"status": "success", "deleted": deleted}
+
+@app.get("/api/queue")
+async def get_unified_queue(
+    category: str = Query("all", description="all, metadata_change, download, upload, local_upload"),
+    status: str = Query("all", description="all, active, completed, failed"),
+    limit: int = Query(200, ge=1, le=1000)
+):
+    """Fetch unified queue aggregating playlist downloads, cloud locker uploads, local uploads, and metadata changes."""
+    return await unified_queue_service.get_queue(category=category, status=status, limit=limit)
+
+@app.post("/api/queue/clear-completed")
+async def clear_completed_queue():
+    """Clear completed and failed items from queue history."""
+    unified_queue_service.clear_completed()
+    return {"status": "ok"}
+
+@app.post("/api/queue/cancel-all")
+async def cancel_all_queue():
+    """Cancel any active playlist sync and clear queued local jobs."""
+    await unified_queue_service.cancel_all()
+    return {"status": "ok"}
 
 @app.get("/api/uploads", response_model=list[YtmUpload])
 async def get_uploads() -> list[YtmUpload]:
@@ -735,6 +767,15 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
                 logger.debug(f"Delayed YTM uploads refresh notice: {ex}")
 
         asyncio.create_task(_delayed_refresh())
+
+        metadata_tracker.log_change(
+            title=clean_title,
+            artist=clean_artist,
+            album=clean_album,
+            thumbnail=clean_thumb,
+            source="Cloud Upload Re-tagger",
+            detail="Replaced and retagged on YouTube Music"
+        )
 
         return {
             "status": "success",

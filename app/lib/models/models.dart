@@ -590,3 +590,83 @@ class PlaylistSyncStatusModel {
   double get progress => totalTracks > 0 ? (completedTracks / totalTracks).clamp(0.0, 1.0) : 0.0;
 }
 
+class UnifiedQueueItem {
+  final String id;
+  final String category; // 'download', 'upload', 'local_upload', 'metadata_change'
+  final String title;
+  final String? artist;
+  final String? album;
+  final String? thumbnail;
+  final String status; // 'in_progress', 'queued', 'completed', 'failed'
+  final String? currentStep;
+  final String? source;
+  final String? createdAt;
+  final String? error;
+
+  UnifiedQueueItem({
+    required this.id,
+    required this.category,
+    required this.title,
+    this.artist,
+    this.album,
+    this.thumbnail,
+    required this.status,
+    this.currentStep,
+    this.source,
+    this.createdAt,
+    this.error,
+  });
+
+  factory UnifiedQueueItem.fromJson(Map<String, dynamic> json) {
+    return UnifiedQueueItem(
+      id: json['id'] ?? '',
+      category: json['category'] ?? 'upload',
+      title: json['title'] ?? 'Untitled',
+      artist: json['artist'],
+      album: json['album'],
+      thumbnail: json['thumbnail'],
+      status: json['status'] ?? 'queued',
+      currentStep: json['current_step'],
+      source: json['source'],
+      createdAt: json['created_at'],
+      error: json['error'],
+    );
+  }
+}
+
+class UnifiedQueueResponse {
+  final Map<String, int> summary;
+  final bool isActive;
+  final String activeDescription;
+  final List<UnifiedQueueItem> items;
+
+  UnifiedQueueResponse({
+    required this.summary,
+    required this.isActive,
+    required this.activeDescription,
+    required this.items,
+  });
+
+  factory UnifiedQueueResponse.fromJson(Map<String, dynamic> json) {
+    final rawSummary = json['summary'] as Map<String, dynamic>? ?? {};
+    final summary = <String, int>{
+      'all': rawSummary['all'] ?? 0,
+      'metadata_change': rawSummary['metadata_change'] ?? 0,
+      'download': rawSummary['download'] ?? 0,
+      'upload': rawSummary['upload'] ?? 0,
+      'local_upload': rawSummary['local_upload'] ?? 0,
+      'active': rawSummary['active'] ?? 0,
+    };
+
+    final itemsRaw = json['items'] as List<dynamic>? ?? [];
+    final items = itemsRaw.map((e) => UnifiedQueueItem.fromJson(e as Map<String, dynamic>)).toList();
+
+    return UnifiedQueueResponse(
+      summary: summary,
+      isActive: json['is_active'] ?? false,
+      activeDescription: json['active_description'] ?? '',
+      items: items,
+    );
+  }
+}
+

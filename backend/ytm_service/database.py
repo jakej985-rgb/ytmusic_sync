@@ -813,6 +813,45 @@ class Database:
                     ))
                 return results
 
+    async def get_active_or_queued_sync_jobs(self, limit: int = 100) -> list[SyncJob]:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT sj.*, mf.path, mf.filename, mf.artist, mf.album, mf.title, mf.duration, mf.format, mf.file_size, mf.modified_time,
+                       m.ytm_upload_id
+                FROM sync_jobs sj
+                JOIN music_files mf ON sj.music_file_id = mf.id
+                LEFT JOIN matches m ON mf.id = m.music_file_id
+                WHERE sj.status IN ('queued', 'uploading', 'verifying')
+                ORDER BY CASE WHEN sj.status = 'uploading' THEN 0 ELSE 1 END, sj.id ASC LIMIT ?
+                """,
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for row in rows:
+                    data = dict(row)
+                    mf_data = {k: data[k] for k in ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]}
+                    mf_data["id"] = data["music_file_id"]
+                    results.append(SyncJob(
+                        id=data["id"],
+                        music_file_id=data["music_file_id"],
+                        status=UploadStatus(data["status"]),
+                        started_at=data["started_at"],
+                        completed_at=data["completed_at"],
+                        error=data["error"],
+                        attempts=data["attempts"],
+                        ytm_entity_id=data.get("ytm_upload_id"),
+                        music_file=MusicFile(**mf_data)
+                    ))
+                return results
+
+    async def clear_queued_sync_jobs(self):
+        async with self.get_connection() as db:
+            await db.execute("DELETE FROM sync_jobs WHERE status = 'queued'")
+            await db.commit()
+
     # Stats
     async def get_dashboard_counts(self) -> dict:
         async with self.get_connection() as db:

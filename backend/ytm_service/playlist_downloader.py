@@ -193,9 +193,13 @@ class PlaylistSyncManager:
     """Manages background batch sync of missing playlist tracks."""
 
     def __init__(self):
+        from collections import deque
         self._status = PlaylistSyncStatus()
         self._task: Optional[asyncio.Task] = None
         self._queue: list[dict] = []
+        self._current_index: int = -1
+        self._current_track_dict: Optional[dict] = None
+        self._history: deque = deque(maxlen=100)
 
     @property
     def status(self) -> PlaylistSyncStatus:
@@ -223,14 +227,20 @@ class PlaylistSyncManager:
             errors=[]
         )
         self._queue = list(tracks_to_sync)
+        self._current_index = -1
+        self._current_track_dict = None
         self._task = asyncio.create_task(self._sync_worker(dest_path))
         return self._status
 
     async def _sync_worker(self, destination_dir: Optional[Path]):
+        from datetime import datetime
         logger.info(f"Starting playlist sync for {len(self._queue)} tracks...")
         seen_sync_keys = set()
         try:
-            for track in self._queue:
+            for idx, track in enumerate(self._queue):
+                self._current_index = idx
+                self._current_track_dict = track
+
                 video_id = track.get("video_id")
                 if not video_id:
                     self._status.failed_tracks += 1
@@ -272,10 +282,36 @@ class PlaylistSyncManager:
                         enrich_metadata=True
                     )
                     self._status.completed_tracks += 1
+                    self._history.appendleft({
+                        "id": f"pl_done_{video_id}",
+                        "category": "download",
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
+                        "thumbnail": thumb,
+                        "status": "completed",
+                        "current_step": "Downloaded & uploaded to cloud locker",
+                        "source": f"Playlist: {self._status.playlist_title}",
+                        "created_at": datetime.now().isoformat(),
+                        "error": None
+                    })
                 except Exception as ex:
                     logger.error(f"Failed to sync track {video_id} ('{title}'): {ex}")
                     self._status.failed_tracks += 1
                     self._status.errors.append(f"{title}: {str(ex)[:150]}")
+                    self._history.appendleft({
+                        "id": f"pl_fail_{video_id}",
+                        "category": "download",
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
+                        "thumbnail": thumb,
+                        "status": "failed",
+                        "current_step": f"Failed: {str(ex)[:120]}",
+                        "source": f"Playlist: {self._status.playlist_title}",
+                        "created_at": datetime.now().isoformat(),
+                        "error": str(ex)
+                    })
 
                 # Rate limiting between uploads to avoid YouTube rate limits
                 await asyncio.sleep(2)
@@ -285,10 +321,67 @@ class PlaylistSyncManager:
         finally:
             self._status.is_running = False
             self._status.current_track = None
+            self._current_track_dict = None
+            self._current_index = -1
             logger.info(
                 f"Playlist sync finished: {self._status.completed_tracks} completed, "
                 f"{self._status.failed_tracks} failed."
             )
+
+    def get_queue_items(self) -> list[dict]:
+        """Return structured queue items for the unified queue view."""
+        items = []
+
+        # 1. Currently active item
+        if self._status.is_running and self._current_track_dict:
+            t = self._current_track_dict
+            items.append({
+                "id": f"pl_active_{t.get('video_id')}",
+                "category": "download",
+                "title": t.get("title", "Untitled"),
+                "artist": t.get("artist"),
+                "album": t.get("album"),
+                "thumbnail": t.get("thumbnail"),
+                "status": "in_progress",
+                "current_step": f"Downloading & Uploading ({self._status.completed_tracks + 1}/{self._status.total_tracks})",
+                "source": f"Playlist: {self._status.playlist_title}",
+                "created_at": None,
+                "error": None
+            })
+
+        # 2. Remaining items in current queue
+        if self._status.is_running and self._current_index >= 0:
+            remaining = self._queue[self._current_index + 1:]
+            for r in remaining:
+                items.append({
+                    "id": f"pl_queued_{r.get('video_id')}",
+                    "category": "download",
+                    "title": r.get("title", "Untitled"),
+                    "artist": r.get("artist"),
+                    "album": r.get("album"),
+                    "thumbnail": r.get("thumbnail"),
+                    "status": "queued",
+                    "current_step": "Waiting in download/upload queue",
+                    "source": f"Playlist: {self._status.playlist_title}",
+                    "created_at": None,
+                    "error": None
+                })
+
+        # 3. Recent session history
+        items.extend(list(self._history))
+        return items
+
+    def cancel_sync(self):
+        """Cancel ongoing sync process."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._status.is_running = False
+        self._status.current_track = None
+        self._current_track_dict = None
+        self._current_index = -1
+
+    def clear_history(self):
+        self._history.clear()
 
 
 playlist_sync_manager = PlaylistSyncManager()

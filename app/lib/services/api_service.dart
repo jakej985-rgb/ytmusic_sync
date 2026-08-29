@@ -162,6 +162,37 @@ class ApiService {
     throw Exception('Failed to enqueue all missing songs');
   }
 
+  Future<UnifiedQueueResponse> getUnifiedQueue({
+    String category = 'all',
+    String status = 'all',
+    int limit = 200,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/queue').replace(queryParameters: {
+      'category': category,
+      'status': status,
+      'limit': limit.toString(),
+    });
+    final response = await http.get(uri);
+    if (response.statusCode == 200) {
+      return UnifiedQueueResponse.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to fetch unified queue');
+  }
+
+  Future<void> cancelAllQueue() async {
+    final response = await http.post(Uri.parse('$baseUrl/api/queue/cancel-all'));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to cancel queue');
+    }
+  }
+
+  Future<void> clearCompletedQueue() async {
+    final response = await http.post(Uri.parse('$baseUrl/api/queue/clear-completed'));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to clear completed items');
+    }
+  }
+
   Future<List<SyncJob>> getHistory() async {
     final response = await http.get(Uri.parse('$baseUrl/api/history'));
     if (response.statusCode == 200) {
