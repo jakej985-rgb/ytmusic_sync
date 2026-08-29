@@ -252,6 +252,30 @@ class YTMPlaylistTrack {
     );
   }
 
+  YTMPlaylistTrack copyWith({
+    String? videoId,
+    String? title,
+    String? artist,
+    String? album,
+    dynamic duration,
+    String? thumbnail,
+    bool? inLocal,
+    bool? inUploads,
+    String? localPath,
+  }) {
+    return YTMPlaylistTrack(
+      videoId: videoId ?? this.videoId,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      album: album ?? this.album,
+      duration: duration ?? this.duration,
+      thumbnail: thumbnail ?? this.thumbnail,
+      inLocal: inLocal ?? this.inLocal,
+      inUploads: inUploads ?? this.inUploads,
+      localPath: localPath ?? this.localPath,
+    );
+  }
+
   String get displayArtist => (artist != null && artist!.isNotEmpty) ? artist! : 'Unknown Artist';
   String get displayAlbum => (album != null && album!.isNotEmpty) ? album! : 'Unknown Album';
   
@@ -518,5 +542,42 @@ class YtmUpload {
     final secs = totalSec % 60;
     return '$mins:${secs.toString().padLeft(2, '0')}';
   }
+}
+
+class PlaylistSyncStatusModel {
+  final bool isRunning;
+  final String? playlistId;
+  final String? playlistTitle;
+  final int totalTracks;
+  final int completedTracks;
+  final int failedTracks;
+  final String? currentTrack;
+  final List<String> errors;
+
+  PlaylistSyncStatusModel({
+    required this.isRunning,
+    this.playlistId,
+    this.playlistTitle,
+    required this.totalTracks,
+    required this.completedTracks,
+    required this.failedTracks,
+    this.currentTrack,
+    required this.errors,
+  });
+
+  factory PlaylistSyncStatusModel.fromJson(Map<String, dynamic> json) {
+    return PlaylistSyncStatusModel(
+      isRunning: json['is_running'] ?? false,
+      playlistId: json['playlist_id'],
+      playlistTitle: json['playlist_title'],
+      totalTracks: json['total_tracks'] ?? 0,
+      completedTracks: json['completed_tracks'] ?? 0,
+      failedTracks: json['failed_tracks'] ?? 0,
+      currentTrack: json['current_track'],
+      errors: (json['errors'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
+    );
+  }
+
+  double get progress => totalTracks > 0 ? (completedTracks / totalTracks).clamp(0.0, 1.0) : 0.0;
 }
 

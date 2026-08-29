@@ -229,3 +229,105 @@ async def download_ytm_upload(video_id: str, dest_dir: Optional[Path] = None) ->
     target_base = target_dir / f"ytm_{video_id}"
 
     return await asyncio.to_thread(_download_sync, video_id, target_base)
+
+
+def extract_playlist_info_sync(playlist_url_or_id: str) -> dict:
+    """Extract playlist metadata and track list using yt-dlp flat-playlist mode."""
+    url = playlist_url_or_id
+    if not url.startswith("http"):
+        url = f"https://www.youtube.com/playlist?list={playlist_url_or_id}"
+
+    auth_candidates = [
+        settings.auth_file,
+        settings.data_dir / "headers_auth.json",
+        settings.data_dir / "auth" / "headers_auth.json",
+        Path("/config/headers_auth.json"),
+        Path("/config/auth/headers_auth.json"),
+        Path.home() / ".config" / "ytm_sync" / "headers_auth.json",
+        Path.home() / ".config" / "ytm_sync" / "auth" / "headers_auth.json",
+    ]
+
+    cookie_raw = ""
+    auth_header = ""
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    for auth_p in auth_candidates:
+        if auth_p.exists():
+            try:
+                with open(auth_p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for k, v in data.items():
+                        kl = k.lower()
+                        if kl == "cookie" and isinstance(v, str) and v.strip():
+                            cookie_raw = v.strip()
+                        elif kl == "authorization" and isinstance(v, str) and v.strip():
+                            auth_header = v.strip()
+                        elif kl == "user-agent" and isinstance(v, str) and v.strip():
+                            user_agent = v.strip()
+                if cookie_raw:
+                    break
+            except Exception as e:
+                logger.warning(f"Failed to read auth file {auth_p}: {e}")
+
+    cookie_file = _generate_netscape_cookies(cookie_raw) if cookie_raw else None
+
+    try:
+        env = dict(os.environ)
+        deno_paths = ["/usr/local/bin", "/home/m3tal/.deno/bin", os.path.expanduser("~/.deno/bin")]
+        existing_path = env.get("PATH", "")
+        extra_paths = [p for p in deno_paths if os.path.isdir(p) and p not in existing_path]
+        if extra_paths:
+            env["PATH"] = ":".join(extra_paths) + ":" + existing_path
+
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            "--user-agent", user_agent,
+            url
+        ]
+        if auth_header:
+            cmd.extend(["--add-header", f"Authorization: {auth_header}"])
+        if cookie_file:
+            cmd.extend(["--cookies", cookie_file])
+
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60)
+        if res.returncode != 0:
+            raise RuntimeError(f"Failed to fetch playlist info: {res.stderr[:200] or 'Unknown error'}")
+
+        data = json.loads(res.stdout)
+        entries = data.get("entries") or []
+        tracks = []
+        for e in entries:
+            if not e or not e.get("id"):
+                continue
+            tracks.append({
+                "video_id": e.get("id"),
+                "title": e.get("title", "Untitled Track"),
+                "artist": e.get("uploader") or e.get("channel") or e.get("artist"),
+                "album": data.get("title", "YouTube Playlist"),
+                "duration": e.get("duration"),
+                "thumbnail": e.get("thumbnails")[-1]["url"] if e.get("thumbnails") else None,
+            })
+
+        return {
+            "id": data.get("id") or playlist_url_or_id,
+            "title": data.get("title", "YouTube Playlist"),
+            "description": data.get("description", ""),
+            "track_count": len(tracks),
+            "thumbnail": data.get("thumbnails")[-1]["url"] if data.get("thumbnails") else (tracks[0]["thumbnail"] if tracks else None),
+            "tracks": tracks
+        }
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except Exception:
+                pass
+
+
+async def extract_playlist_info(playlist_url_or_id: str) -> dict:
+    """Asynchronously extract playlist metadata and tracks via yt-dlp."""
+    return await asyncio.to_thread(extract_playlist_info_sync, playlist_url_or_id)
+

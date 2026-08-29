@@ -109,3 +109,15 @@ class MusicBrainzMatch(BaseModel):
     source: Optional[str] = "YouTube Music"
     score: int = 100
 
+class PlaylistTrackDownloadRequest(BaseModel):
+    video_id: str
+    title: str
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    thumbnail: Optional[str] = None
+    destination_dir: Optional[str] = None
+    enrich_metadata: bool = True
+
+class PlaylistImportRequest(BaseModel):
+    url: str
+

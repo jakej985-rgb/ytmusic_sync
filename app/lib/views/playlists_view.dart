@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
@@ -22,10 +23,60 @@ class _PlaylistsViewState extends State<PlaylistsView> {
   String _searchQuery = '';
   String _trackFilter = 'all'; // 'all', 'local', 'uploads', 'missing'
 
+  Timer? _syncPollTimer;
+  PlaylistSyncStatusModel? _syncStatus;
+  final Set<String> _downloadingVideoIds = {};
+
   @override
   void initState() {
     super.initState();
     _loadPlaylists();
+    _checkInitialSyncStatus();
+  }
+
+  @override
+  void dispose() {
+    _syncPollTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _checkInitialSyncStatus() async {
+    try {
+      final status = await apiService.getPlaylistSyncStatus();
+      if (mounted && status.isRunning) {
+        setState(() => _syncStatus = status);
+        _startSyncPolling();
+      }
+    } catch (_) {}
+  }
+
+  void _startSyncPolling() {
+    _syncPollTimer?.cancel();
+    _syncPollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      try {
+        final status = await apiService.getPlaylistSyncStatus();
+        if (mounted) {
+          setState(() => _syncStatus = status);
+          if (!status.isRunning) {
+            _stopSyncPolling();
+            if (_selectedPlaylist != null) {
+              _selectPlaylist(_selectedPlaylist!);
+            }
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Playlist sync completed: ${status.completedTracks} uploaded, ${status.failedTracks} failed.'),
+                backgroundColor: status.failedTracks > 0 ? Colors.amber[800] : Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _stopSyncPolling() {
+    _syncPollTimer?.cancel();
+    _syncPollTimer = null;
   }
 
   Future<void> _loadPlaylists() async {
@@ -78,6 +129,192 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     }
   }
 
+  Future<void> _syncMissingTracks() async {
+    if (_selectedPlaylist == null) return;
+    try {
+      final res = await apiService.syncMissingPlaylistTracks(_selectedPlaylist!.id);
+      final queued = res['queued'] as int? ?? 0;
+      if (mounted) {
+        if (queued > 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Started background sync for $queued missing tracks via yt-dlp!'),
+              backgroundColor: const Color(0xFF8A2387),
+            ),
+          );
+          _startSyncPolling();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('All tracks in this playlist are already in your uploads!')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Sync error: ${e.toString().replaceFirst('Exception: ', '')}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _downloadAndUploadSingleTrack(YTMPlaylistTrack track) async {
+    if (track.videoId == null) return;
+    setState(() {
+      _downloadingVideoIds.add(track.videoId!);
+    });
+
+    try {
+      final res = await apiService.downloadAndUploadPlaylistTrack({
+        'video_id': track.videoId,
+        'title': track.title,
+        'artist': track.artist,
+        'album': track.album,
+        'thumbnail': track.thumbnail,
+        'enrich_metadata': true,
+      });
+
+      if (mounted) {
+        setState(() {
+          _downloadingVideoIds.remove(track.videoId);
+          if (_playlistDetails != null) {
+            final idx = _playlistDetails!.tracks.indexWhere((t) => t.videoId == track.videoId);
+            if (idx != -1) {
+              final updated = _playlistDetails!.tracks[idx].copyWith(
+                inUploads: true,
+                inLocal: res['local_path'] != null ? true : null,
+                localPath: res['local_path'] as String?,
+              );
+              _playlistDetails!.tracks[idx] = updated;
+            }
+          }
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Downloaded, tagged, and uploaded "${track.title}" to YouTube Music!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _downloadingVideoIds.remove(track.videoId);
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Download failed: ${e.toString().replaceFirst('Exception: ', '')}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _showImportPlaylistDialog() async {
+    final controller = TextEditingController();
+    bool isImporting = false;
+    String? importError;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF1E1E28),
+          title: const Row(
+            children: [
+              Icon(Icons.link, color: Colors.blueAccent),
+              SizedBox(width: 8),
+              Text('Import YouTube Playlist'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Enter any YouTube or YouTube Music playlist URL (public or unlisted) to audit and download missing tracks.',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                enabled: !isImporting,
+                decoration: const InputDecoration(
+                  hintText: 'https://www.youtube.com/playlist?list=...',
+                  prefixIcon: Icon(Icons.playlist_play),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              if (isImporting) ...[
+                const SizedBox(height: 16),
+                const Row(
+                  children: [
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text('Extracting playlist tracks via yt-dlp...', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    ),
+                  ],
+                ),
+              ],
+              if (importError != null) ...[
+                const SizedBox(height: 12),
+                Text(importError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: isImporting ? null : () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: isImporting ? null : () async {
+                final url = controller.text.trim();
+                if (url.isEmpty) return;
+                setDialogState(() {
+                  isImporting = true;
+                  importError = null;
+                });
+                try {
+                  final details = await apiService.importPlaylistUrl(url);
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                  }
+                  if (mounted) {
+                    setState(() {
+                      _selectedPlaylist = YTMPlaylist(
+                        id: details.id,
+                        title: details.title,
+                        description: details.description,
+                        trackCount: details.trackCount,
+                        thumbnail: details.thumbnail,
+                      );
+                      _playlistDetails = details;
+                      _isLoadingDetails = false;
+                      _trackFilter = 'all';
+                    });
+                  }
+                } catch (e) {
+                  setDialogState(() {
+                    isImporting = false;
+                    importError = e.toString().replaceFirst('Exception: ', '');
+                  });
+                }
+              },
+              child: const Text('Import & Audit'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_selectedPlaylist != null) {
@@ -113,17 +350,31 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Browse your playlists and compare tracks with your local library & cloud locker',
+                      'Browse your playlists, compare tracks with locker uploads, and sync missing songs via yt-dlp',
                       style: TextStyle(color: Colors.grey[400], fontSize: 13),
                     ),
                   ],
                 ),
-                IconButton.filledTonal(
-                  onPressed: _isLoading ? null : _loadPlaylists,
-                  icon: _isLoading
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.refresh),
-                  tooltip: 'Refresh Playlists',
+                Row(
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _showImportPlaylistDialog,
+                      icon: const Icon(Icons.link, size: 16),
+                      label: const Text('Import Playlist URL'),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.blueAccent.withValues(alpha: 0.4)),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: _isLoading ? null : _loadPlaylists,
+                      icon: _isLoading
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.refresh),
+                      tooltip: 'Refresh Playlists',
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -320,11 +571,13 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     int localCount = 0;
     int uploadsCount = 0;
     int streamingCount = 0;
+    int missingFromUploadsCount = 0;
 
     if (details != null) {
       for (final t in details.tracks) {
         if (t.inLocal) localCount++;
         if (t.inUploads) uploadsCount++;
+        if (!t.inUploads) missingFromUploadsCount++;
         if (!t.inLocal && !t.inUploads) streamingCount++;
       }
 
@@ -336,6 +589,8 @@ class _PlaylistsViewState extends State<PlaylistsView> {
       }).toList();
     }
 
+    final isSyncRunning = _syncStatus != null && _syncStatus!.isRunning;
+
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Padding(
@@ -343,7 +598,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Top Bar with Back Button
+            // Top Bar with Back Button and Sync Actions
             Row(
               children: [
                 IconButton.filledTonal(
@@ -377,6 +632,19 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     ],
                   ),
                 ),
+                if (missingFromUploadsCount > 0) ...[
+                  ElevatedButton.icon(
+                    onPressed: isSyncRunning ? null : _syncMissingTracks,
+                    icon: const Icon(Icons.cloud_sync, size: 16),
+                    label: Text(isSyncRunning ? 'Syncing...' : 'Download & Upload Missing ($missingFromUploadsCount)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF8A2387),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 if (!_isLoadingDetails)
                   IconButton.filledTonal(
                     onPressed: () => _selectPlaylist(playlist),
@@ -386,6 +654,62 @@ class _PlaylistsViewState extends State<PlaylistsView> {
               ],
             ),
             const SizedBox(height: 16),
+
+            // Sync Progress Banner (when active)
+            if (isSyncRunning) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.purple.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.4)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.purpleAccent),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'Downloading & Uploading: ${_syncStatus!.completedTracks}/${_syncStatus!.totalTracks} tracks',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.purpleAccent),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          '${(_syncStatus!.progress * 100).toInt()}%',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                    if (_syncStatus!.currentTrack != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Processing: ${_syncStatus!.currentTrack}',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[300]),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: _syncStatus!.progress,
+                      backgroundColor: Colors.white10,
+                      valueColor: const AlwaysStoppedAnimation<Color>(Colors.purpleAccent),
+                    ),
+                  ],
+                ),
+              ),
+            ],
 
             // Summary Stats Cards
             if (details != null) ...[
@@ -498,6 +822,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
         separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF22222E)),
         itemBuilder: (context, index) {
           final track = tracks[index];
+          final isDownloadingThis = track.videoId != null && _downloadingVideoIds.contains(track.videoId);
 
           return ListTile(
             leading: ClipRRect(
@@ -529,7 +854,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Match Badges
+                // Local Library Badge
                 if (track.inLocal)
                   Tooltip(
                     message: track.localPath ?? 'In Local Music Library',
@@ -561,6 +886,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                   ),
                 const SizedBox(width: 8),
 
+                // Uploads Badge / Action
                 if (track.inUploads)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -576,6 +902,22 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                         SizedBox(width: 4),
                         Text('In Uploads', style: TextStyle(color: Colors.purpleAccent, fontSize: 11, fontWeight: FontWeight.bold)),
                       ],
+                    ),
+                  )
+                else if (isDownloadingThis)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.purpleAccent),
+                  )
+                else
+                  OutlinedButton.icon(
+                    onPressed: () => _downloadAndUploadSingleTrack(track),
+                    icon: const Icon(Icons.cloud_upload_outlined, size: 13, color: Colors.purpleAccent),
+                    label: const Text('Download & Upload', style: TextStyle(fontSize: 11, color: Colors.purpleAccent)),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      side: BorderSide(color: Colors.purpleAccent.withValues(alpha: 0.5)),
                     ),
                   ),
 

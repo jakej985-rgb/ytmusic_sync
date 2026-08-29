@@ -225,6 +225,52 @@ class ApiService {
     throw Exception('Failed to fetch playlist details');
   }
 
+  Future<Map<String, dynamic>> syncMissingPlaylistTracks(String playlistId, {String? destinationDir}) async {
+    final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId/sync-missing').replace(
+      queryParameters: destinationDir != null && destinationDir.isNotEmpty ? {'destination_dir': destinationDir} : null,
+    );
+    final response = await http.post(uri);
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to start playlist sync');
+  }
+
+  Future<PlaylistSyncStatusModel> getPlaylistSyncStatus() async {
+    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists/sync-status'));
+    if (response.statusCode == 200) {
+      return PlaylistSyncStatusModel.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    }
+    throw Exception('Failed to fetch sync status');
+  }
+
+  Future<Map<String, dynamic>> downloadAndUploadPlaylistTrack(Map<String, dynamic> trackData) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/ytm/playlists/download-track'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(trackData),
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to download and upload track');
+  }
+
+  Future<YTMPlaylistDetails> importPlaylistUrl(String url) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/ytm/playlists/import-url'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'url': url}),
+    );
+    if (response.statusCode == 200) {
+      return YTMPlaylistDetails.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to import playlist URL');
+  }
+
   Future<List<RootFolderStats>> fetchFolderStats() async {
     final response = await http.get(Uri.parse('$baseUrl/api/folders/stats'));
     if (response.statusCode == 200) {

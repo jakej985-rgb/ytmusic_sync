@@ -13,15 +13,17 @@ from .config import settings
 from .database import db
 from .models import (
     MusicFile, YtmUpload, SyncJob, DashboardStats,
-    ScanRequest, AuthSetupRequest, ConnectionStatus, MusicBrainzMatch
+    ScanRequest, AuthSetupRequest, ConnectionStatus, MusicBrainzMatch,
+    PlaylistTrackDownloadRequest, PlaylistImportRequest
 )
 from .scanner import scanner
 from .ytm_client import ytm_client
 from .matcher import matcher
 from .uploader import queue_manager
 from .musicbrainz import musicbrainz_client
-from .downloader import download_ytm_upload
+from .downloader import download_ytm_upload, extract_playlist_info
 from .scanner import write_metadata_tags
+from .playlist_downloader import playlist_sync_manager, download_and_upload_playlist_track
 from logging.handlers import RotatingFileHandler
 from fastapi.staticfiles import StaticFiles
 
@@ -147,6 +149,86 @@ async def get_ytm_playlists():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlists: {e}")
 
+@app.get("/api/ytm/playlists/sync-status")
+async def get_playlist_sync_status():
+    """Get active playlist download/sync progress."""
+    return playlist_sync_manager.status
+
+@app.post("/api/ytm/playlists/download-track")
+async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
+    """Download, tag, and upload a single playlist track to YouTube Music locker."""
+    if not ytm_client.is_auth_configured():
+        raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+    try:
+        res = await download_and_upload_playlist_track(
+            video_id=req.video_id,
+            raw_title=req.title,
+            raw_artist=req.artist,
+            raw_album=req.album,
+            raw_thumbnail=req.thumbnail,
+            destination_dir=Path(req.destination_dir) if req.destination_dir else None,
+            enrich_metadata=req.enrich_metadata
+        )
+        return res
+    except Exception as e:
+        logger.exception(f"Failed to download and upload track {req.video_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to download and upload track: {e}")
+
+@app.post("/api/ytm/playlists/import-url")
+async def import_playlist_url_endpoint(req: PlaylistImportRequest):
+    """Import and audit an external YouTube / YouTube Music playlist URL."""
+    try:
+        raw_info = await extract_playlist_info(req.url)
+        tracks_raw = raw_info.get("tracks", [])
+
+        # Match against local files and locker uploads
+        local_files = await db.get_all_local_songs()
+        uploads = await db.get_all_ytm_uploads()
+
+        from .normalizer import normalize_text
+
+        local_map = {}
+        for f in local_files:
+            key = f"{normalize_text(f.get('artist'))}|{normalize_text(f.get('title'))}"
+            local_map[key] = f.get("path")
+            title_key = normalize_text(f.get("title"))
+            if title_key and title_key not in local_map:
+                local_map[title_key] = f.get("path")
+
+        uploads_set = set()
+        for u in uploads:
+            u_key = f"{normalize_text(u.artist)}|{normalize_text(u.title)}"
+            uploads_set.add(u_key)
+            u_title = normalize_text(u.title)
+            if u_title:
+                uploads_set.add(u_title)
+
+        matched_tracks = []
+        for t in tracks_raw:
+            title = t.get("title", "")
+            artist = t.get("artist")
+            key = f"{normalize_text(artist)}|{normalize_text(title)}"
+            title_k = normalize_text(title)
+
+            in_local = key in local_map or title_k in local_map
+            local_path = local_map.get(key) or local_map.get(title_k)
+            in_uploads = key in uploads_set or title_k in uploads_set
+
+            matched_tracks.append({
+                **t,
+                "in_local": in_local,
+                "local_path": local_path,
+                "in_uploads": in_uploads
+            })
+
+        return {
+            **raw_info,
+            "tracks": matched_tracks
+        }
+    except Exception as e:
+        logger.exception(f"Failed to import playlist from URL {req.url}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to import playlist: {e}")
+
 @app.get("/api/ytm/playlists/{playlist_id}")
 async def get_ytm_playlist_details(playlist_id: str):
     if not ytm_client.is_auth_configured():
@@ -156,6 +238,37 @@ async def get_ytm_playlist_details(playlist_id: str):
         return details
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlist details: {e}")
+
+@app.post("/api/ytm/playlists/{playlist_id}/sync-missing")
+async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Optional[str] = None):
+    """Start background sync for all tracks in a playlist missing from uploads."""
+    if not ytm_client.is_auth_configured():
+        raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+    try:
+        details = await ytm_client.get_playlist_details(playlist_id)
+        tracks = details.get("tracks", [])
+        # Filter for tracks missing from cloud uploads
+        missing = [t for t in tracks if not t.get("in_uploads")]
+        if not missing:
+            return {"status": "ok", "message": "All tracks in this playlist are already in your cloud uploads!", "queued": 0}
+
+        status = playlist_sync_manager.start_sync(
+            playlist_id=playlist_id,
+            playlist_title=details.get("title", "Playlist"),
+            tracks_to_sync=missing,
+            destination_dir=destination_dir
+        )
+        return {
+            "status": "started",
+            "message": f"Started syncing {len(missing)} missing tracks from '{details.get('title')}'",
+            "queued": len(missing),
+            "sync_status": status
+        }
+    except RuntimeError as re:
+        raise HTTPException(status_code=409, detail=str(re))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start playlist sync: {e}")
+
 
 def format_size(bytes_val: Optional[int | float]) -> str:
     if bytes_val is None or bytes_val < 0:
