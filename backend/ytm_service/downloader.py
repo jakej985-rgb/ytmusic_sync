@@ -173,48 +173,65 @@ def _download_sync(video_id: str, output_path: Path, fallback_query: Optional[st
             env["PATH"] = ":".join(extra_paths) + ":" + existing_path
 
         # Try URLs in order:
-        # 1. Standard youtube.com watch with android/ios/web clients (avoids web PO token requirements)
-        # 2. music.youtube.com watch
-        # 3. If direct upload video_id is forbidden (Google blocks private upload CDN streaming), search YouTube public audio
+        # 1. Standard youtube.com watch URL
+        # 2. music.youtube.com watch URL
+        # 3. If direct upload video_id is unavailable/private, search YouTube public audio via fallback_query
         urls_to_try = [
             f"https://www.youtube.com/watch?v={video_id}",
             f"https://music.youtube.com/watch?v={video_id}"
         ]
         if fallback_query and fallback_query.strip():
-            urls_to_try.append(f"ytsearch1:{fallback_query.strip()}")
+            clean_query = fallback_query.strip()
+            # Remove audio extensions if in query
+            for ext in [".mp3", ".flac", ".m4a", ".wav", ".opus", ".webm"]:
+                clean_query = clean_query.replace(ext, "")
+            urls_to_try.append(f"ytsearch1:{clean_query.strip()}")
 
         last_error = "Unknown error"
         for target_url in urls_to_try:
-            cmd = [
-                sys.executable, "-m", "yt_dlp",
-                "--remote-components", "ejs:github",
-                "--extractor-args", "youtube:player_client=android,ios,web",
-                "-x", "--audio-format", "mp3",
-                "--no-playlist",
-                "--user-agent", user_agent,
-                "-o", str(output_path.with_suffix(".%(ext)s")),
-                target_url
+            # Strategies for this target URL:
+            # 1. Try mobile clients (android,ios,mweb) WITHOUT cookies.
+            #    Passing cookies causes yt-dlp to skip android and ios (since they don't support cookies),
+            #    forcing web client which requires PO tokens and fails with "Only images are available for download".
+            # 2. If unauthenticated attempt fails (e.g., age-gated), try with cookies using web,ios.
+            modes = [
+                {"use_cookies": False, "clients": "android,ios,mweb"},
             ]
-            if auth_header:
-                cmd.extend(["--add-header", f"Authorization: {auth_header}"])
             if cookie_file:
-                cmd.extend(["--cookies", cookie_file])
+                modes.append({"use_cookies": True, "clients": "web,ios"})
 
-            logger.info(f"Downloading audio via {target_url}...")
-            res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+            for mode in modes:
+                cmd = [
+                    sys.executable, "-m", "yt_dlp",
+                    "--remote-components", "ejs:github",
+                    "--extractor-args", f"youtube:player_client={mode['clients']}",
+                    "-x", "--audio-format", "mp3",
+                    "--no-playlist",
+                    "--user-agent", user_agent,
+                    "-o", str(output_path.with_suffix(".%(ext)s")),
+                    target_url
+                ]
+                if mode["use_cookies"]:
+                    if auth_header:
+                        cmd.extend(["--add-header", f"Authorization: {auth_header}"])
+                    if cookie_file:
+                        cmd.extend(["--cookies", cookie_file])
 
-            if res.returncode == 0:
-                final_file = output_path.with_suffix(".mp3")
-                if not final_file.exists() or final_file.stat().st_size == 0:
-                    candidates = list(output_dir.glob(f"{output_path.stem}.*"))
-                    if candidates:
-                        final_file = candidates[0]
-                if final_file.exists() and final_file.stat().st_size > 0:
-                    logger.info(f"Successfully downloaded {target_url} to {final_file} ({final_file.stat().st_size} bytes)")
-                    return final_file
+                logger.info(f"Downloading audio via {target_url} (clients={mode['clients']}, cookies={mode['use_cookies']})...")
+                res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
 
-            last_error = res.stderr.strip() or res.stdout.strip() or "Unknown error"
-            logger.warning(f"Download attempt for {target_url} failed: {last_error[:300]}")
+                if res.returncode == 0:
+                    final_file = output_path.with_suffix(".mp3")
+                    if not final_file.exists() or final_file.stat().st_size == 0:
+                        candidates = list(output_dir.glob(f"{output_path.stem}.*"))
+                        if candidates:
+                            final_file = candidates[0]
+                    if final_file.exists() and final_file.stat().st_size > 0:
+                        logger.info(f"Successfully downloaded {target_url} to {final_file} ({final_file.stat().st_size} bytes)")
+                        return final_file
+
+                last_error = res.stderr.strip() or res.stdout.strip() or "Unknown error"
+                logger.warning(f"Download attempt for {target_url} (cookies={mode['use_cookies']}) failed: {last_error[:300]}")
 
         raise RuntimeError(f"Failed to download audio: {last_error[:300]}")
 
