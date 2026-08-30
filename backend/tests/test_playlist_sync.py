@@ -322,3 +322,47 @@ async def test_resolve_needs_help_track(temp_db, tmp_path):
             assert len(remaining) == 0
 
 
+@pytest.mark.asyncio
+async def test_download_track_refuses_guessed_metadata_and_skips(temp_db, tmp_path):
+    from ytm_service.models import MusicBrainzMatch
+
+    # When searching for "Mama Bear" by "Rare Americans", the search provider returns
+    # a completely different song by the same artist: "crooked city"
+    guessed_match = MusicBrainzMatch(
+        mbid="dummy_mbid_1",
+        title="crooked city",
+        primary_title="crooked city",
+        artist="Rare Americans",
+        album="crooked city",
+        cover_url="http://example.com/art.jpg",
+        source="Deezer"
+    )
+
+    with patch("ytm_service.playlist_downloader.musicbrainz_client.search", return_value=[guessed_match]), \
+         patch("ytm_service.playlist_downloader._download_sync") as mock_yt_dl, \
+         patch("ytm_service.playlist_downloader.ytm_client.upload_file") as mock_up:
+
+        res = await download_and_upload_playlist_track(
+            video_id="vid_mama_bear",
+            raw_title="Mama Bear",
+            raw_artist="Rare Americans",
+            raw_album=None,
+            enrich_metadata=True,
+            require_full_match=True
+        )
+
+        # Must NOT have guessed "crooked city" and must have skipped!
+        assert res["status"] == "needs_help"
+        assert res["title"] == "Mama Bear"  # Preserved original title, not guessed!
+        assert res["artist"] == "Rare Americans"
+        assert "album" in res["reason"]
+        mock_yt_dl.assert_not_called()
+        mock_up.assert_not_called()
+
+        help_tracks = await temp_db.get_needs_help_tracks()
+        assert len(help_tracks) == 1
+        assert help_tracks[0]["video_id"] == "vid_mama_bear"
+        assert help_tracks[0]["title"] == "Mama Bear"
+
+
+

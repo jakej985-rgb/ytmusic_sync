@@ -14,6 +14,8 @@ from .ytm_client import ytm_client
 from .musicbrainz import musicbrainz_client
 from .scanner import write_metadata_tags, extract_metadata
 from .downloader import _download_sync, extract_playlist_info_sync
+from .normalizer import normalize_text
+from .matcher import string_similarity
 
 logger = logging.getLogger("ytm_sync.playlist_downloader")
 
@@ -68,6 +70,61 @@ def clean_youtube_title(title: str, channel_name: Optional[str] = None) -> tuple
     return cleaned, artist
 
 
+def is_valid_metadata_match(
+    candidate_title: Optional[str],
+    candidate_artist: Optional[str],
+    candidate_album: Optional[str],
+    target_title: str,
+    target_artist: Optional[str],
+) -> bool:
+    """
+    Verify that an online metadata result is an authentic match for the track
+    and NOT a random guess or different song by the same artist.
+    """
+    if not candidate_title or not candidate_title.strip():
+        return False
+    if not candidate_artist or not candidate_artist.strip():
+        return False
+    if not candidate_album or not candidate_album.strip():
+        return False
+
+    n_target_title = normalize_text(target_title)
+    n_cand_title = normalize_text(candidate_title)
+    if not n_target_title or not n_cand_title:
+        return False
+
+    # 1. Title match verification: reject guessing different songs
+    title_sim = string_similarity(n_target_title, n_cand_title)
+    title_match = (
+        n_target_title == n_cand_title
+        or title_sim >= 0.80
+        or (title_sim >= 0.60 and (n_target_title in n_cand_title or n_cand_title in n_target_title))
+    )
+    if not title_match:
+        return False
+
+    # 2. Artist match verification (if target artist is provided)
+    if target_artist and target_artist.strip():
+        n_target_art = normalize_text(target_artist)
+        n_cand_art = normalize_text(candidate_artist)
+        if n_target_art and n_cand_art:
+            art_sim = string_similarity(n_target_art, n_cand_art)
+            art_match = (
+                n_target_art == n_cand_art
+                or art_sim >= 0.70
+                or (n_target_art in n_cand_art or n_cand_art in n_target_art)
+            )
+            if not art_match:
+                return False
+
+    # 3. Album verification: must not be a generic dummy value
+    cand_alb_lower = candidate_album.strip().lower()
+    if cand_alb_lower in ("unknown", "unknown album", "single"):
+        return False
+
+    return True
+
+
 async def download_and_upload_playlist_track(
     video_id: str,
     raw_title: str,
@@ -81,7 +138,7 @@ async def download_and_upload_playlist_track(
     """
     Download a single playlist track via yt-dlp, enrich/clean its metadata,
     write tags & artwork, upload to YouTube Music cloud locker, and save to local library.
-    If require_full_match is True and no match for artist, title, and album can be found:
+    If require_full_match is True and no verified match for artist, title, and album can be found:
     skip download/upload and mark as 'needs_help'.
     """
     # 1. Clean title and artist candidates
@@ -108,28 +165,35 @@ async def download_and_upload_playlist_track(
                 provider="all"
             )
             if matches:
-                # Prefer a match that has verified artist, title, and album
-                full_matches = [
+                # Strictly filter for genuine matches where title, artist, and album match without guessing
+                verified_matches = [
                     m for m in matches 
                     if is_known(m.title, forbidden=()) 
                     and is_known(m.artist, forbidden=("unknown", "unknown artist")) 
-                    and is_known(m.album, forbidden=("unknown", "unknown album"))
+                    and is_known(m.album, forbidden=("unknown", "unknown album", "single"))
+                    and is_valid_metadata_match(
+                        candidate_title=m.title,
+                        candidate_artist=m.artist,
+                        candidate_album=m.album,
+                        target_title=final_title,
+                        target_artist=final_artist
+                    )
                 ]
-                if full_matches:
-                    best = full_matches[0]
+                if verified_matches:
+                    # Pick match with highest title similarity to avoid guesswork
+                    verified_matches.sort(
+                        key=lambda m: string_similarity(normalize_text(final_title), normalize_text(m.title)),
+                        reverse=True
+                    )
+                    best = verified_matches[0]
                     final_title = best.title
                     final_artist = best.artist
                     final_album = best.album
                     if best.cover_url:
                         final_cover_url = best.cover_url
-                    logger.info(f"Found full metadata match: '{final_title}' by '{final_artist}' on album '{final_album}'")
-                elif matches[0].album and matches[0].artist:
-                    best = matches[0]
-                    final_title = best.title or final_title
-                    final_artist = best.artist or final_artist
-                    final_album = best.album or final_album
-                    if best.cover_url:
-                        final_cover_url = best.cover_url
+                    logger.info(f"Found confirmed metadata match: '{final_title}' by '{final_artist}' on album '{final_album}'")
+                else:
+                    logger.info(f"No strict metadata match found for '{final_title}' (Artist: '{final_artist or 'Unknown'}') - refusing to guess")
         except Exception as ex:
             logger.debug(f"Metadata search exception: {ex}")
 
