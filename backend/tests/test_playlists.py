@@ -114,3 +114,60 @@ async def test_get_playlist_details_with_matching():
             assert data["tracks"][1]["title"] == "Streaming Exclusive Song"
             assert data["tracks"][1]["in_local"] is False
             assert data["tracks"][1]["local_path"] is None
+
+
+@pytest.mark.asyncio
+async def test_playlist_details_in_uploads_accurate_matching_and_refresh():
+    # Insert an upload for Queen - Bohemian Rhapsody
+    await db.upsert_ytm_upload({
+        "entity_id": "ent_queen_1",
+        "video_id": "vid_queen_upload",
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "album": "A Night at the Opera"
+    })
+
+    mock_playlist_data = {
+        "id": "PL_TEST",
+        "title": "Mix",
+        "tracks": [
+            {
+                "videoId": "vid_track_1",
+                "title": "Bohemian Rhapsody",
+                "artists": [{"name": "Queen"}],
+                "album": {"name": "A Night at the Opera"}
+            },
+            {
+                # Same title "Bohemian Rhapsody", but DIFFERENT artist "Another Artist"
+                "videoId": "vid_track_2",
+                "title": "Bohemian Rhapsody",
+                "artists": [{"name": "Another Artist"}],
+                "album": {"name": "Another Album"}
+            },
+            {
+                "videoId": "vid_track_3",
+                "title": "Deleted Track",
+                "artists": [{"name": "Snak the Ripper"}],
+                "album": {"name": "Unknown Album"}
+            }
+        ]
+    }
+
+    with patch.object(ytm_client, "is_auth_configured", return_value=True), \
+         patch.object(ytm_client, "_get_client") as mock_get_client:
+        mock_yt = MagicMock()
+        mock_yt.get_playlist.return_value = mock_playlist_data
+        mock_get_client.return_value = mock_yt
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            res = await ac.get("/api/ytm/playlists/PL_TEST")
+            assert res.status_code == 200
+            tracks = res.json()["tracks"]
+            # Track 1 (Queen - Bohemian Rhapsody) matches upload
+            assert tracks[0]["in_uploads"] is True
+            # Track 2 (Another Artist - Bohemian Rhapsody) MUST NOT match upload!
+            assert tracks[1]["in_uploads"] is False
+            # Track 3 (Deleted Track) is NOT in uploads
+            assert tracks[2]["in_uploads"] is False
+

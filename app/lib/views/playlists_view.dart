@@ -103,7 +103,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     }
   }
 
-  Future<void> _selectPlaylist(YTMPlaylist playlist) async {
+  Future<void> _selectPlaylist(YTMPlaylist playlist, {bool refresh = false}) async {
     setState(() {
       _selectedPlaylist = playlist;
       _isLoadingDetails = true;
@@ -112,7 +112,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     });
 
     try {
-      final details = await apiService.fetchPlaylistDetails(playlist.id);
+      final details = await apiService.fetchPlaylistDetails(playlist.id, refresh: refresh);
       if (mounted) {
         setState(() {
           _playlistDetails = details;
@@ -647,9 +647,9 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                 ],
                 if (!_isLoadingDetails)
                   IconButton.filledTonal(
-                    onPressed: () => _selectPlaylist(playlist),
+                    onPressed: () => _selectPlaylist(playlist, refresh: true),
                     icon: const Icon(Icons.refresh, size: 18),
-                    tooltip: 'Refresh Playlist Details',
+                    tooltip: 'Refresh Playlist & Sync Uploads',
                   ),
               ],
             ),

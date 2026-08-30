@@ -296,12 +296,14 @@ class YTMClient:
         uploads_set = set()
         uploads_video_ids = set()
         for u in uploads:
-            u_key = f"{normalize_text(u.artist)}|{normalize_text(u.title)}"
-            uploads_set.add(u_key)
-            u_title = normalize_text(u.title)
-            if u_title:
-                uploads_set.add(u_title)
-            if u.video_id:
+            # We must require both artist and title to match!
+            # Loose matching on title alone caused completely different tracks or deleted tracks
+            # to falsely claim they were in uploads!
+            u_art = normalize_text(u.artist)
+            u_tit = normalize_text(u.title)
+            if u_tit:
+                uploads_set.add(f"{u_art}|{u_tit}")
+            if u.video_id and not (u.entity_id and u.entity_id.startswith("up_")):
                 uploads_video_ids.add(u.video_id)
 
         def is_music_track(t: dict, raw_title: str) -> bool:
@@ -382,7 +384,7 @@ class YTMClient:
 
             local_path = local_map.get(norm_key) or local_map.get(title_key)
             in_local = local_path is not None
-            in_uploads = (norm_key in uploads_set) or (title_key in uploads_set) or (vid in uploads_video_ids)
+            in_uploads = (norm_key in uploads_set) or (vid in uploads_video_ids)
 
             matched_tracks.append({
                 "video_id": vid,

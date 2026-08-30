@@ -232,10 +232,15 @@ async def import_playlist_url_endpoint(req: PlaylistImportRequest):
         raise HTTPException(status_code=500, detail=f"Failed to import playlist: {e}")
 
 @app.get("/api/ytm/playlists/{playlist_id}")
-async def get_ytm_playlist_details(playlist_id: str):
+async def get_ytm_playlist_details(playlist_id: str, refresh: bool = False):
     if not ytm_client.is_auth_configured():
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
     try:
+        if refresh:
+            try:
+                await ytm_client.fetch_and_cache_uploads()
+            except Exception as ex:
+                logger.warning(f"Failed to refresh uploads from YTM: {ex}")
         details = await ytm_client.get_playlist_details(playlist_id)
         return details
     except Exception as e:
@@ -247,6 +252,12 @@ async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Option
     if not ytm_client.is_auth_configured():
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
     try:
+        # Refresh current uploads from YTM so deleted tracks can be detected and re-synced!
+        try:
+            await ytm_client.fetch_and_cache_uploads()
+        except Exception as ex:
+            logger.warning(f"Could not refresh remote uploads before sync: {ex}")
+
         details = await ytm_client.get_playlist_details(playlist_id)
         tracks = details.get("tracks", [])
         # Filter for tracks missing from cloud uploads and not duplicates

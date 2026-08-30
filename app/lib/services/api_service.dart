@@ -286,8 +286,11 @@ class ApiService {
     throw Exception('Failed to fetch playlists');
   }
 
-  Future<YTMPlaylistDetails> fetchPlaylistDetails(String playlistId) async {
-    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists/$playlistId'));
+  Future<YTMPlaylistDetails> fetchPlaylistDetails(String playlistId, {bool refresh = false}) async {
+    final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId').replace(
+      queryParameters: refresh ? {'refresh': 'true'} : null,
+    );
+    final response = await http.get(uri);
     if (response.statusCode == 200) {
       return YTMPlaylistDetails.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }

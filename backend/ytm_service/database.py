@@ -422,8 +422,13 @@ class Database:
 
     async def delete_ytm_upload_record(self, entity_id: str):
         async with self.get_connection() as db:
+            async with db.execute("SELECT video_id FROM ytm_uploads WHERE entity_id = ?", (entity_id,)) as cur:
+                row = await cur.fetchone()
+                vid = row[0] if row else None
             await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (entity_id,))
             await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (entity_id,))
+            if vid:
+                await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (f"up_{vid}",))
             await db.commit()
 
     async def prune_deleted_ytm_uploads(self, active_entity_ids: set[str], excluded_entity_ids: set[str]):
@@ -434,16 +439,15 @@ class Database:
                 await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (eid,))
                 await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (eid,))
 
-            # 2. Prune local uploads that are no longer in active_entity_ids (if active set is populated)
-            if len(active_entity_ids) > 10:
-                async with db.execute("SELECT entity_id FROM ytm_uploads") as cursor:
-                    rows = await cursor.fetchall()
-                    local_eids = {r[0] for r in rows}
+            # 2. Prune local uploads that are no longer in active_entity_ids (including artificial up_% IDs)
+            async with db.execute("SELECT entity_id FROM ytm_uploads") as cursor:
+                rows = await cursor.fetchall()
+                local_eids = {r[0] for r in rows}
 
-                stale_eids = local_eids - active_entity_ids
-                for s_eid in stale_eids:
-                    await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (s_eid,))
-                    await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (s_eid,))
+            stale_eids = local_eids - active_entity_ids
+            for s_eid in stale_eids:
+                await db.execute("DELETE FROM matches WHERE ytm_upload_id = ?", (s_eid,))
+                await db.execute("DELETE FROM ytm_uploads WHERE entity_id = ?", (s_eid,))
 
             await db.commit()
 
