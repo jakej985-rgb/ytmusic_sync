@@ -56,7 +56,7 @@ else:
     except OSError:
         pass
 
-insecure_auth_disabled = os.environ.get("YTM_SYNC_INSECURE_DISABLE_AUTH", "false").lower() in ("1", "true", "yes")
+enable_api_docs = os.environ.get("YTM_SYNC_ENABLE_DOCS", "false").lower() in ("1", "true", "yes")
 
 # Allowed CORS Origins
 if "ALLOWED_ORIGINS" in os.environ and os.environ["ALLOWED_ORIGINS"].strip():
@@ -96,7 +96,7 @@ class Settings(BaseModel):
     log_file: Path = target_log
     api_key_file: Path = target_api_key_file
     api_key: str = resolved_api_key
-    auth_disabled: bool = insecure_auth_disabled
+    enable_docs: bool = enable_api_docs
     allowed_origins: list[str] = resolved_allowed_origins
     allowed_fs_roots: list[Path] = resolved_allowed_fs_roots
     host: str = default_host

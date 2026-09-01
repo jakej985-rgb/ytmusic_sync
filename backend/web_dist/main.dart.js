@@ -45263,10 +45263,8 @@ return A.v($async$oi,r)},
 Ga(a){var s=t.N,r=A.C(s,s)
 if(a!=null)r.K(0,a)
 s=this.b
-if(s!=null&&s.length!==0){r.n(0,"Authorization","Bearer "+s)
-s=this.b
-s.toString
-r.n(0,"X-API-Key",s)}return r},
+if(s!=null&&s.length!==0)r.n(0,"Authorization","Bearer "+s)
+return r},
 Gk(a){var s
 if(a.b===401){s=this.c
 if(s!=null)s.$0()

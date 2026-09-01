@@ -20,26 +20,20 @@ ALLOWED_YOUTUBE_HOSTS = {
 }
 
 
-def verify_api_key_header(auth_header: Optional[str], x_api_key_header: Optional[str] = None) -> bool:
+def verify_api_key_header(auth_header: Optional[str]) -> bool:
     """
-    Validate the incoming API key against settings.api_key using constant-time comparison.
-    Supports Authorization: Bearer <key> and X-API-Key: <key>.
+    Validate incoming Bearer token against settings.api_key using constant-time comparison.
+    Canonical format: 'Authorization: Bearer <API_KEY>'.
     """
-    if settings.auth_disabled:
-        return True
+    if not auth_header or not settings.api_key:
+        return False
 
-    token: Optional[str] = None
-    if auth_header:
-        parts = auth_header.strip().split(" ", 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            token = parts[1].strip()
-        elif len(parts) == 1:
-            token = parts[0].strip()
+    parts = auth_header.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
 
-    if not token and x_api_key_header:
-        token = x_api_key_header.strip()
-
-    if not token or not settings.api_key:
+    token = parts[1].strip()
+    if not token:
         return False
 
     return secrets.compare_digest(token, settings.api_key)
@@ -108,7 +102,6 @@ def validate_fs_path(
             curr = curr.parent
         if curr.exists():
             resolved_ancestor = curr.resolve()
-            # If curr itself is inside an allowed root, ensure its canonical form remains inside that root
             for root in roots:
                 try:
                     root_res = root.resolve()
@@ -121,11 +114,10 @@ def validate_fs_path(
     return resolved
 
 
-def validate_youtube_url(url: str) -> None:
+def validate_network_url(url: str, allowed_hosts: Optional[set[str]] = None) -> None:
     """
-    Validate that a URL is a legitimate YouTube or YouTube Music URL.
-    Protects against SSRF by validating scheme, hostname, and resolving DNS to
-    ensure the target IP is not private, loopback, link-local, multicast, or reserved.
+    Validate that a URL is well-formed, uses http/https, contains no userinfo/bad ports,
+    matches allowed_hosts if specified, and resolves only to public non-internal IP addresses.
     Raises ValueError on any violation.
     """
     if not url or not isinstance(url, str):
@@ -152,10 +144,11 @@ def validate_youtube_url(url: str) -> None:
     if not hostname:
         raise ValueError("URL must contain a valid hostname.")
 
-    if hostname not in ALLOWED_YOUTUBE_HOSTS:
+    if allowed_hosts is not None and hostname not in allowed_hosts:
+        auth_type = "YouTube " if allowed_hosts == ALLOWED_YOUTUBE_HOSTS else ""
         raise ValueError(
-            f"Domain '{hostname}' is not an authorized YouTube domain. "
-            f"Allowed domains: {sorted(list(ALLOWED_YOUTUBE_HOSTS))}"
+            f"Domain '{hostname}' is not an authorized {auth_type}domain. "
+            f"Allowed domains: {sorted(list(allowed_hosts))}"
         )
 
     # 5. DNS resolution and SSRF check
@@ -173,13 +166,18 @@ def validate_youtube_url(url: str) -> None:
 
         if ip.is_loopback:
             raise ValueError(f"SSRF protection: '{hostname}' resolved to loopback IP {ip_str}")
-        if ip.is_private:
-            raise ValueError(f"SSRF protection: '{hostname}' resolved to private IP {ip_str}")
         if ip.is_link_local:
             raise ValueError(f"SSRF protection: '{hostname}' resolved to link-local IP {ip_str}")
-        if ip.is_multicast:
-            raise ValueError(f"SSRF protection: '{hostname}' resolved to multicast IP {ip_str}")
-        if ip.is_reserved:
-            raise ValueError(f"SSRF protection: '{hostname}' resolved to reserved IP {ip_str}")
         if ip.is_unspecified:
             raise ValueError(f"SSRF protection: '{hostname}' resolved to unspecified IP {ip_str}")
+        if ip.is_reserved:
+            raise ValueError(f"SSRF protection: '{hostname}' resolved to reserved IP {ip_str}")
+        if ip.is_multicast:
+            raise ValueError(f"SSRF protection: '{hostname}' resolved to multicast IP {ip_str}")
+        if ip.is_private:
+            raise ValueError(f"SSRF protection: '{hostname}' resolved to private IP {ip_str}")
+
+
+def validate_youtube_url(url: str) -> None:
+    """Validate that a URL is a legitimate YouTube or YouTube Music URL."""
+    validate_network_url(url, allowed_hosts=ALLOWED_YOUTUBE_HOSTS)

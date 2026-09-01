@@ -100,12 +100,25 @@ def fetch_cover_image_bytes(
                 _, b64_data = c_url.split(",", 1)
                 return base64.b64decode(b64_data)
             elif c_url.startswith("http://") or c_url.startswith("https://"):
+                from .security import validate_network_url
+                try:
+                    validate_network_url(c_url)
+                except ValueError as e:
+                    logger.warning(f"Rejected cover_url due to security violation: {e}")
+                    return None
                 with httpx.Client(timeout=10.0, follow_redirects=True) as client:
                     r = client.get(c_url)
                     if r.status_code == 200 and r.content:
                         return r.content
-            elif Path(c_url).is_file():
-                return Path(c_url).read_bytes()
+            else:
+                from .security import validate_fs_path
+                try:
+                    safe_local_path = validate_fs_path(c_url, must_exist=True)
+                    if safe_local_path.is_file():
+                        return safe_local_path.read_bytes()
+                except (ValueError, Exception) as e:
+                    logger.debug(f"Cover URL path validation failed: {e}")
+                    return None
 
         # Fallback: Auto-search iTunes by artist + title/album
         terms = []

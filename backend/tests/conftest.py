@@ -12,20 +12,7 @@ async def _test_request(self, method, url, *args, **kwargs):
     if "X-No-Auth" in headers:
         del headers["X-No-Auth"]
         saved_auth = self.headers.pop("Authorization", None)
-        saved_x = self.headers.pop("X-API-Key", None)
         headers.pop("Authorization", None)
-        headers.pop("X-API-Key", None)
-        kwargs["headers"] = headers
-        try:
-            return await _orig_request(self, method, url, *args, **kwargs)
-        finally:
-            if saved_auth:
-                self.headers["Authorization"] = saved_auth
-            if saved_x:
-                self.headers["X-API-Key"] = saved_x
-
-    if "X-API-Key" in headers:
-        saved_auth = self.headers.pop("Authorization", None)
         kwargs["headers"] = headers
         try:
             return await _orig_request(self, method, url, *args, **kwargs)
@@ -49,7 +36,6 @@ import tempfile
 def configure_test_security(tmp_path: Path):
     """Ensure test runs with a known test API key and allowed directories."""
     settings.api_key = "test-secret-token-32bytes-hex123456"
-    settings.auth_disabled = False
     settings.allowed_fs_roots = [
         tmp_path,
         tmp_path.parent,

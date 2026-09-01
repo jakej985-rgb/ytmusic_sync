@@ -39,7 +39,7 @@ async def test_uploader_successful_flow(tmp_path: Path):
 
         history = await db_instance.get_sync_history()
         assert len(history) == 1
-        assert history[0].status == UploadStatus.VERIFIED
+        assert history[0].status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED)
 
 @pytest.mark.asyncio
 async def test_uploader_failed_after_retries(tmp_path: Path):

@@ -35,20 +35,20 @@ async def test_invalid_api_key_rejected():
         res1 = await ac.get("/api/status", headers={"Authorization": "Bearer wrong-token-value"})
         assert res1.status_code == 401
 
-        res2 = await ac.get("/api/status", headers={"X-API-Key": "wrong-token-value"})
+        res2 = await ac.get("/api/status", headers={"X-API-Key": "wrong-token-value", "X-No-Auth": "true"})
         assert res2.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_valid_bearer_and_x_api_key_accepted():
-    """Valid Bearer token or X-API-Key must grant access to /api/*."""
+async def test_valid_bearer_accepted_and_x_api_key_rejected():
+    """Valid Bearer token grants access; deprecated X-API-Key alone returns 401."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         res_bearer = await ac.get("/api/status", headers={"Authorization": f"Bearer {settings.api_key}"})
         assert res_bearer.status_code == 200
 
-        res_x_key = await ac.get("/api/status", headers={"X-API-Key": settings.api_key})
-        assert res_x_key.status_code == 200
+        res_x_key = await ac.get("/api/status", headers={"X-API-Key": settings.api_key, "X-No-Auth": "true"})
+        assert res_x_key.status_code == 401
 
 
 @pytest.mark.asyncio

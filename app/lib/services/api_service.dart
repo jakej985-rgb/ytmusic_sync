@@ -40,7 +40,6 @@ class ApiService {
     }
     if (_apiKey != null && _apiKey!.isNotEmpty) {
       headers['Authorization'] = 'Bearer $_apiKey';
-      headers['X-API-Key'] = _apiKey!;
     }
     return headers;
   }

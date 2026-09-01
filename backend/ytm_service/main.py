@@ -91,7 +91,14 @@ async def lifespan(app: FastAPI):
         background_scanner_task.cancel()
     await queue_manager.stop_worker()
 
-app = FastAPI(title="YTM Sync Backend Service", version=__version__, lifespan=lifespan)
+app = FastAPI(
+    title="YTM Sync Backend Service",
+    version=__version__,
+    lifespan=lifespan,
+    docs_url="/docs" if settings.enable_docs else None,
+    redoc_url="/redoc" if settings.enable_docs else None,
+    openapi_url="/openapi.json" if settings.enable_docs else None,
+)
 
 # Restricted CORS configuration
 app.add_middleware(
@@ -99,7 +106,7 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "X-API-Key", "Content-Type", "Accept", "Origin", "User-Agent"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "User-Agent"],
 )
 
 @app.middleware("http")
@@ -113,8 +120,7 @@ async def authenticate_api_requests(request: Request, call_next):
         return await call_next(request)
 
     auth_hdr = request.headers.get("Authorization")
-    x_api_key = request.headers.get("X-API-Key")
-    if not verify_api_key_header(auth_hdr, x_api_key):
+    if not verify_api_key_header(auth_hdr):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid or missing API key"},
@@ -356,6 +362,9 @@ async def browse_filesystem(path: Optional[str] = Query(None)):
             target_path = validate_fs_path(path, must_exist=True)
         except ValueError as e:
             raise HTTPException(status_code=403, detail=str(e))
+
+    if not target_path.is_dir():
+        raise HTTPException(status_code=400, detail="Requested path is not a directory")
 
     directories = []
     try:
@@ -1014,8 +1023,12 @@ async def batch_delete_ytm_uploads(req: BatchDeleteUploadsRequest):
 async def get_artwork_file(filename: str):
     """Serve custom uploaded artwork images."""
     from fastapi.responses import FileResponse
-    art_file = settings.data_dir / "artwork" / filename
-    if not art_file.exists():
+    art_dir = (settings.data_dir / "artwork").resolve()
+    try:
+        art_file = validate_fs_path(art_dir / filename, allowed_roots=[art_dir], must_exist=True)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artwork file not found")
+    if not art_file.is_file():
         raise HTTPException(status_code=404, detail="Artwork file not found")
     return FileResponse(art_file)
 
