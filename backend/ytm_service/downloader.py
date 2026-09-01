@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Optional
 from .config import settings
-from .security import validate_youtube_url
+from .security import validate_youtube_url, validate_fs_path
 
 logger = logging.getLogger("ytm_sync.downloader")
 
@@ -115,18 +115,22 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
 
 def _download_sync(video_id: str, output_path: Path, fallback_query: Optional[str] = None) -> Path:
     """Download audio stream. Tries ytmusicapi direct stream, standard youtube.com URL, music.youtube.com URL, and public ytsearch fallback."""
+    clean_id = str(video_id).strip()
+    if not re.match(r'^[a-zA-Z0-9_-]+$', clean_id):
+        raise ValueError(f"Invalid video ID format: {video_id}")
+
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. First attempt direct download via authenticated ytmusicapi session
     try:
-        direct_file = _download_via_ytmusicapi(video_id, output_path)
+        direct_file = _download_via_ytmusicapi(clean_id, output_path)
         if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
             return direct_file
     except Exception as e:
         logger.debug(f"Direct ytmusicapi stream failed: {e}")
 
-    logger.info(f"Direct ytmusicapi stream not available; falling back to yt-dlp for upload {video_id}...")
+    logger.info(f"Direct ytmusicapi stream not available; falling back to yt-dlp for upload {clean_id}...")
 
     # 2. Extract auth credentials from all candidate paths
     auth_candidates = [
@@ -178,10 +182,11 @@ def _download_sync(video_id: str, output_path: Path, fallback_query: Optional[st
         # 1. Standard youtube.com watch URL
         # 2. music.youtube.com watch URL
         # 3. If direct upload video_id is unavailable/private, search YouTube public audio via fallback_query
-        urls_to_try = [
-            f"https://www.youtube.com/watch?v={video_id}",
-            f"https://music.youtube.com/watch?v={video_id}"
-        ]
+        watch_url = f"https://www.youtube.com/watch?v={clean_id}"
+        music_url = f"https://music.youtube.com/watch?v={clean_id}"
+        validate_youtube_url(watch_url)
+        validate_youtube_url(music_url)
+        urls_to_try = [watch_url, music_url]
         if fallback_query and fallback_query.strip():
             clean_query = fallback_query.strip()
             # Remove audio extensions if in query
@@ -251,7 +256,10 @@ async def download_ytm_upload(
     fallback_query: Optional[str] = None
 ) -> Path:
     """Download an uploaded YouTube Music track by its video_id and return the local path."""
-    target_dir = dest_dir or (settings.data_dir / "staging")
+    if dest_dir:
+        target_dir = validate_fs_path(dest_dir, allow_create_in_parent=True)
+    else:
+        target_dir = settings.data_dir / "staging"
     target_dir.mkdir(parents=True, exist_ok=True)
     target_base = target_dir / f"ytm_{video_id}"
 

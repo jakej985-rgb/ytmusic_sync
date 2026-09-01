@@ -826,10 +826,14 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
                     if row:
                         local_fp = row[0]
 
-        if local_fp and Path(local_fp).exists():
-            logger.info(f"Found local file for upload {entity_id} via library: {local_fp}")
-            shutil.copy2(local_fp, target_staging)
-            downloaded_path = target_staging
+        if local_fp:
+            try:
+                safe_local = validate_fs_path(local_fp, must_exist=True)
+                logger.info(f"Found local file for upload {entity_id} via library: {safe_local}")
+                shutil.copy2(safe_local, target_staging)
+                downloaded_path = target_staging
+            except Exception as e:
+                logger.warning(f"Local file {local_fp} failed path validation: {e}")
 
         if not downloaded_path and Path("/music").is_dir():
             clean_name = upload.title.strip()
@@ -839,9 +843,13 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
                 candidates = list(Path("/music").rglob(f"{stem}.*"))
             valid = [c for c in candidates if c.is_file()]
             if valid:
-                logger.info(f"Found local file for upload {entity_id} in /music: {valid[0]}")
-                shutil.copy2(valid[0], target_staging)
-                downloaded_path = target_staging
+                try:
+                    safe_candidate = validate_fs_path(valid[0], must_exist=True)
+                    logger.info(f"Found local file for upload {entity_id} in /music: {safe_candidate}")
+                    shutil.copy2(safe_candidate, target_staging)
+                    downloaded_path = target_staging
+                except Exception as e:
+                    logger.warning(f"Candidate file {valid[0]} failed path validation: {e}")
 
         # 1. Download audio file from YTM if not available locally
         if not downloaded_path:
@@ -1054,7 +1062,13 @@ for candidate in web_dir_candidates:
 
 def start():
     import uvicorn
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        proxy_headers=True,
+        forwarded_allow_ips=settings.forwarded_allow_ips
+    )
 
 if __name__ == "__main__":
     start()
