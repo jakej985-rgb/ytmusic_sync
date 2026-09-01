@@ -57,4 +57,6 @@ async def test_health_endpoint():
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "healthy"}
+        data = resp.json()
+        assert data["status"] == "healthy"
+        assert "version" in data

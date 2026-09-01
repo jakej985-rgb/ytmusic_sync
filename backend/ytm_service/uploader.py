@@ -53,6 +53,17 @@ class UploadQueueManager:
             except asyncio.CancelledError:
                 pass
 
+    async def reconcile_and_resume(self) -> dict[str, int]:
+        """Reconcile stuck sync jobs on startup and resume the worker if queued jobs exist."""
+        result = await db.reconcile_stuck_sync_jobs()
+        next_job = await db.get_next_queued_job()
+        if next_job:
+            logger.info(f"Startup reconciliation: {result['requeued']} jobs requeued, resuming upload worker.")
+            self.ensure_worker_running()
+        elif result['requeued'] > 0 or result['failed'] > 0:
+            logger.info(f"Startup reconciliation completed: {result['requeued']} requeued, {result['failed']} failed.")
+        return result
+
     async def _process_queue_loop(self):
         logger.info("Upload worker loop started.")
         self._is_running = True

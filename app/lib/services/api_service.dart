@@ -1,16 +1,77 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
 class ApiService {
   final String baseUrl;
+  String? _apiKey;
+  VoidCallback? onUnauthorized;
 
   ApiService({String? baseUrl})
       : baseUrl = baseUrl ?? (kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765');
 
+  String? get apiKey => _apiKey;
+
+  Future<void> initApiKey() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _apiKey = prefs.getString('ytm_sync_api_key');
+    } catch (_) {}
+  }
+
+  Future<void> setApiKey(String? key) async {
+    _apiKey = key?.trim();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_apiKey == null || _apiKey!.isEmpty) {
+        await prefs.remove('ytm_sync_api_key');
+      } else {
+        await prefs.setString('ytm_sync_api_key', _apiKey!);
+      }
+    } catch (_) {}
+  }
+
+  Map<String, String> _buildHeaders([Map<String, String>? base]) {
+    final headers = <String, String>{};
+    if (base != null) {
+      headers.addAll(base);
+    }
+    if (_apiKey != null && _apiKey!.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $_apiKey';
+      headers['X-API-Key'] = _apiKey!;
+    }
+    return headers;
+  }
+
+  void _checkResponse(http.Response response) {
+    if (response.statusCode == 401) {
+      onUnauthorized?.call();
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+  }
+
+  Future<http.Response> _get(Uri uri, {Map<String, String>? headers}) async {
+    final response = await http.get(uri, headers: _buildHeaders(headers));
+    _checkResponse(response);
+    return response;
+  }
+
+  Future<http.Response> _post(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final response = await http.post(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    _checkResponse(response);
+    return response;
+  }
+
+  Future<http.Response> _delete(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final response = await http.delete(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    _checkResponse(response);
+    return response;
+  }
+
   Future<DashboardStats> fetchDashboardStatus() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/status'));
+    final response = await _get(Uri.parse('$baseUrl/api/status'));
     if (response.statusCode == 200) {
       return DashboardStats.fromJson(jsonDecode(response.body));
     }
@@ -18,7 +79,7 @@ class ApiService {
   }
 
   Future<ConnectionStatus> fetchAuthStatus() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/auth/status'));
+    final response = await _get(Uri.parse('$baseUrl/api/auth/status'));
     if (response.statusCode == 200) {
       return ConnectionStatus.fromJson(jsonDecode(response.body));
     }
@@ -26,7 +87,7 @@ class ApiService {
   }
 
   Future<ConnectionStatus> setupAuth(String rawHeaders) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/auth/setup'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'raw_headers': rawHeaders}),
@@ -39,7 +100,7 @@ class ApiService {
   }
 
   Future<ConnectionStatus> testAuth() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/auth/test'));
+    final response = await _post(Uri.parse('$baseUrl/api/auth/test'));
     if (response.statusCode == 200) {
       return ConnectionStatus.fromJson(jsonDecode(response.body));
     }
@@ -47,7 +108,7 @@ class ApiService {
   }
 
   Future<List<String>> getFolders() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/folders'));
+    final response = await _get(Uri.parse('$baseUrl/api/folders'));
     if (response.statusCode == 200) {
       return (jsonDecode(response.body) as List<dynamic>).map((e) => e.toString()).toList();
     }
@@ -55,7 +116,7 @@ class ApiService {
   }
 
   Future<void> updateFolders(List<String> folders) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/folders'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'folders': folders}),
@@ -68,7 +129,7 @@ class ApiService {
   Future<void> triggerScan([List<String>? folders]) async {
     final body = folders != null ? jsonEncode({'folders': folders}) : null;
     final headers = folders != null ? {'Content-Type': 'application/json'} : null;
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/scan'),
       headers: headers,
       body: body,
@@ -97,7 +158,7 @@ class ApiService {
     }
 
     final uri = Uri.parse('$baseUrl/api/songs').replace(queryParameters: queryParams);
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((e) => MusicFile.fromJson(e)).toList();
@@ -113,7 +174,7 @@ class ApiService {
     int? trackNumber,
     String? coverUrl,
   }) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/songs/$fileId/metadata'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
@@ -139,14 +200,14 @@ class ApiService {
   }
 
   Future<void> triggerSync() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/sync'));
+    final response = await _post(Uri.parse('$baseUrl/api/sync'));
     if (response.statusCode != 200) {
       throw Exception('Failed to trigger sync');
     }
   }
 
   Future<void> uploadSong(int fileId) async {
-    final response = await http.post(Uri.parse('$baseUrl/api/upload/$fileId'));
+    final response = await _post(Uri.parse('$baseUrl/api/upload/$fileId'));
     if (response.statusCode != 200) {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Failed to enqueue upload');
@@ -154,7 +215,7 @@ class ApiService {
   }
 
   Future<int> uploadAllMissing() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/upload/all-missing'));
+    final response = await _post(Uri.parse('$baseUrl/api/upload/all-missing'));
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
       return data['enqueued_count'] ?? 0;
@@ -172,7 +233,7 @@ class ApiService {
       'status': status,
       'limit': limit.toString(),
     });
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       return UnifiedQueueResponse.fromJson(jsonDecode(response.body));
     }
@@ -180,21 +241,21 @@ class ApiService {
   }
 
   Future<void> cancelAllQueue() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/queue/cancel-all'));
+    final response = await _post(Uri.parse('$baseUrl/api/queue/cancel-all'));
     if (response.statusCode != 200) {
       throw Exception('Failed to cancel queue');
     }
   }
 
   Future<void> clearCompletedQueue() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/queue/clear-completed'));
+    final response = await _post(Uri.parse('$baseUrl/api/queue/clear-completed'));
     if (response.statusCode != 200) {
       throw Exception('Failed to clear completed items');
     }
   }
 
   Future<List<dynamic>> getNeedsHelpTracks() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/needs-help'));
+    final response = await _get(Uri.parse('$baseUrl/api/needs-help'));
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as List<dynamic>;
     }
@@ -202,7 +263,7 @@ class ApiService {
   }
 
   Future<void> dismissNeedsHelpTrack(String videoId) async {
-    final response = await http.delete(Uri.parse('$baseUrl/api/needs-help/$videoId'));
+    final response = await _delete(Uri.parse('$baseUrl/api/needs-help/$videoId'));
     if (response.statusCode != 200) {
       throw Exception('Failed to dismiss track');
     }
@@ -214,8 +275,9 @@ class ApiService {
     String? artist,
     String? album,
     String? thumbnail,
+    String? destinationDir,
   }) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/needs-help/$videoId/resolve'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
@@ -223,6 +285,7 @@ class ApiService {
         'artist': artist,
         'album': album,
         'thumbnail': thumbnail,
+        'destination_dir': destinationDir,
       }),
     );
     if (response.statusCode == 200) {
@@ -232,7 +295,7 @@ class ApiService {
   }
 
   Future<List<SyncJob>> getHistory() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/history'));
+    final response = await _get(Uri.parse('$baseUrl/api/history'));
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((e) => SyncJob.fromJson(e)).toList();
@@ -241,7 +304,7 @@ class ApiService {
   }
 
   Future<AppSettings> getSettings() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/settings'));
+    final response = await _get(Uri.parse('$baseUrl/api/settings'));
     if (response.statusCode == 200) {
       return AppSettings.fromJson(jsonDecode(response.body));
     }
@@ -258,7 +321,7 @@ class ApiService {
     if (scanIntervalMinutes != null) body['scan_interval_minutes'] = scanIntervalMinutes;
     if (verifyUploads != null) body['verify_uploads'] = verifyUploads;
 
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/settings'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(body),
@@ -269,7 +332,7 @@ class ApiService {
   }
 
   Future<String> backupDatabase() async {
-    final response = await http.post(Uri.parse('$baseUrl/api/database/backup'));
+    final response = await _post(Uri.parse('$baseUrl/api/database/backup'));
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
       return data['backup_path'] ?? 'Database backup completed';
@@ -278,7 +341,7 @@ class ApiService {
   }
 
   Future<List<YTMPlaylist>> fetchPlaylists() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists'));
+    final response = await _get(Uri.parse('$baseUrl/api/ytm/playlists'));
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((item) => YTMPlaylist.fromJson(item as Map<String, dynamic>)).toList();
@@ -290,7 +353,7 @@ class ApiService {
     final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId').replace(
       queryParameters: refresh ? {'refresh': 'true'} : null,
     );
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       return YTMPlaylistDetails.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }
@@ -301,7 +364,7 @@ class ApiService {
     final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId/sync-missing').replace(
       queryParameters: destinationDir != null && destinationDir.isNotEmpty ? {'destination_dir': destinationDir} : null,
     );
-    final response = await http.post(uri);
+    final response = await _post(uri);
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
     }
@@ -310,7 +373,7 @@ class ApiService {
   }
 
   Future<PlaylistSyncStatusModel> getPlaylistSyncStatus() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/ytm/playlists/sync-status'));
+    final response = await _get(Uri.parse('$baseUrl/api/ytm/playlists/sync-status'));
     if (response.statusCode == 200) {
       return PlaylistSyncStatusModel.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }
@@ -318,7 +381,7 @@ class ApiService {
   }
 
   Future<Map<String, dynamic>> downloadAndUploadPlaylistTrack(Map<String, dynamic> trackData) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/ytm/playlists/download-track'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(trackData),
@@ -331,7 +394,7 @@ class ApiService {
   }
 
   Future<YTMPlaylistDetails> importPlaylistUrl(String url) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/ytm/playlists/import-url'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'url': url}),
@@ -344,7 +407,7 @@ class ApiService {
   }
 
   Future<List<RootFolderStats>> fetchFolderStats() async {
-    final response = await http.get(Uri.parse('$baseUrl/api/folders/stats'));
+    final response = await _get(Uri.parse('$baseUrl/api/folders/stats'));
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((item) => RootFolderStats.fromJson(item as Map<String, dynamic>)).toList();
@@ -356,11 +419,12 @@ class ApiService {
     final uri = Uri.parse('$baseUrl/api/fs/browse').replace(
       queryParameters: path != null && path.isNotEmpty ? {'path': path} : null,
     );
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       return FsBrowseResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }
-    throw Exception('Failed to browse container filesystem');
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to browse container filesystem');
   }
 
   Future<List<MusicBrainzMatch>> searchMusicBrainz({
@@ -379,7 +443,7 @@ class ApiService {
     }
 
     final uri = Uri.parse('$baseUrl/api/musicbrainz/search').replace(queryParameters: queryParams);
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((item) => MusicBrainzMatch.fromJson(item as Map<String, dynamic>)).toList();
@@ -389,7 +453,7 @@ class ApiService {
 
   Future<Map<String, int>> getYtmUploadsSummary() async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/api/ytm/uploads/summary'));
+      final response = await _get(Uri.parse('$baseUrl/api/ytm/uploads/summary'));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         return {
@@ -418,7 +482,7 @@ class ApiService {
     }
 
     final uri = Uri.parse('$baseUrl/api/ytm/uploads').replace(queryParameters: queryParams);
-    final response = await http.get(uri);
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final items = (data['items'] as List<dynamic>)
@@ -443,7 +507,7 @@ class ApiService {
     int? trackNumber,
     String? coverUrl,
   }) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/ytm/uploads/$entityId/replace'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
@@ -478,7 +542,7 @@ class ApiService {
       if (title != null && title.isNotEmpty) queryParams['title'] = title;
       if (album != null && album.isNotEmpty) queryParams['album'] = album;
       final uri = Uri.parse('$baseUrl/api/metadata/cover-art').replace(queryParameters: queryParams);
-      final response = await http.get(uri);
+      final response = await _get(uri);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return data['cover_url'] as String?;
@@ -488,12 +552,12 @@ class ApiService {
   }
 
   Future<bool> deleteYtmUpload(String entityId) async {
-    final response = await http.delete(Uri.parse('$baseUrl/api/ytm/uploads/$entityId'));
+    final response = await _delete(Uri.parse('$baseUrl/api/ytm/uploads/$entityId'));
     return response.statusCode == 200;
   }
 
   Future<Map<String, dynamic>> batchDeleteYtmUploads(List<String> entityIds) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/ytm/uploads/batch-delete'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'entity_ids': entityIds}),
@@ -505,7 +569,7 @@ class ApiService {
   }
 
   Future<int> batchUploadSongs(List<int> fileIds) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/upload/batch'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'file_ids': fileIds}),
@@ -518,7 +582,7 @@ class ApiService {
   }
 
   Future<int> batchDeleteSongs(List<int> fileIds) async {
-    final response = await http.post(
+    final response = await _post(
       Uri.parse('$baseUrl/api/songs/batch-delete'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'file_ids': fileIds}),

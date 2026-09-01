@@ -5,10 +5,12 @@ import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from . import __version__
 from .config import settings
 from .database import db
 from .models import (
@@ -26,6 +28,12 @@ from .scanner import write_metadata_tags
 from .playlist_downloader import playlist_sync_manager, download_and_upload_playlist_track
 from .queue_service import unified_queue_service
 from .metadata_tracker import metadata_tracker
+from .security import (
+    verify_api_key_header,
+    validate_fs_path,
+    validate_youtube_url,
+    get_allowed_roots,
+)
 from logging.handlers import RotatingFileHandler
 from fastapi.staticfiles import StaticFiles
 
@@ -72,6 +80,8 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize DB
     logger.info(f"Initializing database at {settings.db_path}...")
     await db.init_db()
+    # Recover interrupted upload jobs and resume worker if tasks are queued
+    await queue_manager.reconcile_and_resume()
     # Start periodic background scanner
     background_scanner_task = asyncio.create_task(_periodic_scan_loop())
     yield
@@ -81,16 +91,37 @@ async def lifespan(app: FastAPI):
         background_scanner_task.cancel()
     await queue_manager.stop_worker()
 
-app = FastAPI(title="YTM Sync Backend Service", version="0.0.1-beta", lifespan=lifespan)
+app = FastAPI(title="YTM Sync Backend Service", version=__version__, lifespan=lifespan)
 
-# Allow Flutter Desktop / Localhost clients
+# Restricted CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "X-API-Key", "Content-Type", "Accept", "Origin", "User-Agent"],
 )
+
+@app.middleware("http")
+async def authenticate_api_requests(request: Request, call_next):
+    path = request.url.path
+    # Allow public health endpoint and static frontend files
+    if path == "/health" or not path.startswith("/api/"):
+        return await call_next(request)
+    # Allow CORS preflight OPTIONS requests without credentials
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    auth_hdr = request.headers.get("Authorization")
+    x_api_key = request.headers.get("X-API-Key")
+    if not verify_api_key_header(auth_hdr, x_api_key):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid or missing API key"},
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    return await call_next(request)
+
 
 @app.get("/api/status", response_model=DashboardStats)
 async def get_dashboard_status():
@@ -159,6 +190,13 @@ async def get_playlist_sync_status():
 @app.post("/api/ytm/playlists/download-track")
 async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
     """Download, tag, and upload a single playlist track to YouTube Music locker."""
+    dest_path = None
+    if req.destination_dir:
+        try:
+            dest_path = validate_fs_path(req.destination_dir, allow_create_in_parent=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid destination_dir: {e}")
+
     if not ytm_client.is_auth_configured():
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
     try:
@@ -168,7 +206,7 @@ async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
             raw_artist=req.artist,
             raw_album=req.album,
             raw_thumbnail=req.thumbnail,
-            destination_dir=Path(req.destination_dir) if req.destination_dir else None,
+            destination_dir=dest_path,
             enrich_metadata=req.enrich_metadata
         )
         return res
@@ -179,6 +217,10 @@ async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
 @app.post("/api/ytm/playlists/import-url")
 async def import_playlist_url_endpoint(req: PlaylistImportRequest):
     """Import and audit an external YouTube / YouTube Music playlist URL."""
+    try:
+        validate_youtube_url(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid playlist URL: {e}")
     try:
         raw_info = await extract_playlist_info(req.url)
         tracks_raw = raw_info.get("tracks", [])
@@ -249,8 +291,16 @@ async def get_ytm_playlist_details(playlist_id: str, refresh: bool = False):
 @app.post("/api/ytm/playlists/{playlist_id}/sync-missing")
 async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Optional[str] = None):
     """Start background sync for all tracks in a playlist missing from uploads."""
+    dest_path = None
+    if destination_dir:
+        try:
+            dest_path = str(validate_fs_path(destination_dir, allow_create_in_parent=True))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid destination_dir: {e}")
+
     if not ytm_client.is_auth_configured():
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+
     try:
         # Refresh current uploads from YTM so deleted tracks can be detected and re-synced!
         try:
@@ -269,7 +319,7 @@ async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Option
             playlist_id=playlist_id,
             playlist_title=details.get("title", "Playlist"),
             tracks_to_sync=missing,
-            destination_dir=destination_dir
+            destination_dir=dest_path
         )
         return {
             "status": "started",
@@ -294,41 +344,47 @@ def format_size(bytes_val: Optional[int | float]) -> str:
 
 @app.get("/api/fs/browse")
 async def browse_filesystem(path: Optional[str] = Query(None)):
-    """Browse directories inside the container filesystem."""
-    if not path:
-        if Path("/music").exists() and Path("/music").is_dir():
-            target_path = Path("/music")
-        else:
-            target_path = Path("/")
-    else:
-        target_path = Path(path)
+    """Browse directories inside approved container filesystem roots."""
+    allowed_roots = get_allowed_roots()
+    if not allowed_roots:
+        raise HTTPException(status_code=500, detail="No approved filesystem roots configured")
 
-    try:
-        target_path = target_path.resolve()
-        if not target_path.exists() or not target_path.is_dir():
-            target_path = Path("/")
-    except Exception:
-        target_path = Path("/")
+    if not path:
+        target_path = next((r for r in allowed_roots if r.exists()), allowed_roots[0])
+    else:
+        try:
+            target_path = validate_fs_path(path, must_exist=True)
+        except ValueError as e:
+            raise HTTPException(status_code=403, detail=str(e))
 
     directories = []
     try:
         for entry in os.scandir(str(target_path)):
             try:
-                # Exclude system pseudo-filesystems when browsing /
-                if str(target_path) == "/" and entry.name in ("proc", "sys", "dev", "run"):
-                    continue
                 if entry.is_dir(follow_symlinks=True):
-                    directories.append({
-                        "name": entry.name,
-                        "path": entry.path
-                    })
+                    entry_p = Path(entry.path)
+                    try:
+                        validate_fs_path(entry_p, must_exist=True)
+                        directories.append({
+                            "name": entry.name,
+                            "path": str(entry_p)
+                        })
+                    except ValueError:
+                        continue
             except (PermissionError, OSError):
                 continue
     except (PermissionError, OSError):
         pass
 
     directories.sort(key=lambda x: x["name"].lower())
-    parent_path = str(target_path.parent) if target_path != target_path.parent else None
+
+    parent_path = None
+    if target_path != target_path.parent:
+        try:
+            parent_resolved = validate_fs_path(target_path.parent, must_exist=True)
+            parent_path = str(parent_resolved)
+        except ValueError:
+            parent_path = None
 
     free_space = "N/A"
     total_space = "N/A"
@@ -344,7 +400,8 @@ async def browse_filesystem(path: Optional[str] = Query(None)):
         "parent_path": parent_path,
         "directories": directories,
         "free_space": free_space,
-        "total_space": total_space
+        "total_space": total_space,
+        "allowed_roots": [str(r) for r in allowed_roots]
     }
 
 @app.get("/api/folders")
@@ -382,21 +439,36 @@ async def get_folders_stats():
     return results
 
 class FoldersUpdate(BaseModel):
-    folders: list[str]
+    folders: list[str] = Field(..., min_length=1, max_length=50, description="Music folders allowlist (max 50)")
 
 @app.post("/api/folders")
 async def update_folders(req: FoldersUpdate):
-    await db.set_setting("music_folders", req.folders)
-    return {"status": "success", "folders": req.folders}
+    safe_folders = []
+    for f in req.folders:
+        try:
+            p = validate_fs_path(f, must_exist=False)
+            safe_folders.append(str(p))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid folder path '{f}': {e}")
+    await db.set_setting("music_folders", safe_folders)
+    return {"status": "success", "folders": safe_folders}
 
 @app.post("/api/scan")
 async def trigger_scan(bg_tasks: BackgroundTasks, req: Optional[ScanRequest] = None):
     if scanner.is_scanning:
         return {"status": "in_progress", "message": "Scan is already running"}
 
-    folders = req.folders if req and req.folders else await db.get_setting("music_folders", default=[])
-    if not folders:
+    raw_folders = req.folders if req and req.folders else await db.get_setting("music_folders", default=[])
+    if not raw_folders:
         raise HTTPException(status_code=400, detail="No music folders configured to scan")
+
+    folders = []
+    for f in raw_folders:
+        try:
+            p = validate_fs_path(f, must_exist=True)
+            folders.append(str(p))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid scan folder '{f}': {e}")
 
     async def _run_scan_and_match():
         await scanner.scan_folders(folders)
@@ -441,18 +513,32 @@ async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
             raise HTTPException(status_code=500, detail="Failed to update music file metadata in database")
 
         from .scanner import write_metadata_tags
+        tags_written = False
+        target_path = Path(existing.path)
+        is_writable = False
         try:
-            await asyncio.to_thread(
-                write_metadata_tags,
-                Path(existing.path),
-                title=req.title.strip(),
-                artist=req.artist.strip() if req.artist else None,
-                album=req.album.strip() if req.album else None,
-                track_number=req.track_number,
-                cover_url=req.cover_url
-            )
-        except Exception as e:
-            logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
+            is_writable = target_path.exists() and os.access(target_path, os.W_OK)
+        except Exception:
+            is_writable = False
+
+        if is_writable:
+            try:
+                await asyncio.to_thread(
+                    write_metadata_tags,
+                    target_path,
+                    title=req.title.strip(),
+                    artist=req.artist.strip() if req.artist else None,
+                    album=req.album.strip() if req.album else None,
+                    track_number=req.track_number,
+                    cover_url=req.cover_url
+                )
+                tags_written = True
+            except (PermissionError, OSError) as e:
+                logger.warning(f"File system is read-only; tags not written to {existing.path}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not write tags directly to file {existing.path}: {e}")
+        else:
+            logger.info(f"Skipping direct tag modification for read-only file: {existing.path}")
 
         # Re-evaluate matching for this file
         try:
@@ -462,13 +548,14 @@ async def update_song_metadata(file_id: int, req: MetadataUpdateRequest):
 
         refreshed = await db.get_music_file_by_id(file_id)
         final_obj = refreshed or updated
+        detail_msg = "Updated ID3 tags & metadata on disk" if tags_written else "Updated metadata in database (local file is read-only; tags untouched)"
         metadata_tracker.log_change(
             title=final_obj.title or req.title,
             artist=final_obj.artist,
             album=final_obj.album,
             thumbnail=req.cover_url,
             source="Local Song Metadata Editor",
-            detail="Updated ID3 tags & metadata on disk"
+            detail=detail_msg
         )
         return final_obj
     except HTTPException:
@@ -493,7 +580,7 @@ async def sync_remote_and_match(bg_tasks: BackgroundTasks):
     return {"status": "started", "message": "Library synchronization started"}
 
 class BatchUploadRequest(BaseModel):
-    file_ids: list[int]
+    file_ids: list[int] = Field(..., min_length=1, max_length=500, description="List of file IDs to enqueue (max 500)")
 
 @app.post("/api/upload/batch")
 async def upload_batch(req: BatchUploadRequest):
@@ -520,7 +607,7 @@ async def upload_single(file_id: int):
     return {"status": "enqueued", "job_id": job_id, "filename": file.filename}
 
 class BatchDeleteSongsRequest(BaseModel):
-    file_ids: list[int]
+    file_ids: list[int] = Field(..., min_length=1, max_length=500, description="List of song IDs to delete (max 500)")
 
 @app.post("/api/songs/batch-delete")
 async def batch_delete_songs(req: BatchDeleteSongsRequest):
@@ -576,7 +663,13 @@ async def dismiss_needs_help_track(video_id: str):
 @app.post("/api/needs-help/{video_id}/resolve")
 async def resolve_needs_help_track(video_id: str, req: ResolveNeedsHelpRequest):
     """Resolve a needs-help track with user-selected metadata, download, and upload."""
-    dest_path = Path(req.destination_dir) if req.destination_dir else None
+    dest_path = None
+    if req.destination_dir:
+        try:
+            dest_path = validate_fs_path(req.destination_dir, allow_create_in_parent=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid destination_dir: {e}")
+
     res = await download_and_upload_playlist_track(
         video_id=video_id,
         raw_title=req.title,
@@ -652,7 +745,7 @@ async def update_settings(req: SettingsUpdate):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": __version__}
 
 @app.get("/api/musicbrainz/search", response_model=list[MusicBrainzMatch])
 async def search_musicbrainz(
@@ -899,7 +992,7 @@ async def delete_ytm_upload(entity_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete upload: {str(e)}")
 
 class BatchDeleteUploadsRequest(BaseModel):
-    entity_ids: list[str]
+    entity_ids: list[str] = Field(..., min_length=1, max_length=100, description="List of YTM upload entity IDs to delete (max 100)")
 
 @app.post("/api/ytm/uploads/batch-delete")
 async def batch_delete_ytm_uploads(req: BatchDeleteUploadsRequest):

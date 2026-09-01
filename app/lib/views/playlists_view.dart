@@ -504,7 +504,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                                   ? Image.network(
                                       p.thumbnail!,
                                       fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => const Center(
+                                      errorBuilder: (_, _, _) => const Center(
                                         child: Icon(Icons.music_note, color: Colors.grey, size: 36),
                                       ),
                                     )
@@ -819,7 +819,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListView.separated(
         itemCount: tracks.length,
-        separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF22222E)),
+        separatorBuilder: (_, _) => const Divider(height: 1, color: Color(0xFF22222E)),
         itemBuilder: (context, index) {
           final track = tracks[index];
           final isDownloadingThis = track.videoId != null && _downloadingVideoIds.contains(track.videoId);
@@ -834,7 +834,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     ? Image.network(
                         track.thumbnail!,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const Icon(Icons.music_note, color: Colors.grey),
+                        errorBuilder: (_, _, _) => const Icon(Icons.music_note, color: Colors.grey),
                       )
                     : const Icon(Icons.music_note, color: Colors.grey),
               ),

@@ -1,1068 +1,863 @@
-Yep. Since the **app itself is already completed**, this plan should tell the agent to **Dockerize the existing working application without changing its behavior**.
+I audited the **current `main` branch** of `jakej985-rgb/ytmusic_sync` plus the ZIP you uploaded. I looked at the backend, Flutter app structure, Docker setup, CI, tests, persistence, auth, filesystem handling, upload/download paths, and recent commits.
 
-# Dockerization Plan — YTM Sync
+[YTM Sync repository](https://github.com/jakej985-rgb/ytmusic_sync?utm_source=chatgpt.com)
 
-## Goal
+## Overall verdict
 
-Convert the completed YTM Sync application into a production-ready Docker deployment.
+**The project is fairly well along functionally, but I would NOT expose the current container directly to the Internet yet.**
 
-The final result should be:
+### Scorecard
 
-```text
-Docker Host
-│
-└── YTM Sync
-    ├── Web UI
-    ├── API
-    ├── Sync Engine
-    ├── YT Music integration
-    ├── SQLite/database
-    ├── Authentication
-    ├── Logs
-    └── Configuration
-          │
-          ├── /music       READ ONLY
-          └── /downloads   READ ONLY
-```
-
-The Docker container must preserve **all existing functionality**.
+| Area                 |  Rating | Verdict                                     |
+| -------------------- | ------: | ------------------------------------------- |
+| Architecture         | 🟢 8/10 | Good separation of services                 |
+| Docker               | 🟢 8/10 | Good foundation                             |
+| Data persistence     | 🟢 8/10 | SQLite/config design is solid               |
+| Music safety         | 🟢 8/10 | Read-only mounts are a good choice          |
+| Matching logic       | 🟢 8/10 | Recent changes improved safety              |
+| Test coverage        | 🟡 7/10 | Lots of tests, but CI/test setup needs work |
+| CI/CD                | 🟡 7/10 | Good pipeline, some weaknesses              |
+| Security             | 🔴 4/10 | **Biggest problem**                         |
+| Production readiness | 🟡 6/10 | Good homelab app, not Internet-safe yet     |
 
 ---
 
-# Phase 1 — Inspect Before Changing Anything
+# 🔴 1. Biggest issue: API has effectively NO authentication
 
-The agent must first inspect the existing project.
+This is the most important finding.
 
-Determine:
+The backend exposes destructive/privileged operations such as:
 
-* Language/framework
-* Application entry point
-* Frontend architecture
-* Backend architecture
-* Python dependencies
-* Dart/Flutter dependencies
-* Database implementation
-* Configuration system
-* Authentication implementation
-* Current filesystem paths
-* Current logging
-* Current ports
-* Existing tests
-* Existing build scripts
-* Existing environment variables
+* delete YouTube Music uploads
+* batch delete uploads
+* upload local songs
+* start scans
+* modify metadata
+* change configured folders
+* start playlist downloads
+* start playlist synchronization
+* modify queue state
+* configure YouTube Music authentication
 
-### Important
+But I don't see an API authentication/authorization layer protecting those endpoints.
 
-Do **not** rewrite working code simply to make it fit Docker.
+The CORS configuration is also:
 
-Docker should wrap the existing application.
-
-Before making changes, run the application outside Docker and verify the current version works.
-
-Create a baseline:
-
-```text
-Application currently works:
-YES / NO
-
-Tests:
-PASS / FAIL
-
-Build:
-PASS / FAIL
+```python
+allow_origins=["*"],
+allow_credentials=True,
+allow_methods=["*"],
+allow_headers=["*"],
 ```
 
-If something is already broken, document it before Dockerization.
+That is far too permissive for an application that can manipulate someone's YouTube Music library.
+
+### Why this matters
+
+Your current architecture is basically:
+
+```text
+Internet
+   ↓
+Cloudflare / Traefik
+   ↓
+YTM Sync
+   ↓
+YouTube Music account
+```
+
+If someone gets access to the YTM Sync HTTP interface, they potentially get access to operations against the authenticated YT Music account.
+
+**For your setup, this is the #1 thing I'd fix.**
+
+### Recommended
+
+At minimum:
+
+```text
+Reverse proxy authentication
+        +
+YTM Sync API authentication
+```
+
+And preferably:
+
+* local-only mode by default
+* API token/session authentication
+* authentication required for `/api/*`
+* `/health` can remain public
+* restrictive CORS
+* CSRF protection if browser cookie auth is used
 
 ---
 
-# Phase 2 — Define Container Architecture
+# 🔴 2. `/api/fs/browse` exposes the container filesystem
 
-Determine whether the completed app can run as:
-
-### Preferred
-
-**One container**
+This endpoint lets the client browse arbitrary paths:
 
 ```text
-ytm-sync
-├── Web frontend
-├── API
-├── Sync engine
-├── YT Music integration
-└── Database
+/api/fs/browse?path=...
 ```
 
-Use one container if the current architecture allows it cleanly.
+It starts at `/music` normally, but the API accepts an arbitrary filesystem path.
 
-Do **not** introduce unnecessary microservices.
-
-If the existing application genuinely requires separate frontend/backend processes, use:
+The code only excludes:
 
 ```text
-ytm-sync
-ytm-sync-api
+/proc
+/sys
+/dev
+/run
 ```
 
-but only when necessary.
+It does **not** restrict browsing to:
 
-The goal is **simple deployment**.
+```text
+/music
+/downloads
+```
+
+or another allowed-root list.
+
+That means the UI/API can potentially browse:
+
+```text
+/config
+/app
+/etc
+/root
+/tmp
+...
+```
+
+The application is running as `ytmsync`, so permissions limit what it can see, but this is still unnecessary exposure.
+
+### Better
+
+Use an allowlist:
+
+```text
+/music
+/downloads
+```
+
+and make sure:
+
+```text
+requested_path.resolve()
+```
+
+remains underneath one of those roots.
 
 ---
 
-# Phase 3 — Dockerfile
+# 🔴 3. User-supplied `destination_dir` is not constrained
 
-Create a production Dockerfile.
+Several operations accept:
 
-Requirements:
+```python
+destination_dir
+```
 
-* Use a small appropriate base image
-* Pin important dependency versions
-* Install only runtime dependencies in the final image
-* Don't include development junk
-* Don't include local databases
-* Don't include authentication credentials
-* Don't include user's music
-* Don't run as root unless technically unavoidable
-* Use a dedicated application user
-* Set a proper working directory
-* Configure environment variables
-* Provide a proper application entrypoint
+and turn it directly into:
 
-Use a multi-stage build if the frontend requires compilation.
+```python
+Path(destination_dir)
+```
 
-Example architecture:
+For example:
+
+```python
+destination_dir=Path(req.destination_dir)
+```
+
+The download system can then write files there.
+
+That's particularly important because `/config` is writable.
+
+A malicious request shouldn't be able to tell the service:
+
+> "Download this track into `/config/something`."
+
+This becomes much more serious because there is currently no API authentication.
+
+### Fix
+
+Define explicit writable download roots, e.g.:
 
 ```text
-Build stage
-    ↓
-Compile frontend
-    ↓
-Install backend dependencies
-    ↓
-Production stage
-    ↓
-Copy only required artifacts
+/music
+/downloads
+/config/staging
 ```
+
+and reject everything else.
 
 ---
 
-# Phase 4 — Docker Compose
+# 🟠 4. You have a confusing contradiction around read-only music
 
-Create:
+Docker correctly mounts:
 
-```text
-docker-compose.yml
+```yaml
+- ${MUSIC_PATH:-/mnt/music}:/music:ro
+- ${DOWNLOADS_PATH:-/mnt/downloads}:/downloads:ro
 ```
 
-The default deployment should require only:
+That's excellent.
+
+But `/api/songs/{file_id}/metadata` attempts:
+
+```python
+write_metadata_tags(...)
+```
+
+against the actual music file.
+
+The code catches the failure and continues.
+
+So in Docker:
+
+```text
+UI says:
+"Update metadata"
+
+        ↓
+
+Database changes
+
+        ↓
+
+Attempt to modify file
+
+        ↓
+
+Permission denied because :ro
+
+        ↓
+
+Warning logged
+
+        ↓
+
+API returns success
+```
+
+That's a UX/data-integrity problem.
+
+The application can therefore report a metadata change that **didn't actually happen to the file**.
+
+### Decide on one model
+
+Either:
+
+**A. Truly read-only**
+
+Then metadata edits should update only YTM Sync's database and clearly say:
+
+> "Local file is read-only; tags were not modified."
+
+or:
+
+**B. Writable music**
+
+Remove `:ro` and deliberately support tag modification.
+
+Given your project philosophy, I strongly prefer **A**.
+
+---
+
+# 🟢 5. Your recent matching changes were good
+
+The last several commits show the project moving in the right direction.
+
+The recent history includes:
+
+* duplicate checking
+* queue improvements
+* metadata matching changes
+* strict artist/title/album matching
+* deleted-upload cleanup
+* better YT-DLP client handling
+
+The most important conceptual improvement is the move away from:
+
+> "This looks close enough, download it."
+
+toward:
+
+> "If we cannot confidently identify artist + title + album, don't download it; put it in Needs Help."
+
+That's exactly the safer behavior for a music synchronization application.
+
+---
+
+# 🟢 6. Docker design is actually pretty good
+
+I like several things here.
+
+### Non-root container
+
+You create:
+
+```text
+ytmsync UID 1000 / GID 1000
+```
+
+and run the application as that user.
+
+Good.
+
+### Dropped capabilities
+
+Compose has:
+
+```yaml
+cap_drop:
+  - ALL
+```
+
+and only adds:
+
+```yaml
+CHOWN
+SETUID
+SETGID
+```
+
+That's a good security posture.
+
+### No Docker socket
+
+Excellent.
+
+You don't need:
+
+```text
+/var/run/docker.sock
+```
+
+which avoids a huge class of container escape/control problems.
+
+### Read-only music
+
+Also good.
+
+---
+
+# 🟡 7. Docker image isn't completely reproducible
+
+Your requirements use ranges:
+
+```text
+fastapi>=...
+uvicorn>=...
+ytmusicapi>=...
+yt-dlp>=...
+```
+
+This means:
+
+```text
+Build today
+≠
+Build three months from now
+```
+
+because dependencies can change.
+
+For an application you're deploying through GHCR, I'd pin versions.
+
+For example:
+
+```text
+fastapi==...
+uvicorn[standard]==...
+ytmusicapi==...
+...
+```
+
+Then Dependabot can intentionally update them.
+
+You already have Dependabot configured, so pinning would make the update process much safer.
+
+---
+
+# 🟡 8. Docker builds the Flutter UI from a precompiled directory
+
+The Dockerfile does:
+
+```dockerfile
+COPY backend/web_dist/ ./web_dist/
+```
+
+It does **not** build Flutter.
+
+That means the repository effectively has two things that must stay synchronized:
+
+```text
+app/
+    Flutter source
+
+backend/web_dist/
+    compiled Flutter application
+```
+
+This is a maintenance trap.
+
+Someone can change:
+
+```text
+app/lib/...
+```
+
+and forget to regenerate:
+
+```text
+backend/web_dist/
+```
+
+Then Docker happily ships the old UI.
+
+### Better CI flow
+
+Have CI:
+
+```text
+Flutter source
+      ↓
+flutter build web
+      ↓
+backend/web_dist
+      ↓
+Docker image
+```
+
+Or build the Flutter app directly in a multi-stage Dockerfile.
+
+---
+
+# 🟡 9. Test suite exists, but I couldn't actually execute it in this environment
+
+This is important.
+
+I first ran:
 
 ```bash
-docker compose up -d
+python -m pytest backend/tests -q
 ```
 
-The service should include:
+and got:
 
-```yaml
-restart: unless-stopped
+```text
+ModuleNotFoundError: No module named 'ytm_service'
 ```
 
-unless there is a specific reason not to.
+That's because the repo expects:
+
+```bash
+PYTHONPATH=backend pytest backend/tests/
+```
+
+which your GitHub Actions workflow correctly uses.
+
+I then tried the correct invocation, but the audit environment doesn't have the Python dependencies installed, and external package installation isn't available here.
+
+So I **couldn't honestly claim that the test suite passes**.
+
+Your CI does use:
+
+```bash
+pip install -r backend/requirements.txt
+PYTHONPATH=./backend pytest backend/tests/ -v
+```
+
+which is the correct basic approach.
+
+There are a lot of backend tests, though, which is a good sign.
 
 ---
 
-# Phase 5 — Persistent Configuration
+# 🟡 10. CI doesn't appear to test Flutter
 
-This is critical.
-
-Anything that must survive a container recreation must live outside the container filesystem.
-
-Use:
+Your Docker workflow tests Python:
 
 ```text
-/config
+pip install
+pytest
 ```
 
-for persistent application state.
-
-Structure:
+but I don't see equivalent:
 
 ```text
-/config
-├── database/
-├── logs/
-├── auth/
-├── cache/
-└── settings/
+flutter pub get
+flutter analyze
+flutter test
+flutter build web
 ```
 
-The exact structure should follow the existing application's implementation.
+That leaves a major part of the application outside CI validation.
 
-Docker:
+I'd add a Flutter job.
 
-```yaml
-volumes:
-  - ./config:/config
+At minimum:
+
+```bash
+cd app
+flutter pub get
+flutter analyze
+flutter test
+flutter build web
 ```
 
-or preferably a configurable host path.
+Then Docker should consume the freshly generated web build.
 
 ---
 
-# Phase 6 — Database
+# 🟡 11. Versioning is duplicated
 
-If the existing app uses SQLite:
-
-Store it under:
+I noticed version information in multiple places:
 
 ```text
-/config/database/
+backend/ytm_service/__init__.py
+backend/ytm_service/main.py
+app/pubspec.yaml
+backend/web_dist/version.json
 ```
 
-Never:
+Your version-bump script attempts to synchronize these.
 
-```text
-/app/database.db
+That's workable, but fragile.
+
+The bigger concern is that Docker extracts the version from:
+
+```python
+__version__
 ```
 
-because that disappears when the container is recreated.
+while FastAPI has its own:
 
-Test:
-
-```text
-Start container
-    ↓
-Create data
-    ↓
-Stop container
-    ↓
-Delete container
-    ↓
-Start new container
-    ↓
-Data still exists
+```python
+version="0.0.1-beta"
 ```
 
-This test is mandatory.
+Those can drift.
+
+I'd establish one source of truth.
 
 ---
 
-# Phase 7 — YT Music Authentication
+# 🟠 12. Batch operations need limits
 
-Authentication must survive container updates.
+For example:
 
-The agent must identify exactly how the completed app stores YT Music authentication.
+```python
+file_ids: list[int]
+```
 
-Move that state to:
+and:
+
+```python
+for fid in req.file_ids:
+```
+
+There isn't an obvious request-level maximum.
+
+Likewise batch YouTube deletion can potentially process a huge list.
+
+For a local application this isn't catastrophic, but once exposed through a proxy it becomes a resource/abuse problem.
+
+I'd cap things like:
+
+```text
+batch upload: 500
+batch delete: 100
+```
+
+or whatever makes sense.
+
+---
+
+# 🟠 13. Background jobs aren't durable enough for true crash recovery
+
+The README describes:
+
+> sequential upload queue with recovery
+
+and the DB does persist job state, which is good.
+
+But some work is launched through in-process:
+
+```python
+asyncio.create_task(...)
+```
+
+and FastAPI:
+
+```python
+BackgroundTasks
+```
+
+If the container dies while that task is executing, the Python task itself disappears.
+
+The database can tell you:
+
+```text
+job = uploading
+```
+
+but the actual worker is gone.
+
+You need startup reconciliation such as:
+
+```text
+STARTUP
+ ↓
+Find jobs stuck in UPLOADING
+ ↓
+Determine whether they are recoverable
+ ↓
+Reset to QUEUED / FAILED
+ ↓
+Resume
+```
+
+That would make the "recovery" claim much stronger.
+
+---
+
+# 🟢 14. SQLite design looks reasonable for this application
+
+You're using:
+
+```text
+aiosqlite
+```
+
+and transactions/commits are explicitly handled.
+
+Foreign keys also use:
+
+```sql
+ON DELETE CASCADE
+```
+
+in the schema.
+
+That's a good fit for a single-container local application.
+
+I would not move this to Postgres just because it sounds more "production."
+
+For YTM Sync's intended use:
+
+```text
+one application
+one database
+one user/family
+```
+
+SQLite is perfectly reasonable.
+
+---
+
+# 🟢 15. The authentication credential storage is handled reasonably
+
+The code explicitly sets:
+
+```text
+0600
+```
+
+on the YouTube Music authentication file.
+
+That's good.
+
+And the Docker setup keeps it under:
 
 ```text
 /config/auth/
 ```
 
-or whatever secure persistent location the application requires.
+rather than baking credentials into the image.
 
-### Never
+That's exactly what you want.
 
-* Put credentials in the Dockerfile
-* Put credentials in Git
-* Put credentials in `docker-compose.yml`
-* Put credentials directly into the image
-* Commit authentication files
+**But this makes the missing API authentication even more important.**
 
-Add appropriate `.gitignore` entries.
-
-Example:
-
-```text
-config/
-.env
-*.json
-*.key
-*.token
-```
-
-The agent should inspect the actual authentication implementation before deciding which files to ignore.
+An unauthenticated API shouldn't be sitting next to an authenticated YouTube Music session.
 
 ---
 
-# Phase 8 — Music Mounts
+# 🟠 16. Playlist import accepts arbitrary URLs
 
-The container needs access to local music.
-
-Use configurable mounts:
+You have:
 
 ```text
-/music
-/downloads
+/api/ytm/playlists/import-url
 ```
 
-Both should be **read-only**.
+and feed the URL into `yt-dlp`.
 
-Example:
+This is useful functionality, but it needs input validation.
 
-```yaml
-volumes:
-  - ${MUSIC_PATH}:/music:ro
-  - ${DOWNLOADS_PATH}:/downloads:ro
-  - ${CONFIG_PATH}:/config
-```
-
-Environment variables:
+Ideally accept only:
 
 ```text
-MUSIC_PATH=/mnt/music
-DOWNLOADS_PATH=/mnt/downloads
-CONFIG_PATH=./config
+youtube.com
+music.youtube.com
+youtu.be
 ```
 
-The application should never need write permission to these directories.
+and supported playlist URL forms.
+
+Otherwise you're effectively giving an HTTP endpoint the ability to make outbound requests based on user-supplied URLs.
+
+Even if `yt-dlp` handles the URL safely, it's better to explicitly enforce the intended protocol/domain.
 
 ---
 
-# Phase 9 — Multiple Music Locations
+# 🟡 17. README has an actual installation mistake
 
-If the existing application supports multiple folders, preserve that functionality.
-
-For example:
-
-```text
-/music
-/music2
-/downloads
-/downloads2
-```
-
-Docker Compose should allow users to add additional mounts.
-
-Don't hard-code the host paths.
-
----
-
-# Phase 10 — Filesystem Permissions
-
-The agent must test permissions.
-
-The application user inside Docker needs:
-
-```text
-READ
-```
-
-access to:
-
-```text
-/music
-/downloads
-```
-
-and:
-
-```text
-READ + WRITE
-```
-
-to:
-
-```text
-/config
-```
-
-It should **not** need write access to music.
-
-Test:
-
-```text
-Read music → works
-Scan music → works
-Read metadata → works
-Write music → denied
-Write config → works
-Write logs → works
-```
-
----
-
-# Phase 11 — Environment Configuration
-
-Create:
-
-```text
-.env.example
-```
-
-Document every supported variable.
-
-Potential configuration:
-
-```text
-TZ=America/Denver
-
-PORT=8080
-
-MUSIC_PATH=/path/to/music
-DOWNLOADS_PATH=/path/to/downloads
-CONFIG_PATH=./config
-
-LOG_LEVEL=INFO
-```
-
-Only include variables that the application actually supports.
-
-Don't invent configuration merely for the example.
-
----
-
-# Phase 12 — Health Check
-
-Implement a health endpoint if one doesn't already exist.
-
-For example:
-
-```text
-GET /health
-```
-
-Expected:
-
-```json
-{
-  "status": "healthy"
-}
-```
-
-Docker should use it:
-
-```yaml
-healthcheck:
-  ...
-```
-
-The health check should verify that the application itself is functioning.
-
-It should **not** require YouTube Music to be online.
-
-Otherwise an external YTM outage would incorrectly make the entire container unhealthy.
-
----
-
-# Phase 13 — Startup
-
-The container should start automatically.
-
-Startup sequence:
-
-```text
-Container starts
-      ↓
-Load configuration
-      ↓
-Create required /config directories
-      ↓
-Validate database
-      ↓
-Load authentication
-      ↓
-Start application
-      ↓
-Health check
-      ↓
-READY
-```
-
-If authentication isn't configured, the application should still start.
-
-For example:
-
-```text
-Application: HEALTHY
-YouTube Music: NOT CONNECTED
-```
-
-rather than crashing.
-
----
-
-# Phase 14 — Graceful Shutdown
-
-Docker may send:
-
-```text
-SIGTERM
-```
-
-The application must handle shutdown correctly.
-
-If an upload is currently running:
-
-```text
-SIGTERM
-   ↓
-Stop accepting new uploads
-   ↓
-Safely stop current operation if possible
-   ↓
-Save state
-   ↓
-Close database
-   ↓
-Exit
-```
-
-Do not corrupt the database.
-
-Do not leave the queue in an impossible state.
-
----
-
-# Phase 15 — Upload Queue Persistence
-
-This is especially important for this application.
-
-Suppose:
-
-```text
-100 songs
-```
-
-are queued.
-
-Container restarts after:
-
-```text
-37 uploaded
-```
-
-The application should resume intelligently.
-
-After restart:
-
-```text
-37 → already completed
-38 → resume/retry
-39–100 → still pending
-```
-
-It should **not start uploading the first 37 again**.
-
----
-
-# Phase 16 — Logging
-
-Logs should be available through:
+The README currently shows:
 
 ```bash
-docker logs ytm-sync
+git clone https://github.com/example/ytmusic_sync.git
 ```
 
-but persistent application logs should also be stored under:
+That should obviously be your real repository.
 
-```text
-/config/logs
-```
-
-Don't log:
-
-* passwords
-* authentication headers
-* tokens
-* cookies
-* private credentials
-
----
-
-# Phase 17 — Docker Networking
-
-The application should listen on:
-
-```text
-0.0.0.0
-```
-
-inside the container.
-
-Do not bind only to:
-
-```text
-127.0.0.1
-```
-
-inside the container, or Docker port forwarding won't work properly.
-
-Default example:
-
-```text
-8080
-```
-
-Host:
-
-```text
-http://SERVER_IP:8080
-```
-
----
-
-# Phase 18 — Traefik Compatibility
-
-Since this application is intended to run on a Docker server, make it **Traefik-compatible**, but don't make Traefik mandatory.
-
-The Compose file should optionally support:
-
-```text
-Traefik
-   ↓
-YTM Sync
-```
-
-Example eventual URL:
-
-```text
-ytmsync.example.com
-```
-
-The agent should:
-
-* Add appropriate labels
-* Keep the internal application port configurable
-* Avoid exposing unnecessary ports when Traefik is used
-* Document both direct-port and Traefik deployment
-
-Don't hard-code your personal domain.
-
----
-
-# Phase 19 — Security
-
-The container should follow least privilege.
-
-Implement where practical:
-
-```text
-non-root user
-read-only music mounts
-minimal Linux capabilities
-no privileged mode
-no host PID
-no host filesystem access
-no Docker socket
-```
-
-**Do not mount `/var/run/docker.sock`.**
-
-The application has no reason to control Docker.
-
-If the application can run with:
-
-```yaml
-read_only: true
-```
-
-for its root filesystem, consider doing so while providing writable mounts for `/config` and required temporary directories.
-
----
-
-# Phase 20 — Temporary Storage
-
-If uploads require temporary files:
-
-```text
-/tmp
-```
-
-or:
-
-```text
-/data/tmp
-```
-
-should be handled explicitly.
-
-Don't accidentally write temporary files into:
-
-```text
-/music
-```
-
-or:
-
-```text
-/downloads
-```
-
----
-
-# Phase 21 — Docker Build Test
-
-Build from a completely clean environment:
+It should be:
 
 ```bash
-docker compose build --no-cache
+git clone https://github.com/jakej985-rgb/ytmusic_sync.git
 ```
 
-Then:
+This is small, but it makes the official deployment instructions look unfinished.
 
-```bash
-docker compose up -d
-```
+---
 
-Verify:
+# The architecture I'd aim for
 
-```bash
-docker compose ps
-```
-
-The container must be:
+Your current architecture is roughly:
 
 ```text
-running
-healthy
+                 ┌─────────────────┐
+                 │   Flutter UI    │
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │    FastAPI      │
+                 │                 │
+                 │ main.py         │
+                 │ queue           │
+                 │ matcher         │
+                 │ scanner         │
+                 └───────┬─────────┘
+                         │
+          ┌──────────────┼───────────────┐
+          ▼              ▼               ▼
+       SQLite        YTMusic API       Files
+```
+
+I'd evolve it toward:
+
+```text
+                 ┌──────────────────┐
+                 │    Cloudflare    │
+                 └────────┬─────────┘
+                          │
+                    Authentication
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │     Traefik      │
+                 └────────┬─────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │     FastAPI      │
+                 │                  │
+                 │ API Auth         │
+                 │ Rate Limits      │
+                 │ Validation       │
+                 └────────┬─────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+     SQLite          Job/Queue          YTMusic
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          ▼
+                     Filesystem
+                  /music :ro
+               /downloads :ro
 ```
 
 ---
 
-# Phase 22 — Functional Testing
+# Priority list
 
-Test the entire application inside Docker.
+If this were my repo, I'd work in this order:
 
-### Test 1 — UI
+### 🔴 P0 — Do before exposing externally
 
-Open:
+1. **Add API authentication**
+2. **Restrict filesystem browsing**
+3. **Restrict `destination_dir`**
+4. **Restrict playlist/import URLs**
+5. **Fix CORS**
+6. **Protect all upload/delete/auth endpoints**
 
-```text
-http://SERVER:PORT
-```
+### 🟠 P1 — Before calling it production-ready
 
-Verify UI loads.
+7. Startup recovery for interrupted jobs
+8. Add batch request limits
+9. Make read-only metadata behavior explicit
+10. Add Flutter CI
+11. Build Flutter web during CI rather than relying on committed `web_dist`
+12. Pin Python dependencies
 
-### Test 2 — Music scan
+### 🟡 P2 — Cleanup
 
-Mount a test music directory.
-
-Verify:
-
-```text
-Files detected
-Metadata detected
-Database populated
-```
-
-### Test 3 — YT Music authentication
-
-Authenticate.
-
-Verify:
-
-```text
-Connected
-```
-
-### Test 4 — Existing uploads
-
-Retrieve YT Music uploads.
-
-Verify they appear.
-
-### Test 5 — Matching
-
-Create:
-
-```text
-Already uploaded
-Not uploaded
-Ambiguous
-```
-
-Verify correct statuses.
-
-### Test 6 — Upload
-
-Upload one test song.
-
-Verify:
-
-```text
-Queued
-Uploading
-Completed
-Verified
-```
-
-### Test 7 — Restart
-
-While/after syncing:
-
-```bash
-docker restart ytm-sync
-```
-
-Verify state survives.
-
-### Test 8 — Recreate
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-Verify everything remains.
-
-### Test 9 — Update
-
-Replace the image with a newer build.
-
-Verify:
-
-```text
-Database survives
-Authentication survives
-Settings survive
-History survives
-```
+13. Fix README clone URL
+14. Consolidate version source
+15. Improve API error handling
+16. Add more integration tests
+17. Add health/readiness distinction
 
 ---
 
-# Phase 23 — Failure Testing
+## One thing I especially like
 
-The agent must deliberately test failures.
+The direction of the last few commits is **very good**.
 
-### Network disappears
-
-Expected:
+You recently changed the system from potentially making a questionable metadata guess to:
 
 ```text
-Upload → Failed/Retry
-Application remains running
-```
-
-### YTM authentication expires
-
-Expected:
-
-```text
-Application remains running
-Sync pauses
-User is informed
-```
-
-### File disappears
-
-Expected:
-
-```text
-Song → Failed/Missing
-Other songs continue
-```
-
-### Bad audio file
-
-Expected:
-
-```text
-File → Failed
-Other songs continue
-```
-
-### Container restart
-
-Expected:
-
-```text
-Queue preserved
-Database preserved
-No duplicate uploads
-```
-
----
-
-# Phase 24 — Documentation
-
-Create/update:
-
-```text
-README.md
-DOCKER.md
-.env.example
-```
-
-README should explain:
-
-```text
-What YTM Sync does
-Requirements
-Docker installation
-Configuration
-Music mounts
-YT Music authentication
-Starting
-Stopping
-Updating
-Backup
-Troubleshooting
-```
-
-Example:
-
-```bash
-git clone ...
-cd ytm-sync
-
-cp .env.example .env
-
-docker compose up -d
-```
-
-Then explain how to access it.
-
----
-
-# Phase 25 — Backup
-
-Document what needs to be backed up.
-
-At minimum:
-
-```text
-/config
-```
-
-because it contains:
-
-* Database
-* Settings
-* Sync history
-* Authentication/configuration
-* Application state
-
-The music itself should **not** be part of the Docker backup.
-
-It's already mounted from the host.
-
----
-
-# Phase 26 — Image Publishing
-
-Once local Docker deployment works, optionally prepare the project for a registry.
-
-Example:
-
-```text
-ghcr.io/<user>/ytm-sync
-```
-
-The agent should **not publish anything automatically** unless explicitly configured to do so.
-
-Create:
-
-```text
-.github/workflows/docker.yml
-```
-
-Eventually:
-
-```text
-git push
-   ↓
-GitHub Actions
-   ↓
-Docker build
-   ↓
-Tests
-   ↓
-Container image
-   ↓
-GHCR
-```
-
-Tags:
-
-```text
-latest
-v1.0.0
-commit SHA
-```
-
----
-
-# Phase 27 — Final Project Structure
-
-The target should be approximately:
-
-```text
-ytm-sync/
-│
-├── Dockerfile
-├── docker-compose.yml
-├── .dockerignore
-├── .env.example
-├── README.md
-├── DOCKER.md
-│
-├── src/
-│   └── existing application
-│
-├── tests/
-│
-├── scripts/
-│
-└── .github/
-    └── workflows/
-        └── docker.yml
-```
-
-Don't force the existing source tree into this exact structure if doing so would damage the project.
-
----
-
-# Definition of Done
-
-The agent should only consider Dockerization complete when this entire sequence works:
-
-```text
-docker compose up -d
+Can't confidently identify it
         ↓
-Container starts
+DON'T DOWNLOAD
         ↓
-Health = healthy
+Needs Help
         ↓
-Open web UI
+User resolves it
         ↓
-Configure YT Music
+Download
         ↓
-Configure music directory
-        ↓
-Scan music
-        ↓
-Retrieve YTM uploads
-        ↓
-Compare
-        ↓
-Select missing music
+Tag
         ↓
 Upload
-        ↓
-Verify
-        ↓
-Record result
-        ↓
-Restart container
-        ↓
-Everything remains
-        ↓
-Run sync again
-        ↓
-Already uploaded songs are skipped
 ```
 
-### Most important rule for the agent
+That is the right philosophy for this app.
 
-**Do not rewrite the working application. Dockerize it.**
+## Bottom line
 
-If a change is required because the existing application assumes a local filesystem, hard-coded path, localhost binding, or non-persistent database location, make the **smallest architectural change necessary**, document it, and add a test for it.
+**I would call the current repo "good homelab beta, not Internet-safe production."**
 
-The finished project should be something you can eventually deploy on your Docker server with essentially:
+The core application architecture is actually in pretty decent shape. The **security boundary around the FastAPI service is the major hole**, not the matching engine or Docker design.
 
-```bash
-docker compose up -d
-```
+And one especially important point for your setup: **if you're planning to put this behind your existing Traefik + Cloudflare setup, do the authentication/authorization work before exposing the YTM Sync route.** A reverse proxy alone doesn't make those destructive API endpoints safe.
 
-and have the application survive **container restarts, image updates, server reboots, and normal sync failures** without losing its state.
+If you want, the next logical step is for me to do a **P0 security audit file-by-file and identify exactly which endpoints need protection and what code should change**, rather than just giving you the high-level findings.

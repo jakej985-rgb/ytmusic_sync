@@ -29,7 +29,7 @@
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/example/ytmusic_sync.git
+git clone https://github.com/jakej985-rgb/ytmusic_sync.git
 cd ytmusic_sync
 
 # 2. Create your environment configuration

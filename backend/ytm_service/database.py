@@ -109,9 +109,35 @@ class Database:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA synchronous = NORMAL;")
             await db.executescript(CREATE_TABLES_SQL)
-            # Reset any interrupted jobs from previous SIGTERM or shutdown back to queued
-            await db.execute("UPDATE sync_jobs SET status = 'queued' WHERE status IN ('uploading', 'verifying')")
             await db.commit()
+        await self.reconcile_stuck_sync_jobs()
+
+    async def reconcile_stuck_sync_jobs(self, max_attempts: int = 3) -> dict[str, int]:
+        """Reconcile jobs left in 'uploading' or 'verifying' from a crash or SIGTERM.
+        Resets jobs to 'queued' if attempts < max_attempts, or marks them 'failed' if attempts >= max_attempts.
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE sync_jobs
+                SET status = 'queued', error = 'Re-queued after server restart'
+                WHERE status IN ('uploading', 'verifying') AND attempts < ?
+                """,
+                (max_attempts,)
+            )
+            requeued_count = cursor.rowcount
+
+            cursor = await db.execute(
+                """
+                UPDATE sync_jobs
+                SET status = 'failed', error = 'Exceeded retry limit (interrupted)'
+                WHERE status IN ('uploading', 'verifying') AND attempts >= ?
+                """,
+                (max_attempts,)
+            )
+            failed_count = cursor.rowcount
+            await db.commit()
+            return {"requeued": requeued_count, "failed": failed_count}
 
     # Settings operations
     async def get_setting(self, key: str, default: Any = None) -> Any:

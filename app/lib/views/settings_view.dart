@@ -13,6 +13,7 @@ class SettingsView extends StatefulWidget {
 class _SettingsViewState extends State<SettingsView> {
   final TextEditingController _headersController = TextEditingController();
   final TextEditingController _folderPathController = TextEditingController();
+  final TextEditingController _apiKeyController = TextEditingController();
 
   List<String> _folders = [];
   List<RootFolderStats> _folderStats = [];
@@ -25,6 +26,7 @@ class _SettingsViewState extends State<SettingsView> {
   @override
   void initState() {
     super.initState();
+    _apiKeyController.text = apiService.apiKey ?? '';
     _loadAll();
   }
 
@@ -32,6 +34,7 @@ class _SettingsViewState extends State<SettingsView> {
   void dispose() {
     _headersController.dispose();
     _folderPathController.dispose();
+    _apiKeyController.dispose();
     super.dispose();
   }
 
@@ -189,6 +192,57 @@ class _SettingsViewState extends State<SettingsView> {
           const Text(
             'Settings & Configuration',
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 24),
+
+          // API Security Section
+          _buildCard(
+            title: 'API Authentication & Security',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'YTM Sync protects all API endpoints with an API key. '
+                  'The key is stored in config/auth/api_key.txt or defined via YTM_SYNC_API_KEY.',
+                  style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _apiKeyController,
+                        obscureText: true,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                        decoration: InputDecoration(
+                          hintText: 'Enter API Key',
+                          labelText: 'API Key',
+                          isDense: true,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                          filled: true,
+                          fillColor: const Color(0xFF14141A),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: () async {
+                        final key = _apiKeyController.text.trim();
+                        final messenger = ScaffoldMessenger.of(context);
+                        await apiService.setApiKey(key);
+                        if (!mounted) return;
+                        messenger.showSnackBar(
+                          const SnackBar(content: Text('API Key saved')),
+                        );
+                        _loadAll();
+                      },
+                      icon: const Icon(Icons.key, size: 16),
+                      label: const Text('Save Key'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 24),
 

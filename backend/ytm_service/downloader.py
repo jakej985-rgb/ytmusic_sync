@@ -6,9 +6,11 @@ import tempfile
 import asyncio
 import subprocess
 import urllib.request
+import re
 from pathlib import Path
 from typing import Optional
 from .config import settings
+from .security import validate_youtube_url
 
 logger = logging.getLogger("ytm_sync.downloader")
 
@@ -260,7 +262,12 @@ def extract_playlist_info_sync(playlist_url_or_id: str) -> dict:
     """Extract playlist metadata and track list using yt-dlp flat-playlist mode."""
     url = playlist_url_or_id
     if not url.startswith("http"):
-        url = f"https://www.youtube.com/playlist?list={playlist_url_or_id}"
+        clean_id = playlist_url_or_id.strip()
+        if not re.match(r'^[a-zA-Z0-9_-]+$', clean_id):
+            raise ValueError(f"Invalid playlist ID format: {playlist_url_or_id}")
+        url = f"https://www.youtube.com/playlist?list={clean_id}"
+
+    validate_youtube_url(url)
 
     auth_candidates = [
         settings.auth_file,

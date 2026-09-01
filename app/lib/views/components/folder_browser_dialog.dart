@@ -113,9 +113,7 @@ class _FolderBrowserDialogState extends State<FolderBrowserDialog> {
                 const Text('Quick Access: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
                 _buildQuickChip('/music'),
                 const SizedBox(width: 6),
-                _buildQuickChip('/media'),
-                const SizedBox(width: 6),
-                _buildQuickChip('/'),
+                _buildQuickChip('/downloads'),
               ],
             ),
             const SizedBox(height: 12),
@@ -284,7 +282,7 @@ class _FolderBrowserDialogState extends State<FolderBrowserDialog> {
 
     return ListView.separated(
       itemCount: dirs.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF22222E)),
+      separatorBuilder: (_, _) => const Divider(height: 1, color: Color(0xFF22222E)),
       itemBuilder: (context, index) {
         final d = dirs[index];
         return ListTile(

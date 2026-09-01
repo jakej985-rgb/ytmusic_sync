@@ -13,6 +13,8 @@ services:
       - PORT=8080
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - YTM_SYNC_DATA_DIR=/config
+      - YTM_SYNC_API_KEY=${YTM_SYNC_API_KEY:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
     volumes:
       # Persistent configuration, SQLite database, logs, and authentication headers
       - ${CONFIG_PATH:-./config}:/config

@@ -17,13 +17,18 @@ async def setup_test_environment(tmp_path: Path):
 async def test_browse_filesystem_root():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Browsing container root / is forbidden
         response = await ac.get("/api/fs/browse?path=/")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["current_path"] == "/"
-        assert isinstance(data["directories"], list)
+        assert response.status_code == 403
+
+        # Browsing without path defaults to approved root
+        default_resp = await ac.get("/api/fs/browse")
+        assert default_resp.status_code == 200
+        data = default_resp.json()
+        assert "directories" in data
         assert "free_space" in data
         assert "total_space" in data
+        assert "allowed_roots" in data
 
 @pytest.mark.asyncio
 async def test_browse_filesystem_temp_dir(tmp_path: Path):

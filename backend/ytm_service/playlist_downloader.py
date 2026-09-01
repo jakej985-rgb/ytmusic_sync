@@ -16,6 +16,7 @@ from .scanner import write_metadata_tags, extract_metadata
 from .downloader import _download_sync, extract_playlist_info_sync
 from .normalizer import normalize_text
 from .matcher import string_similarity
+from .security import validate_fs_path
 
 logger = logging.getLogger("ytm_sync.playlist_downloader")
 
@@ -267,9 +268,15 @@ async def download_and_upload_playlist_track(
         if not up_res.get("success"):
             raise RuntimeError(f"YouTube Music upload failed: {up_res.get('response')}")
 
-        # Save a local copy to /music if directory exists and is writable
+        # Save a local copy if directory exists and is writable within approved roots
         local_saved_path: Optional[str] = None
-        target_music_dir = destination_dir or Path("/music")
+        if destination_dir:
+            target_music_dir = validate_fs_path(destination_dir, allow_create_in_parent=True)
+        else:
+            allowed_roots = settings.allowed_fs_roots
+            default_root = Path("/music")
+            target_music_dir = default_root if any(default_root == r or default_root.is_relative_to(r) for r in allowed_roots) else allowed_roots[0]
+
         if target_music_dir.exists() and os.access(str(target_music_dir), os.W_OK):
             try:
                 safe_artist = re.sub(r'[\\/*?:"<>|]', "", final_artist).strip() or "Unknown Artist"
@@ -348,7 +355,7 @@ class PlaylistSyncManager:
         if self._status.is_running:
             raise RuntimeError("A playlist sync is already in progress.")
 
-        dest_path = Path(destination_dir) if destination_dir else None
+        dest_path = validate_fs_path(destination_dir, allow_create_in_parent=True) if destination_dir else None
         self._status = PlaylistSyncStatus(
             is_running=True,
             playlist_id=playlist_id,

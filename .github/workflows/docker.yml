@@ -46,15 +46,31 @@ jobs:
             type=raw,value=${{ steps.app_version.outputs.version }},enable={{is_default_branch}}
             type=semver,pattern={{version}}
 
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Verify and Build Flutter Web UI
+        run: |
+          cd app
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build web --release
+          rm -rf ../backend/web_dist/*
+          cp -r build/web/* ../backend/web_dist/
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
-      - name: Run Test Suite
+      - name: Run Backend Test Suite
         run: |
           pip install -r backend/requirements.txt
-          PYTHONPATH=./backend pytest backend/tests/ -v
+          pytest
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7

@@ -7,7 +7,11 @@ import 'views/queue_view.dart';
 import 'views/history_view.dart';
 import 'views/settings_view.dart';
 
-void main() {
+import 'services/api_service.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await apiService.initApiKey();
   runApp(const YTMSyncApp());
 }
 
@@ -50,6 +54,72 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int _selectedIndex = 0;
+  bool _isAuthDialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    apiService.onUnauthorized = _showApiKeyDialog;
+  }
+
+  void _showApiKeyDialog() {
+    if (_isAuthDialogOpen || !mounted) return;
+    _isAuthDialogOpen = true;
+    final controller = TextEditingController(text: apiService.apiKey ?? '');
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: const Color(0xFF181820),
+        title: const Row(
+          children: [
+            Icon(Icons.lock_outline, color: Color(0xFFFF4E4E), size: 22),
+            SizedBox(width: 8),
+            Text('API Authentication Required', style: TextStyle(fontSize: 18)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Please enter your YTM Sync API Key to access backend services. '
+              'This can be found in config/auth/api_key.txt or your YTM_SYNC_API_KEY environment variable.',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'API Key',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final key = controller.text.trim();
+              if (key.isNotEmpty) {
+                await apiService.setApiKey(key);
+                if (mounted && dialogCtx.mounted) {
+                  Navigator.of(dialogCtx).pop();
+                  _isAuthDialogOpen = false;
+                  setState(() {});
+                }
+              }
+            },
+            child: const Text('Save & Reconnect'),
+          ),
+        ],
+      ),
+    ).then((_) {
+      _isAuthDialogOpen = false;
+    });
+  }
 
   void _navigateToTab(int index) {
     setState(() {
