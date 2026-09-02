@@ -6,23 +6,32 @@ import '../models/models.dart';
 
 class ApiService {
   final String baseUrl;
+  final http.Client _client;
   String? _apiKey;
   VoidCallback? onUnauthorized;
 
-  ApiService({String? baseUrl})
-      : baseUrl = baseUrl ?? (kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765');
+  ApiService({String? baseUrl, http.Client? client})
+      : baseUrl = baseUrl ?? (kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765'),
+        _client = client ?? http.Client();
+
+  bool _isUnauthorized = false;
 
   String? get apiKey => _apiKey;
+  bool get isUnauthorized => _isUnauthorized;
 
   Future<void> initApiKey() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       _apiKey = prefs.getString('ytm_sync_api_key');
+      _isUnauthorized = false;
     } catch (_) {}
   }
 
   Future<void> setApiKey(String? key) async {
     _apiKey = key?.trim();
+    if (_apiKey != null && _apiKey!.isNotEmpty) {
+      _isUnauthorized = false;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
       if (_apiKey == null || _apiKey!.isEmpty) {
@@ -46,25 +55,36 @@ class ApiService {
 
   void _checkResponse(http.Response response) {
     if (response.statusCode == 401) {
+      _isUnauthorized = true;
+      setApiKey(null);
       onUnauthorized?.call();
       throw Exception('Unauthorized: Invalid or missing API key');
     }
   }
 
   Future<http.Response> _get(Uri uri, {Map<String, String>? headers}) async {
-    final response = await http.get(uri, headers: _buildHeaders(headers));
+    if (_isUnauthorized) {
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+    final response = await _client.get(uri, headers: _buildHeaders(headers));
     _checkResponse(response);
     return response;
   }
 
   Future<http.Response> _post(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
-    final response = await http.post(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    if (_isUnauthorized) {
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+    final response = await _client.post(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
     _checkResponse(response);
     return response;
   }
 
   Future<http.Response> _delete(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
-    final response = await http.delete(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    if (_isUnauthorized) {
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+    final response = await _client.delete(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
     _checkResponse(response);
     return response;
   }

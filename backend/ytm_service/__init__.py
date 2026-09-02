@@ -1,2 +1,2 @@
 """YTM Sync Backend Service Package."""
-__version__ = "0.0.1-beta"
+__version__ = "1.0.0"

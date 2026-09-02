@@ -10,8 +10,10 @@ async def test_uploader_successful_flow(tmp_path: Path):
     db_instance = Database(tmp_path / "test_uploader.db")
     await db_instance.init_db()
 
+    file_path = tmp_path / "song.flac"
+    file_path.write_bytes(b"FAKEFLAC")
     file_id = await db_instance.upsert_music_file({
-        "path": str(tmp_path / "song.flac"),
+        "path": str(file_path),
         "filename": "song.flac",
         "artist": "Artist",
         "album": "Album",
@@ -46,8 +48,10 @@ async def test_uploader_failed_after_retries(tmp_path: Path):
     db_instance = Database(tmp_path / "test_uploader_fail.db")
     await db_instance.init_db()
 
+    failing_path = tmp_path / "failing.flac"
+    failing_path.write_bytes(b"FAKEFLAC")
     file_id = await db_instance.upsert_music_file({
-        "path": str(tmp_path / "failing.flac"),
+        "path": str(failing_path),
         "filename": "failing.flac",
         "artist": "Artist",
         "album": "Album",
@@ -114,8 +118,10 @@ async def test_uploader_queue_persistence_across_restart(tmp_path: Path):
 
     file_ids = []
     for i in range(1, 6):
+        song_path = tmp_path / f"song_{i}.flac"
+        song_path.write_bytes(b"FAKEFLAC")
         fid = await db_instance.upsert_music_file({
-            "path": str(tmp_path / f"song_{i}.flac"),
+            "path": str(song_path),
             "filename": f"song_{i}.flac",
             "title": f"Song {i}",
             "format": "FLAC",

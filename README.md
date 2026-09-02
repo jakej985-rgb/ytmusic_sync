@@ -49,7 +49,7 @@ http://<YOUR_SERVER_IP>:8080
 
 ---
 
-## 4. Configuration
+## 4. Configuration & Environment Variables
 
 All configuration is managed via environment variables in `.env` or passed to `docker compose`:
 
@@ -61,10 +61,56 @@ All configuration is managed via environment variables in `.env` or passed to `d
 | `DOWNLOADS_PATH` | `/mnt/downloads` | Host directory containing your secondary/downloaded music |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `TZ` | `UTC` | Server timezone for timestamped logs and backups |
+| `YTM_SYNC_API_KEY` | *(auto-generated)* | Explicit API key to enforce for Bearer authentication (optional) |
+| `ALLOWED_ORIGINS` | *(localhost)* | Comma-separated CORS allowed origins (e.g. `https://ytmsync.example.com`) |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse proxy IPs/subnets trusted for `X-Forwarded-*` headers |
 
 ---
 
-## 5. Music Mounts (Read-Only Safety)
+## 5. Security Model & API Authentication
+
+YTM Sync is engineered with security-by-default principles:
+
+### API Bearer Authentication
+- On first startup, YTM Sync automatically provisions a cryptographically strong 32-byte API key.
+- The key is securely stored at `/config/auth/api_key.txt` with restricted `0600` permissions.
+- To use the Web UI or connect external tools, authenticate using `Authorization: Bearer <API_KEY>`.
+- The Web UI automatically prompts for the API key if not yet provided or if a `401 Unauthorized` is encountered.
+- OpenAPI docs (`/docs`, `/redoc`, `/openapi.json`) are disabled by default in production.
+
+### Principle of Least Privilege
+- **Container Isolation**: Runs as non-root user `ytmsync` (`uid=1000`, `gid=1000`).
+- **Capability Lockdown**: Drops all Linux capabilities (`cap_drop: [ALL]`) with `no-new-privileges: true`.
+- **Read-Only Music Safety**: Music library directories are kernel-mounted read-only (`:ro`). YTM Sync cannot alter or delete your files.
+- **Filesystem Confinement**: Path validation restricts all browsing and file operations strictly to approved roots (`/music`, `/downloads`).
+- **SSRF Defense**: External network consumers validate hostnames and DNS resolutions, blocking private IP ranges, loopbacks, and cloud metadata endpoints.
+
+---
+
+## 6. Reverse Proxy Setup (Traefik / Cloudflare / Nginx)
+
+When deploying behind a reverse proxy (e.g., Cloudflare Tunnel, Traefik, or Nginx):
+
+```text
+User / Browser
+      ↓
+Cloudflare (HTTPS)
+      ↓
+Traefik / Nginx (Reverse Proxy)
+      ↓
+YTM Sync (Port 8080)
+```
+
+1. **Configure Trusted Proxy IPs**: In `.env`, set `FORWARDED_ALLOW_IPS` to your reverse proxy IP or Docker bridge subnet (e.g. `172.16.0.0/12,10.0.0.0/8`).
+2. **Configure CORS**: Set `ALLOWED_ORIGINS` to your external domain:
+   ```bash
+   ALLOWED_ORIGINS=https://ytmsync.example.com
+   ```
+3. **Traefik Labels**: If using Traefik, uncomment the labels section in `docker-compose.yml` and set `TRAEFIK_HOST=ytmsync.example.com` in `.env`.
+
+---
+
+## 7. Music Mounts (Read-Only Safety)
 
 YTM Sync **never modifies, tags, renames, or deletes your local files**.
 
@@ -81,7 +127,7 @@ Inside the Web UI under **Settings** $\rightarrow$ **Music Folders**, you can ad
 
 ---
 
-## 6. YouTube Music Authentication Setup
+## 8. YouTube Music Authentication Setup
 
 Because Google OAuth credentials are not authorized by Google for personal music uploads, authentication is established using browser session cookies/headers:
 
@@ -94,7 +140,7 @@ Because Google OAuth credentials are not authorized by Google for personal music
 
 ---
 
-## 7. Starting
+## 9. Starting
 
 ```bash
 docker compose up -d
@@ -108,7 +154,7 @@ curl -s http://localhost:8080/health
 
 ---
 
-## 8. Stopping
+## 10. Stopping
 
 ```bash
 docker compose down
@@ -118,7 +164,7 @@ YTM Sync catches `SIGTERM`, safely completes any active in-flight request, flush
 
 ---
 
-## 9. Updating
+## 11. Updating
 
 To upgrade to the latest version while preserving all database records, authentication credentials, and sync history:
 
@@ -130,7 +176,7 @@ docker compose up -d
 
 ---
 
-## 10. Backup
+## 12. Backup
 
 Only the host `/config` directory needs to be backed up. The music directory is already mounted from your host system.
 
@@ -141,12 +187,36 @@ tar -czvf ytm_sync_backup_$(date +%Y%m%d).tar.gz ./config
 
 ### What is Preserved in `/config`:
 - `/config/database/ytm_sync.db` — Track metadata, cloud matches, sync queue & history
-- `/config/auth/headers_auth.json` — YouTube Music authentication
+- `/config/auth/api_key.txt` — Secure API key
+- `/config/auth/headers_auth.json` — YouTube Music authentication headers
 - `/config/backups/` — Periodic SQLite database snapshots
 
 ---
 
-## 11. Troubleshooting
+## 13. Restoration
+
+To restore your configuration and state on a new server or fresh install:
+
+1. Extract your backup archive into your project directory:
+   ```bash
+   tar -xzvf ytm_sync_backup_YYYYMMDD.tar.gz -C ./
+   ```
+2. Confirm permissions are readable/writable:
+   ```bash
+   chmod -R u=rwX,g=rX,o= ./config
+   ```
+3. Start the container:
+   ```bash
+   docker compose up -d
+   ```
+4. Verify all components restored:
+   - Database records, sync queue, and matches will be immediately active.
+   - The same API key in `config/auth/api_key.txt` will continue to authenticate your clients.
+   - YouTube Music connection will remain intact without needing re-authentication.
+
+---
+
+## 14. Troubleshooting
 
 ### Container Shows `(unhealthy)`
 Check logs with:

@@ -7,6 +7,7 @@ from .database import db
 from .models import UploadStatus
 from .ytm_client import ytm_client
 from .matcher import matcher
+from .security import validate_fs_path
 
 logger = logging.getLogger("ytm_sync.uploader")
 
@@ -100,7 +101,13 @@ class UploadQueueManager:
         from .scanner import write_metadata_tags, extract_metadata
         import shutil
 
-        upload_path = Path(music_file.path)
+        try:
+            upload_path = validate_fs_path(music_file.path, must_exist=True)
+        except ValueError as e:
+            logger.error(f"Upload path validation failed for job {job_id}: {e}")
+            await db.update_sync_job(job_id, UploadStatus.FAILED, error=f"Invalid upload path: {e}")
+            return
+
         temp_staged_path = None
 
         try:

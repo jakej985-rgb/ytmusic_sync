@@ -15,6 +15,7 @@ services:
       - YTM_SYNC_DATA_DIR=/config
       - YTM_SYNC_API_KEY=${YTM_SYNC_API_KEY:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-}
     volumes:
       # Persistent configuration, SQLite database, logs, and authentication headers
       - ${CONFIG_PATH:-./config}:/config
