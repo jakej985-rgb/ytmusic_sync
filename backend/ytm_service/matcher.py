@@ -1,7 +1,16 @@
+"""
+========================================================================================
+CRITICAL UPLOAD INTEGRITY DIRECTIVE (Phase 15 Architecture Lock):
+"An Upload Locker item may only be downloaded from its exact authenticated upload source.
+Metadata may never be used to find a replacement source. If the exact source cannot be
+downloaded, the operation fails and the existing local file remains untouched."
+========================================================================================
+"""
+
 import difflib
 import logging
 from typing import Optional
-from .models import MatchType, MusicFile
+from .models import MatchType, MusicFile, SyncDecision
 from .normalizer import normalize_text
 from .database import db
 
@@ -78,6 +87,63 @@ def evaluate_match(
 
     return MatchType.NONE, 0.0
 
+
+def evaluate_sync_decision(
+    *,
+    expected_id: Optional[str] = None,
+    actual_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    is_private_inaccessible: bool = False,
+    destination_exists: bool = False,
+    allow_overwrite: bool = False,
+    audio_valid: Optional[bool] = None,
+    metadata_match: Optional[str] = None,
+    has_search_fallback: bool = False,
+) -> tuple[SyncDecision, str]:
+    """
+    Three-way sync decision engine (Phase 7):
+    - SAFE: Exact upload identity verified (expected_id == actual_id).
+    - REVIEW: Metadata compatible, but identity cannot be authoritatively established.
+              Never automatically downloads or replaces.
+    - BLOCKED: Security or integrity failure (private inaccessible, wrong video ID,
+               ytsearch fallback, unknown source type, audio validation failed, destination exists).
+    """
+    # 1. BLOCKED conditions
+    if is_private_inaccessible:
+        return SyncDecision.BLOCKED, "Private upload stream inaccessible or authentication failure"
+
+    if has_search_fallback:
+        return SyncDecision.BLOCKED, "ytsearch fallback prohibited for uploads"
+
+    if source_type and source_type not in ("ytm_upload", "catalog"):
+        return SyncDecision.BLOCKED, f"Source type '{source_type}' unknown or invalid"
+
+    if destination_exists and not allow_overwrite:
+        return SyncDecision.BLOCKED, "Destination file already exists; automatic replacement is blocked"
+
+    if audio_valid is False:
+        return SyncDecision.BLOCKED, "Audio integrity validation failed"
+
+    if expected_id and actual_id and expected_id != actual_id:
+        return SyncDecision.BLOCKED, f"Wrong video ID: expected '{expected_id}', got '{actual_id}'"
+
+    if metadata_match == "none":
+        return SyncDecision.BLOCKED, "Download metadata mismatch"
+
+    # 2. SAFE condition
+    if expected_id and actual_id and expected_id == actual_id:
+        return SyncDecision.SAFE, "Exact upload identity verified"
+
+    # 3. REVIEW conditions
+    if metadata_match in ("exact", "strong"):
+        return SyncDecision.REVIEW, "Metadata compatible but source identity not authoritatively established"
+
+    if metadata_match == "weak":
+        return SyncDecision.REVIEW, "Weak metadata match requires manual review"
+
+    return SyncDecision.BLOCKED, "Default fail-closed"
+
+
 class MatchingEngine:
     async def match_all(self) -> dict:
         """Run comparison between all local music files and YTM uploads."""
@@ -123,11 +189,19 @@ class MatchingEngine:
                     break
 
             if best_match and best_type in (MatchType.EXACT, MatchType.STRONG):
+                decision, reason = evaluate_sync_decision(
+                    expected_id=getattr(loc, "matched_upload_id", None) or getattr(best_match, "upload_video_id", None),
+                    actual_id=getattr(best_match, "upload_video_id", None) or getattr(best_match, "video_id", None),
+                    source_type=getattr(best_match, "source_type", "ytm_upload"),
+                    metadata_match=best_type.value
+                )
                 await db.save_match(
                     file_id=loc.id,
                     ytm_upload_id=best_match.entity_id,
                     match_type=best_type,
-                    score=best_score
+                    score=best_score,
+                    sync_decision=decision.value,
+                    decision_reason=reason
                 )
                 matched_count += 1
                 if best_type == MatchType.EXACT:
@@ -172,13 +246,28 @@ class MatchingEngine:
                 break
 
         if best_match and best_type in (MatchType.EXACT, MatchType.STRONG):
+            decision, reason = evaluate_sync_decision(
+                expected_id=getattr(loc, "matched_upload_id", None) or getattr(best_match, "upload_video_id", None),
+                actual_id=getattr(best_match, "upload_video_id", None) or getattr(best_match, "video_id", None),
+                source_type=getattr(best_match, "source_type", "ytm_upload"),
+                metadata_match=best_type.value
+            )
             await db.save_match(
                 file_id=loc.id,
                 ytm_upload_id=best_match.entity_id,
                 match_type=best_type,
-                score=best_score
+                score=best_score,
+                sync_decision=decision.value,
+                decision_reason=reason
             )
-            return {"matched": True, "upload_id": best_match.entity_id, "type": best_type.value, "score": best_score}
+            return {
+                "matched": True,
+                "upload_id": best_match.entity_id,
+                "type": best_type.value,
+                "score": best_score,
+                "sync_decision": decision.value,
+                "decision_reason": reason
+            }
 
         return {"matched": False}
 

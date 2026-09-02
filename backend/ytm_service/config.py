@@ -107,6 +107,7 @@ class Settings(BaseModel):
     auto_upload: bool = False
     verify_uploads: bool = True
     max_retries: int = 3
+    allow_automatic_replacement: bool = os.environ.get("YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT", "false").lower() in ("1", "true", "yes")
     forwarded_allow_ips: str = os.environ.get("FORWARDED_ALLOW_IPS", "").strip() or "127.0.0.1"
     web_dir: Path = Path(__file__).resolve().parent.parent / "web_dist"
 

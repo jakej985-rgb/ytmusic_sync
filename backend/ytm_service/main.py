@@ -23,7 +23,13 @@ from .ytm_client import ytm_client
 from .matcher import matcher
 from .uploader import queue_manager
 from .musicbrainz import musicbrainz_client
-from .downloader import download_ytm_upload, extract_playlist_info
+from .downloader import (
+    download_upload,
+    download_catalog_track,
+    download_ytm_upload,
+    extract_playlist_info,
+    commit_staged_file_to_destination
+)
 from .scanner import write_metadata_tags
 from .playlist_downloader import playlist_sync_manager, download_and_upload_playlist_track
 from .queue_service import unified_queue_service
@@ -80,6 +86,9 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize DB
     logger.info(f"Initializing database at {settings.db_path}...")
     await db.init_db()
+    # Load persistent safety switch setting (Phase 13)
+    saved_replacement_pref = await db.get_setting("allow_automatic_replacement", default=settings.allow_automatic_replacement)
+    settings.allow_automatic_replacement = saved_replacement_pref
     # Recover interrupted upload jobs and resume worker if tasks are queued
     await queue_manager.reconcile_and_resume()
     # Start periodic background scanner
@@ -730,17 +739,23 @@ async def get_all_settings():
     auto_upload = await db.get_setting("auto_upload", default=False)
     scan_interval = await db.get_setting("scan_interval_minutes", default=15)
     verify_uploads = await db.get_setting("verify_uploads", default=True)
+    allow_automatic_replacement = await db.get_setting(
+        "allow_automatic_replacement",
+        default=settings.allow_automatic_replacement
+    )
     return {
         "music_folders": folders,
         "auto_upload": auto_upload,
         "scan_interval_minutes": scan_interval,
         "verify_uploads": verify_uploads,
+        "allow_automatic_replacement": allow_automatic_replacement,
     }
 
 class SettingsUpdate(BaseModel):
     auto_upload: Optional[bool] = None
     scan_interval_minutes: Optional[int] = None
     verify_uploads: Optional[bool] = None
+    allow_automatic_replacement: Optional[bool] = None
 
 @app.post("/api/settings")
 async def update_settings(req: SettingsUpdate):
@@ -750,7 +765,169 @@ async def update_settings(req: SettingsUpdate):
         await db.set_setting("scan_interval_minutes", req.scan_interval_minutes)
     if req.verify_uploads is not None:
         await db.set_setting("verify_uploads", req.verify_uploads)
+    if req.allow_automatic_replacement is not None:
+        await db.set_setting("allow_automatic_replacement", req.allow_automatic_replacement)
+        settings.allow_automatic_replacement = req.allow_automatic_replacement
     return {"status": "success"}
+
+class FileReplacePreviewRequest(BaseModel):
+    music_file_id: Optional[int] = None
+    local_path: Optional[str] = None
+    upload_entity_id: Optional[str] = None
+    upload_video_id: Optional[str] = None
+
+class FileReplaceExecuteRequest(BaseModel):
+    music_file_id: Optional[int] = None
+    local_path: Optional[str] = None
+    upload_entity_id: Optional[str] = None
+    upload_video_id: Optional[str] = None
+    confirm: bool = False
+
+@app.post("/api/files/replace/preview")
+async def preview_file_replacement(req: FileReplacePreviewRequest):
+    local_p: Optional[Path] = None
+    local_mf = None
+    if req.music_file_id:
+        local_mf = await db.get_music_file_by_id(req.music_file_id)
+        if local_mf:
+            local_p = Path(local_mf.path)
+    elif req.local_path:
+        local_p = Path(req.local_path)
+
+    if not local_p or not local_p.exists():
+        raise HTTPException(status_code=404, detail=f"Local music file not found: {req.local_path or req.music_file_id}")
+
+    upload = None
+    if req.upload_entity_id:
+        upload = await db.get_ytm_upload_by_entity_id(req.upload_entity_id)
+    elif req.upload_video_id:
+        upload = await db.get_ytm_upload_by_video_id(req.upload_video_id)
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload record not found")
+
+    import hashlib
+    h = hashlib.sha256()
+    with open(local_p, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    local_sha256 = h.hexdigest()
+    local_size = local_p.stat().st_size
+    local_duration = local_mf.duration if local_mf else None
+
+    upload_id = upload.video_id or upload.upload_video_id or upload.entity_id
+    id_matches = bool(upload_id and len(upload_id) >= 11)
+    duration_matches = True
+    if local_duration and upload.duration:
+        duration_matches = abs(local_duration - upload.duration) <= 4.0
+
+    return {
+        "local_file": {
+            "path": str(local_p),
+            "sha256": local_sha256,
+            "size": local_size,
+            "duration": local_duration
+        },
+        "new_source": {
+            "source_type": "ytm_upload",
+            "upload_id": upload_id,
+            "title": upload.title,
+            "artist": upload.artist,
+            "expected_duration": upload.duration
+        },
+        "verification": {
+            "upload_id_matches": id_matches,
+            "duration_matches": duration_matches,
+            "audio_validation_passed": id_matches and duration_matches,
+            "status": "PASS" if (id_matches and duration_matches) else "REVIEW_REQUIRED"
+        },
+        "settings": {
+            "automatic_replacement_enabled": settings.allow_automatic_replacement,
+            "manual_confirmation_required": True
+        }
+    }
+
+@app.post("/api/files/replace/execute")
+async def execute_manual_file_replacement(req: FileReplaceExecuteRequest):
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit confirmation (confirm=true) is required to replace an existing local file."
+        )
+
+    local_p: Optional[Path] = None
+    if req.music_file_id:
+        mf = await db.get_music_file_by_id(req.music_file_id)
+        if mf:
+            local_p = Path(mf.path)
+    elif req.local_path:
+        local_p = Path(req.local_path)
+
+    if not local_p or not local_p.exists():
+        raise HTTPException(status_code=404, detail="Local music file not found on disk")
+
+    upload = None
+    if req.upload_entity_id:
+        upload = await db.get_ytm_upload_by_entity_id(req.upload_entity_id)
+    elif req.upload_video_id:
+        upload = await db.get_ytm_upload_by_video_id(req.upload_video_id)
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload record not found")
+
+    upload_id = upload.video_id or upload.upload_video_id or upload.entity_id
+
+    staged = await download_upload(upload)
+
+    prev_global = settings.allow_automatic_replacement
+    try:
+        settings.allow_automatic_replacement = True
+        committed_file = commit_staged_file_to_destination(
+            staged_file=staged,
+            destination_file=local_p,
+            allow_overwrite=True,
+            replacement_source_id=upload_id
+        )
+    finally:
+        settings.allow_automatic_replacement = prev_global
+        if staged.exists():
+            try:
+                staged.unlink()
+            except Exception:
+                pass
+
+    return {
+        "status": "success",
+        "message": f"Successfully replaced {committed_file.name} with verified upload {upload_id}",
+        "destination_file": str(committed_file),
+        "source_id": upload_id
+    }
+
+class RestoreFileRequest(BaseModel):
+    path: str
+
+@app.get("/api/recovery/suspicious-files")
+async def get_suspicious_files():
+    from .recovery import audit_and_flag_suspicious_files
+    files = await audit_and_flag_suspicious_files(database=db)
+    return {"suspicious_files": files, "count": len(files)}
+
+@app.post("/api/recovery/audit")
+async def run_recovery_audit():
+    from .recovery import audit_and_flag_suspicious_files
+    files = await audit_and_flag_suspicious_files(database=db)
+    return {"status": "success", "flagged_count": len(files), "flagged_files": files}
+
+@app.post("/api/recovery/restore")
+async def restore_suspicious_file(req: RestoreFileRequest):
+    from .recovery import restore_corrupted_file
+    try:
+        res = await restore_corrupted_file(req.path, database=db)
+        return res
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore file: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -851,11 +1028,10 @@ async def replace_ytm_upload(entity_id: str, req: MetadataUpdateRequest):
                 except Exception as e:
                     logger.warning(f"Candidate file {valid[0]} failed path validation: {e}")
 
-        # 1. Download audio file from YTM if not available locally
+        # 1. Download audio file from YTM upload locker (strictly exact upload identity; NO search fallback)
         if not downloaded_path:
             logger.info(f"Phase 1: Downloading untagged upload {entity_id} (video: {upload.video_id})")
-            search_query = f"{req.artist or ''} {req.title}".strip()
-            downloaded_path = await download_ytm_upload(upload.video_id, fallback_query=search_query)
+            downloaded_path = await download_ytm_upload(upload.video_id)
 
         # 2. Write new metadata tags using Mutagen
         logger.info(f"Phase 2: Tagging audio with Title='{req.title}', Artist='{req.artist}', Album='{req.album}', CoverURL='{req.cover_url}'")

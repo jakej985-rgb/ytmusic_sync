@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Union
 from .config import settings
 from .models import MusicFile, YtmUpload, MatchRecord, SyncJob, UploadStatus, MatchType
 
@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS music_files (
     modified_time REAL NOT NULL,
     file_hash TEXT,
     metadata_hash TEXT,
+    verification_status TEXT DEFAULT 'UNVERIFIED',
+    verification_reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -33,6 +35,9 @@ CREATE TABLE IF NOT EXISTS ytm_uploads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id TEXT UNIQUE NOT NULL,
     video_id TEXT,
+    upload_video_id TEXT,
+    upload_url TEXT,
+    source_type TEXT DEFAULT 'ytm_upload',
     title TEXT NOT NULL,
     artist TEXT,
     album TEXT,
@@ -49,6 +54,8 @@ CREATE TABLE IF NOT EXISTS matches (
     ytm_upload_id TEXT NOT NULL,
     match_type TEXT NOT NULL,
     match_score REAL NOT NULL,
+    sync_decision TEXT DEFAULT 'REVIEW',
+    decision_reason TEXT,
     confirmed BOOLEAN DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(music_file_id) REFERENCES music_files(id) ON DELETE CASCADE,
@@ -63,6 +70,17 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     completed_at TIMESTAMP,
     error TEXT,
     attempts INTEGER DEFAULT 0,
+    source_type TEXT DEFAULT 'ytm_upload',
+    source_id TEXT,
+    source_url TEXT,
+    expected_duration REAL,
+    downloaded_source_id TEXT,
+    verified BOOLEAN DEFAULT 0,
+    verification_status TEXT DEFAULT 'PENDING',
+    verification_reason TEXT,
+    original_file_hash TEXT,
+    downloaded_file_hash TEXT,
+    replacement_allowed BOOLEAN DEFAULT 0,
     FOREIGN KEY(music_file_id) REFERENCES music_files(id) ON DELETE CASCADE
 );
 
@@ -83,12 +101,25 @@ CREATE TABLE IF NOT EXISTS needs_help_tracks (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS file_replacements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_path TEXT NOT NULL,
+    original_sha256 TEXT NOT NULL,
+    original_size INTEGER NOT NULL,
+    original_mtime REAL NOT NULL,
+    replacement_source_id TEXT NOT NULL,
+    replacement_path TEXT,
+    backup_path TEXT,
+    replacement_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_music_files_path ON music_files(path);
 CREATE INDEX IF NOT EXISTS idx_music_files_artist_title ON music_files(artist, title);
 CREATE INDEX IF NOT EXISTS idx_ytm_uploads_entity ON ytm_uploads(entity_id);
 CREATE INDEX IF NOT EXISTS idx_matches_music_file ON matches(music_file_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_status ON sync_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_needs_help_video ON needs_help_tracks(video_id);
+CREATE INDEX IF NOT EXISTS idx_file_replacements_path ON file_replacements(original_path);
 """
 
 class Database:
@@ -109,6 +140,53 @@ class Database:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA synchronous = NORMAL;")
             await db.executescript(CREATE_TABLES_SQL)
+            
+            # Ensure upload identity columns exist on existing databases
+            async with db.execute("PRAGMA table_info(ytm_uploads)") as cursor:
+                cols = [row["name"] for row in await cursor.fetchall()]
+                if "upload_video_id" not in cols:
+                    await db.execute("ALTER TABLE ytm_uploads ADD COLUMN upload_video_id TEXT")
+                if "upload_url" not in cols:
+                    await db.execute("ALTER TABLE ytm_uploads ADD COLUMN upload_url TEXT")
+                if "source_type" not in cols:
+                    await db.execute("ALTER TABLE ytm_uploads ADD COLUMN source_type TEXT DEFAULT 'ytm_upload'")
+
+            # Ensure sync_decision columns exist on existing databases
+            async with db.execute("PRAGMA table_info(matches)") as cursor:
+                m_cols = [row["name"] for row in await cursor.fetchall()]
+                if "sync_decision" not in m_cols:
+                    await db.execute("ALTER TABLE matches ADD COLUMN sync_decision TEXT DEFAULT 'REVIEW'")
+                if "decision_reason" not in m_cols:
+                    await db.execute("ALTER TABLE matches ADD COLUMN decision_reason TEXT")
+
+            # Ensure Phase 10 source/integrity columns exist on sync_jobs
+            async with db.execute("PRAGMA table_info(sync_jobs)") as cursor:
+                sj_cols = [row["name"] for row in await cursor.fetchall()]
+                columns_to_add = [
+                    ("source_type", "TEXT DEFAULT 'ytm_upload'"),
+                    ("source_id", "TEXT"),
+                    ("source_url", "TEXT"),
+                    ("expected_duration", "REAL"),
+                    ("downloaded_source_id", "TEXT"),
+                    ("verified", "BOOLEAN DEFAULT 0"),
+                    ("verification_status", "TEXT DEFAULT 'PENDING'"),
+                    ("verification_reason", "TEXT"),
+                    ("original_file_hash", "TEXT"),
+                    ("downloaded_file_hash", "TEXT"),
+                    ("replacement_allowed", "BOOLEAN DEFAULT 0"),
+                ]
+                for col_name, col_def in columns_to_add:
+                    if col_name not in sj_cols:
+                        await db.execute(f"ALTER TABLE sync_jobs ADD COLUMN {col_name} {col_def}")
+
+            # Ensure verification columns exist on music_files
+            async with db.execute("PRAGMA table_info(music_files)") as cursor:
+                mf_cols = [row["name"] for row in await cursor.fetchall()]
+                if "verification_status" not in mf_cols:
+                    await db.execute("ALTER TABLE music_files ADD COLUMN verification_status TEXT DEFAULT 'UNVERIFIED'")
+                if "verification_reason" not in mf_cols:
+                    await db.execute("ALTER TABLE music_files ADD COLUMN verification_reason TEXT")
+
             await db.commit()
         await self.reconcile_stuck_sync_jobs()
 
@@ -367,14 +445,22 @@ class Database:
     # YTM Uploads
     async def upsert_ytm_upload(self, upload_info: dict):
         now = datetime.now(timezone.utc).isoformat()
+        vid = upload_info.get("video_id") or upload_info.get("upload_video_id")
+        upload_url = upload_info.get("upload_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
+        source_type = upload_info.get("source_type") or "ytm_upload"
+
         async with self.get_connection() as db:
             await db.execute(
                 """
                 INSERT INTO ytm_uploads (
-                    entity_id, video_id, title, artist, album, duration, like_status, thumbnail, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entity_id, video_id, upload_video_id, upload_url, source_type,
+                    title, artist, album, duration, like_status, thumbnail, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(entity_id) DO UPDATE SET
                     video_id=excluded.video_id,
+                    upload_video_id=excluded.upload_video_id,
+                    upload_url=excluded.upload_url,
+                    source_type=excluded.source_type,
                     title=excluded.title,
                     artist=excluded.artist,
                     album=excluded.album,
@@ -385,7 +471,10 @@ class Database:
                 """,
                 (
                     upload_info["entity_id"],
-                    upload_info.get("video_id"),
+                    vid,
+                    vid,
+                    upload_url,
+                    source_type,
                     upload_info["title"],
                     upload_info.get("artist"),
                     upload_info.get("album"),
@@ -419,7 +508,7 @@ class Database:
             return None
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM ytm_uploads WHERE video_id = ? LIMIT 1", (video_id,)) as cursor:
+            async with db.execute("SELECT * FROM ytm_uploads WHERE video_id = ? OR upload_video_id = ? LIMIT 1", (video_id, video_id)) as cursor:
                 row = await cursor.fetchone()
                 if row:
                     return YtmUpload(**dict(row))
@@ -683,18 +772,29 @@ class Database:
             }
 
     # Matches
-    async def save_match(self, file_id: int, ytm_upload_id: str, match_type: MatchType | str, score: float):
+    async def save_match(
+        self,
+        file_id: int,
+        ytm_upload_id: str,
+        match_type: MatchType | str,
+        score: float,
+        sync_decision: Optional[str] = None,
+        decision_reason: Optional[str] = None
+    ):
         m_val = match_type.value if isinstance(match_type, MatchType) else str(match_type)
+        decision_val = sync_decision or "REVIEW"
         async with self.get_connection() as db:
             await db.execute(
                 """
-                INSERT INTO matches (music_file_id, ytm_upload_id, match_type, match_score)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO matches (music_file_id, ytm_upload_id, match_type, match_score, sync_decision, decision_reason)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(music_file_id, ytm_upload_id) DO UPDATE SET
                     match_type=excluded.match_type,
-                    match_score=excluded.match_score
+                    match_score=excluded.match_score,
+                    sync_decision=excluded.sync_decision,
+                    decision_reason=excluded.decision_reason
                 """,
-                (file_id, ytm_upload_id, m_val, score)
+                (file_id, ytm_upload_id, m_val, score, decision_val, decision_reason)
             )
             await db.commit()
 
@@ -725,11 +825,74 @@ class Database:
                 return row[0] if row else None
 
     # Sync Jobs & Queue
-    async def create_sync_job(self, music_file_id: int) -> int:
+    def _row_to_sync_job(self, data: dict) -> SyncJob:
+        mf_fields = ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]
+        mf_data = {k: data[k] for k in mf_fields if k in data}
+        mf_data["id"] = data.get("music_file_id")
+
+        for k in [
+            "source_type", "source_id", "source_url", "expected_duration",
+            "downloaded_source_id", "verified", "verification_status",
+            "verification_reason", "downloaded_file_hash", "replacement_allowed"
+        ]:
+            if k in data:
+                mf_data[k] = data[k]
+
+        status_val = data.get("status", "queued")
+        try:
+            status_enum = UploadStatus(status_val)
+        except ValueError:
+            status_enum = status_val
+
+        return SyncJob(
+            id=data.get("id"),
+            music_file_id=data.get("music_file_id"),
+            status=status_enum,
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+            error=data.get("error"),
+            attempts=data.get("attempts", 0),
+            ytm_entity_id=data.get("ytm_upload_id"),
+            source_type=data.get("source_type", "ytm_upload"),
+            source_id=data.get("source_id"),
+            source_url=data.get("source_url"),
+            expected_duration=data.get("expected_duration"),
+            downloaded_source_id=data.get("downloaded_source_id"),
+            verified=bool(data.get("verified", 0)),
+            verification_status=data.get("verification_status", "PENDING"),
+            verification_reason=data.get("verification_reason"),
+            original_file_hash=data.get("original_file_hash"),
+            downloaded_file_hash=data.get("downloaded_file_hash"),
+            replacement_allowed=bool(data.get("replacement_allowed", 0)),
+            music_file=MusicFile(**mf_data)
+        )
+
+    async def create_sync_job(
+        self,
+        music_file_id: int,
+        source_type: str = "ytm_upload",
+        source_id: Optional[str] = None,
+        source_url: Optional[str] = None,
+        expected_duration: Optional[float] = None,
+        original_file_hash: Optional[str] = None,
+        replacement_allowed: bool = False,
+        verification_status: str = "PENDING"
+    ) -> int:
         async with self.get_connection() as db:
             async with db.execute(
-                "INSERT INTO sync_jobs (music_file_id, status, attempts) VALUES (?, 'queued', 0) RETURNING id",
-                (music_file_id,)
+                """
+                INSERT INTO sync_jobs (
+                    music_file_id, status, attempts,
+                    source_type, source_id, source_url,
+                    expected_duration, original_file_hash, replacement_allowed,
+                    verification_status
+                ) VALUES (?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+                """,
+                (
+                    music_file_id, source_type, source_id, source_url,
+                    expected_duration, original_file_hash, 1 if replacement_allowed else 0,
+                    verification_status
+                )
             ) as cursor:
                 row = await cursor.fetchone()
                 await db.commit()
@@ -738,27 +901,52 @@ class Database:
     async def update_sync_job(
         self,
         job_id: int,
-        status: UploadStatus,
+        status: Union[UploadStatus, str],
         error: Optional[str] = None,
-        increment_attempts: bool = False
+        increment_attempts: bool = False,
+        downloaded_source_id: Optional[str] = None,
+        verified: Optional[bool] = None,
+        verification_status: Optional[str] = None,
+        verification_reason: Optional[str] = None,
+        downloaded_file_hash: Optional[str] = None
     ):
         now = datetime.now(timezone.utc).isoformat()
+        status_val = status.value if hasattr(status, "value") else str(status)
+
+        updates = ["status = ?", "error = ?"]
+        params = [status_val, error]
+
+        if increment_attempts:
+            updates.append("attempts = attempts + 1")
+
+        if status_val in ("uploading", "UPLOADING", "DOWNLOADING", "VERIFYING"):
+            updates.append("started_at = COALESCE(started_at, ?)")
+            params.append(now)
+        elif status_val in ("verified", "VERIFIED", "failed", "FAILED", "BLOCKED"):
+            updates.append("completed_at = ?")
+            params.append(now)
+
+        if downloaded_source_id is not None:
+            updates.append("downloaded_source_id = ?")
+            params.append(downloaded_source_id)
+        if verified is not None:
+            updates.append("verified = ?")
+            params.append(1 if verified else 0)
+        if verification_status is not None:
+            updates.append("verification_status = ?")
+            params.append(verification_status)
+        if verification_reason is not None:
+            updates.append("verification_reason = ?")
+            params.append(verification_reason)
+        if downloaded_file_hash is not None:
+            updates.append("downloaded_file_hash = ?")
+            params.append(downloaded_file_hash)
+
+        params.append(job_id)
+        query = f"UPDATE sync_jobs SET {', '.join(updates)} WHERE id = ?"
+
         async with self.get_connection() as db:
-            if status == UploadStatus.UPLOADING:
-                await db.execute(
-                    "UPDATE sync_jobs SET status = ?, started_at = ?, attempts = attempts + ? WHERE id = ?",
-                    (status.value, now, 1 if increment_attempts else 0, job_id)
-                )
-            elif status in (UploadStatus.VERIFIED, UploadStatus.FAILED):
-                await db.execute(
-                    "UPDATE sync_jobs SET status = ?, completed_at = ?, error = ? WHERE id = ?",
-                    (status.value, now, error, job_id)
-                )
-            else:
-                await db.execute(
-                    "UPDATE sync_jobs SET status = ?, error = ? WHERE id = ?",
-                    (status.value, error, job_id)
-                )
+            await db.execute(query, tuple(params))
             await db.commit()
 
     async def get_next_queued_job(self) -> Optional[SyncJob]:
@@ -776,20 +964,7 @@ class Database:
                 row = await cursor.fetchone()
                 if not row:
                     return None
-                data = dict(row)
-                mf_data = {k: data[k] for k in ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]}
-                mf_data["id"] = data["music_file_id"]
-                job = SyncJob(
-                    id=data["id"],
-                    music_file_id=data["music_file_id"],
-                    status=UploadStatus(data["status"]),
-                    started_at=data["started_at"],
-                    completed_at=data["completed_at"],
-                    error=data["error"],
-                    attempts=data["attempts"],
-                    music_file=MusicFile(**mf_data)
-                )
-                return job
+                return self._row_to_sync_job(dict(row))
 
     async def get_sync_job_by_id(self, job_id: int) -> Optional[SyncJob]:
         async with self.get_connection() as db:
@@ -808,20 +983,7 @@ class Database:
                 row = await cursor.fetchone()
                 if not row:
                     return None
-                data = dict(row)
-                mf_data = {k: data[k] for k in ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]}
-                mf_data["id"] = data["music_file_id"]
-                return SyncJob(
-                    id=data["id"],
-                    music_file_id=data["music_file_id"],
-                    status=UploadStatus(data["status"]),
-                    started_at=data["started_at"],
-                    completed_at=data["completed_at"],
-                    error=data["error"],
-                    attempts=data["attempts"],
-                    ytm_entity_id=data.get("ytm_upload_id"),
-                    music_file=MusicFile(**mf_data)
-                )
+                return self._row_to_sync_job(dict(row))
 
     async def get_sync_history(self, limit: int = 100) -> list[SyncJob]:
         async with self.get_connection() as db:
@@ -838,23 +1000,7 @@ class Database:
                 (limit,)
             ) as cursor:
                 rows = await cursor.fetchall()
-                results = []
-                for row in rows:
-                    data = dict(row)
-                    mf_data = {k: data[k] for k in ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]}
-                    mf_data["id"] = data["music_file_id"]
-                    results.append(SyncJob(
-                        id=data["id"],
-                        music_file_id=data["music_file_id"],
-                        status=UploadStatus(data["status"]),
-                        started_at=data["started_at"],
-                        completed_at=data["completed_at"],
-                        error=data["error"],
-                        attempts=data["attempts"],
-                        ytm_entity_id=data.get("ytm_upload_id"),
-                        music_file=MusicFile(**mf_data)
-                    ))
-                return results
+                return [self._row_to_sync_job(dict(row)) for row in rows]
 
     async def get_active_or_queued_sync_jobs(self, limit: int = 100) -> list[SyncJob]:
         async with self.get_connection() as db:
@@ -866,29 +1012,13 @@ class Database:
                 FROM sync_jobs sj
                 JOIN music_files mf ON sj.music_file_id = mf.id
                 LEFT JOIN matches m ON mf.id = m.music_file_id
-                WHERE sj.status IN ('queued', 'uploading', 'verifying')
-                ORDER BY CASE WHEN sj.status = 'uploading' THEN 0 ELSE 1 END, sj.id ASC LIMIT ?
+                WHERE sj.status IN ('queued', 'uploading', 'verifying', 'PENDING', 'DOWNLOADING', 'VERIFYING')
+                ORDER BY CASE WHEN sj.status IN ('uploading', 'DOWNLOADING', 'VERIFYING') THEN 0 ELSE 1 END, sj.id ASC LIMIT ?
                 """,
                 (limit,)
             ) as cursor:
                 rows = await cursor.fetchall()
-                results = []
-                for row in rows:
-                    data = dict(row)
-                    mf_data = {k: data[k] for k in ["path", "filename", "artist", "album", "title", "duration", "format", "file_size", "modified_time"]}
-                    mf_data["id"] = data["music_file_id"]
-                    results.append(SyncJob(
-                        id=data["id"],
-                        music_file_id=data["music_file_id"],
-                        status=UploadStatus(data["status"]),
-                        started_at=data["started_at"],
-                        completed_at=data["completed_at"],
-                        error=data["error"],
-                        attempts=data["attempts"],
-                        ytm_entity_id=data.get("ytm_upload_id"),
-                        music_file=MusicFile(**mf_data)
-                    ))
-                return results
+                return [self._row_to_sync_job(dict(row)) for row in rows]
 
     async def clear_queued_sync_jobs(self):
         async with self.get_connection() as db:
@@ -1029,5 +1159,71 @@ class Database:
                 unmapped = row["cnt"] if row else 0
 
             return {"total": total, "unmapped": unmapped}
+
+    async def record_file_replacement(
+        self,
+        original_path: str,
+        original_sha256: str,
+        original_size: int,
+        original_mtime: float,
+        replacement_source_id: str,
+        replacement_path: Optional[str] = None,
+        backup_path: Optional[str] = None
+    ) -> int:
+        """Record an audit trail entry for a replaced local audio file."""
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO file_replacements (
+                    original_path, original_sha256, original_size, original_mtime,
+                    replacement_source_id, replacement_path, backup_path
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    original_path, original_sha256, original_size, original_mtime,
+                    replacement_source_id, replacement_path, backup_path
+                )
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    def record_file_replacement_sync(
+        self,
+        original_path: str,
+        original_sha256: str,
+        original_size: int,
+        original_mtime: float,
+        replacement_source_id: str,
+        replacement_path: Optional[str] = None,
+        backup_path: Optional[str] = None
+    ):
+        """Synchronously record an audit trail entry using direct sqlite3 connection."""
+        import sqlite3
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
+            conn.execute(
+                """
+                INSERT INTO file_replacements (
+                    original_path, original_sha256, original_size, original_mtime,
+                    replacement_source_id, replacement_path, backup_path
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    original_path, original_sha256, original_size, original_mtime,
+                    replacement_source_id, replacement_path, backup_path
+                )
+            )
+            conn.commit()
+
+    async def get_file_replacements(self, limit: int = 100) -> list[dict]:
+        """Fetch historical audit log of replaced local files."""
+        async with self.get_connection() as db:
+            async with db.execute(
+                "SELECT * FROM file_replacements ORDER BY replacement_timestamp DESC LIMIT ?",
+                (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
 db = Database()

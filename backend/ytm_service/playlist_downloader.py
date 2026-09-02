@@ -13,7 +13,7 @@ from .database import db
 from .ytm_client import ytm_client
 from .musicbrainz import musicbrainz_client
 from .scanner import write_metadata_tags, extract_metadata
-from .downloader import _download_sync, extract_playlist_info_sync
+from .downloader import _download_sync, extract_playlist_info_sync, commit_staged_file_to_destination
 from .normalizer import normalize_text
 from .matcher import string_similarity
 from .security import validate_fs_path
@@ -245,8 +245,8 @@ async def download_and_upload_playlist_track(
     temp_base = staging_dir / f"pl_{video_id}"
 
     search_query = f"{final_artist} {final_title}".strip()
-    logger.info(f"Downloading track {video_id} ('{final_title}' by '{final_artist}') via yt-dlp...")
-    downloaded_file = await asyncio.to_thread(_download_sync, video_id, temp_base, search_query)
+    logger.info(f"Downloading track {video_id} ('{final_title}' by '{final_artist}') via yt-dlp (source_type=catalog)...")
+    downloaded_file = await asyncio.to_thread(_download_sync, video_id, temp_base, search_query, "catalog")
     if not downloaded_file or not downloaded_file.exists() or downloaded_file.stat().st_size == 0:
         raise RuntimeError(f"Failed to download audio for video {video_id}")
 
@@ -287,13 +287,18 @@ async def download_and_upload_playlist_track(
                 album_folder.mkdir(parents=True, exist_ok=True)
                 local_file = album_folder / f"{safe_title}.mp3"
 
-                shutil.copy2(downloaded_file, local_file)
-                local_saved_path = str(local_file)
+                if local_file.exists():
+                    logger.warning(
+                        f"Local file already exists at {local_file}. Overwrite/replacement is BLOCKED to protect local recordings."
+                    )
+                else:
+                    commit_staged_file_to_destination(downloaded_file, local_file, allow_overwrite=False)
+                    local_saved_path = str(local_file)
 
-                # Register in SQLite database music_files
-                meta = await asyncio.to_thread(extract_metadata, local_file)
-                await db.upsert_music_file(meta)
-                logger.info(f"Saved local copy to {local_saved_path}")
+                    # Register in SQLite database music_files
+                    meta = await asyncio.to_thread(extract_metadata, local_file)
+                    await db.upsert_music_file(meta)
+                    logger.info(f"Saved local copy to {local_saved_path}")
             except Exception as e:
                 logger.warning(f"Could not save local copy to {target_music_dir}: {e}")
 

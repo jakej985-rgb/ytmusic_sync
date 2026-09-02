@@ -163,9 +163,13 @@ class YTMClient:
             if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
                 thumb = thumbs[-1].get("url")
 
+            vid = item.get("videoId")
             upload_record = {
                 "entity_id": entity_id,
-                "video_id": item.get("videoId"),
+                "video_id": vid,
+                "upload_video_id": vid,
+                "upload_url": f"https://www.youtube.com/watch?v={vid}" if vid else None,
+                "source_type": "ytm_upload",
                 "title": title,
                 "artist": artist_name,
                 "album": album_name,

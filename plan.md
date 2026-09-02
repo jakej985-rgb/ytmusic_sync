@@ -1,1397 +1,712 @@
-Absolutely. Based on the final audit, I’d make this a **completion plan**, not another giant security rewrite. The goal is to take the current `main` branch and move it through **release hardening → deployment → real-world validation → v1 release**.
+Yes. After looking directly at the repo, I would treat this as a **data-loss bug**, not just a downloader bug.
 
-# YTM Sync — Final Release Completion Plan
+The current `downloader.py` explicitly builds three possible sources for an upload: the YouTube watch URL, the Music watch URL, and finally a `ytsearch1:` fallback query. That fallback is exactly the kind of behavior that can turn “download my upload” into “download a similarly named public song.”
 
-**Repository:** `jakej985-rgb/ytmusic_sync`
-**Target:** Production-ready v1 release
-**Current state:** Security implementation substantially complete; final hardening and deployment validation remaining.
+Your current project also explicitly says local files are not supposed to be modified or deleted, so replacing an artist's local recording with a different recording violates the intended safety model.
 
----
-
-# Phase 0 — Freeze the Current State
-
-### Goal
-
-Create a known-good checkpoint before making any more changes.
-
-### Tasks
-
-#### 0.1 Verify current branch
-
-```bash
-git checkout main
-git pull
-git status
-```
-
-Expected:
-
-```text
-On branch main
-Your branch is up to date with 'origin/main'.
-nothing to commit, working tree clean
-```
-
-#### 0.2 Record current commit
-
-Current audited commit:
-
-```text
-459a317daf769b48526295bf81463e0bf4832a7f
-```
-
-Do not rewrite history.
-
-#### 0.3 Create release candidate tag later
-
-Don't tag yet.
-
-We want:
-
-```text
-main
-  ↓
-release hardening
-  ↓
-RC
-  ↓
-production validation
-  ↓
-v1.0.0
-```
-
----
-
-# Phase 1 — Fix Reverse-Proxy Trust Configuration
-
-## Priority: HIGH
-
-The application currently supports:
-
-```text
-FORWARDED_ALLOW_IPS
-```
-
-but defaults it to:
-
-```text
-*
-```
-
-and Docker Compose doesn't expose the setting.
-
-### 1.1 Add configuration to `.env.example`
-
-Add:
-
-```env
-# Reverse proxy addresses trusted for X-Forwarded-* headers.
-# Set this to the IP/network of your trusted reverse proxy.
-FORWARDED_ALLOW_IPS=
-```
-
-Don't blindly choose an IP yet.
-
----
-
-### 1.2 Add it to Docker Compose
-
-Add:
-
-```yaml
-- FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-}
-```
-
-The application should have sensible behavior when empty rather than silently trusting everybody.
-
----
-
-### 1.3 Decide the actual production value
-
-Because your intended architecture is:
-
-```text
-Cloudflare
-    ↓
-Traefik
-    ↓
-YTM Sync
-```
-
-determine what source IP YTM Sync actually sees from Traefik.
-
-On the server:
-
-```bash
-docker inspect traefik
-```
-
-and:
-
-```bash
-docker network inspect <your-traefik-network>
-```
-
-The important question is:
-
-> What IP/network is directly connecting to YTM Sync?
-
-Use that as the trusted proxy source.
-
-### 1.4 Test forwarded headers
-
-Verify:
-
-* normal request
-* request through Traefik
-* request through Cloudflare
-* direct request
-* forged `X-Forwarded-For`
-* forged `X-Forwarded-Proto`
-
-The application should only trust forwarded information from the configured proxy.
-
----
-
-# Phase 2 — Authentication Release Hardening
-
-## Priority: HIGH
-
-The Bearer authentication implementation is already in place.
-
-Now verify the **complete lifecycle**.
-
-### 2.1 Fresh installation
-
-Delete only a test installation's config:
-
-```bash
-rm -rf ./config
-docker compose up -d
-```
-
-Verify:
-
-```bash
-ls -l ./config/auth/
-```
-
-Expected:
-
-```text
-api_key.txt
-```
-
-Permissions:
-
-```text
--rw------- 
-```
-
----
-
-### 2.2 Verify generated key
-
-Do not expose it in logs.
-
-Retrieve it locally:
-
-```bash
-cat ./config/auth/api_key.txt
-```
-
-Then:
-
-```bash
-curl -i http://localhost:8080/api/status
-```
-
-Expected:
-
-```text
-401 Unauthorized
-```
-
-Then:
-
-```bash
-curl -i \
-  -H "Authorization: Bearer YOUR_KEY" \
-  http://localhost:8080/api/status
-```
-
-Expected:
-
-```text
-200
-```
-
----
-
-### 2.3 Test bad authentication
-
-Test all of these:
-
-```text
-No Authorization header
-Authorization: Basic ...
-Authorization: Bearer
-Authorization: Bearer wrong-key
-Authorization: bearer wrong-key
-Authorization: Bearer <correct-key>extra
-```
-
-Only the exact valid key should work.
-
----
-
-### 2.4 Restart persistence
-
-```bash
-docker compose restart
-```
-
-Verify the same key still works.
-
-Then:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-Verify again.
-
-**Important:** `down/up` must not regenerate the key because `/config` persists.
-
----
-
-# Phase 3 — API Surface Audit
-
-## Priority: HIGH
-
-The current middleware protects `/api/*`.
-
-Now verify there isn't an API-like endpoint hiding outside `/api`.
-
-### 3.1 Enumerate routes
-
-From the server:
-
-```bash
-docker compose exec ytm-sync python -c \
-'import sys; sys.path.insert(0,"/app"); from ytm_service.main import app; print("\n".join(f"{r.methods} {r.path}" for r in app.routes))'
-```
-
-Create a complete route list.
-
-Classify every route:
-
-```text
-PUBLIC
-AUTHENTICATED
-STATIC
-HEALTH
-```
-
-### 3.2 Required public routes
-
-Ideally only:
-
-```text
-/health
-/
-/static frontend assets
-```
-
-Everything that performs application operations should require authentication.
-
-### 3.3 Verify docs
-
-Production should return:
-
-```text
-/docs          404
-/redoc         404
-/openapi.json  404
-```
-
-unless explicitly enabled.
-
----
-
-# Phase 4 — Filesystem Security Final Audit
-
-## Priority: HIGH
-
-This was one of the original major vulnerabilities.
-
-The centralized validator is now present in `security.py`.
-
-Now audit **every filesystem operation**, not just the ones previously fixed.
-
-### 4.1 Search for filesystem APIs
-
-Run:
-
-```bash
-grep -RInE \
-'Path\(|open\(|mkdir\(|makedirs\(|rglob\(|glob\(|unlink\(|remove\(|rename\(|replace\(|copy2\(|move\(' \
-backend/ytm_service
-```
-
-For every result ask:
-
-> Can an API-controlled value reach this operation?
-
-If yes:
-
-```text
-API input
-   ↓
-validate_fs_path()
-   ↓
-filesystem operation
-```
-
----
-
-### 4.2 Check these specifically
-
-Audit:
-
-* scanner paths
-* destination directories
-* downloads
-* playlist downloads
-* metadata replacement
-* artwork
-* database backups
-* queue staging
-* local file matching
-* filesystem browser
-* upload paths
-* generated filenames
-
----
-
-### 4.3 Traversal test matrix
-
-Test:
-
-```text
-../
-../../
-/etc/passwd
-/music/../
-/downloads/../
-/music/foo/../../etc
-```
-
-And encoded versions:
-
-```text
-%2e%2e
-%2F
-```
-
-Also test:
-
-```text
-null bytes
-empty path
-relative path
-absolute path
-nonexistent path
-symlink
-symlink ancestor
-```
-
----
-
-# Phase 5 — Filesystem Root Policy
-
-## Priority: HIGH
-
-Current Docker defaults are:
-
-```text
-/music
-/downloads
-```
-
-and Compose mounts both read-only.
-
-### 5.1 Verify the container cannot write music
-
-Inside container:
-
-```bash
-docker compose exec ytm-sync sh
-```
-
-Then attempt a test write:
-
-```bash
-touch /music/test-write
-```
-
-Expected:
-
-```text
-Read-only file system
-```
-
-Same for:
-
-```bash
-touch /downloads/test-write
-```
-
----
-
-### 5.2 Verify `/config` is writable
-
-```bash
-touch /config/test-write
-rm /config/test-write
-```
-
-Must succeed.
-
----
-
-### 5.3 Verify application cannot escape roots
-
-Test:
-
-```text
-/config
-/music
-/downloads
-```
-
-against:
-
-```text
-/
- /etc
- /tmp
- /proc
- /root
- /app
-```
-
-The API filesystem browser should never expose these unless explicitly configured as an allowed root.
-
----
-
-# Phase 6 — SSRF / External Network Audit
-
-## Priority: HIGH
-
-The URL validator is now significantly hardened. It checks scheme, credentials, ports, hostname, DNS resolution, and private/internal IP classes.
-
-Now find **every external network consumer**.
-
-### 6.1 Search
-
-```bash
-grep -RInE \
-'https?://|requests\.|httpx\.|urllib|urlopen|aiohttp|socket' \
-backend/ytm_service
-```
-
-For each network request determine:
-
-```text
-Is URL user-controlled?
-        ↓
-YES → validate first
-NO  → document why trusted
-```
-
----
-
-### 6.2 YouTube URLs
-
-Only allow:
-
-```text
-youtube.com
-www.youtube.com
-music.youtube.com
-m.youtube.com
-youtu.be
-```
-
-The current validator explicitly defines those hosts.
-
-Test:
-
-```text
-youtube.com
-music.youtube.com
-youtu.be
-google.com
-localhost
-127.0.0.1
-192.168.x.x
-10.x.x.x
-172.16.x.x
-169.254.x.x
-[::1]
-```
-
----
-
-### 6.3 DNS rebinding
-
-This is important enough to test conceptually.
-
-The application validates DNS resolution before connecting, but the connection itself could theoretically resolve differently later.
-
-For v1, document this as:
-
-```text
-DNS resolution is checked before external requests.
-```
-
-Do not build another giant networking system unless testing demonstrates a real issue.
-
----
-
-# Phase 7 — Secret / Credential Audit
-
-## Priority: HIGH
-
-### 7.1 Search repository
-
-Run:
-
-```bash
-git grep -nEi \
-'api[_-]?key|password|secret|token|cookie|authorization|bearer'
-```
-
-Review every result.
-
-You should find:
-
-```text
-configuration references
-test values
-documentation
-```
-
-but never real credentials.
-
----
-
-### 7.2 Search Git history
-
-Because the repository is public, check history too:
-
-```bash
-git log --all --oneline -- .env
-```
-
-and:
-
-```bash
-git log --all --oneline -- headers_auth.json
-```
-
-Also:
-
-```bash
-git log --all -S"YTM_SYNC_API_KEY"
-```
-
-If real credentials were ever committed, simply deleting the current file is **not enough**.
-
-They must be considered compromised and rotated.
-
----
-
-### 7.3 Verify `.gitignore`
-
-Current `.gitignore` correctly excludes:
-
-```text
-config/
-.env
-headers_auth.json
-*.token
-*.key
-*.db
-*.log
-```
-
-Keep this.
-
----
-
-# Phase 8 — Flutter Security Audit
-
-## Priority: MEDIUM/HIGH
-
-The Flutter client currently stores the API key in `SharedPreferences`.
-
-For **Flutter Web**, this is ultimately browser-side storage and therefore not a true secret vault.
-
-That's acceptable for your architecture because:
-
-> Anyone who can use the UI needs the API credential.
-
-But document the threat model.
-
-### 8.1 Verify API key isn't compiled into the bundle
-
-Search:
-
-```bash
-grep -RIn "YTM_SYNC_API_KEY" backend/web_dist app/build/web
-```
-
-There should be no server-side secret embedded into the release bundle.
-
----
-
-### 8.2 Verify Bearer only
-
-Search:
-
-```bash
-grep -RInE 'X-API-Key|X_API_KEY' app/lib backend
-```
-
-There should be no legacy authentication path.
-
----
-
-### 8.3 Unauthorized behavior
-
-When API returns:
-
-```text
-401
-```
-
-Flutter should:
-
-1. clear invalid key/session state
-2. show authentication UI
-3. avoid infinite request loops
-
----
-
-# Phase 9 — CI/CD Release Gate
-
-## Priority: HIGH
-
-Your Docker workflow now does the right general sequence: Flutter analyze/test/build, backend tests, then Docker build/push.
-
-### 9.1 Require these checks
-
-Before release:
-
-```text
-Flutter analyze       PASS
-Flutter tests         PASS
-Flutter web build     PASS
-Python tests          PASS
-Docker build          PASS
-```
-
-### 9.2 Make sure tests run before push
-
-The workflow already places testing before the Docker push.
-
-Keep that.
-
----
-
-### 9.3 Verify exact commit
-
-Do not rely only on:
-
-> "The agent says CI passed."
-
-Verify the GitHub Actions run corresponding to the actual release commit.
-
-The current GitHub status API did not give me a completed status for `459a317`, so this is one thing I would explicitly verify before tagging.
-
----
-
-# Phase 10 — Docker Production Test
-
-## Priority: HIGH
-
-Build exactly what users will run.
-
-```bash
-docker compose build --no-cache
-```
-
-Then:
-
-```bash
-docker compose up -d
-```
-
-Check:
-
-```bash
-docker compose ps
-```
-
-Expected:
-
-```text
-ytm-sync   Up (healthy)
-```
-
----
-
-### 10.1 Inspect security configuration
-
-```bash
-docker inspect ytm-sync
-```
-
-Verify:
-
-```text
-User = ytmsync
-NoNewPrivileges = true
-CapDrop = ALL
-```
-
----
-
-### 10.2 Verify process user
-
-```bash
-docker compose exec ytm-sync id
-```
-
-Expected:
-
-```text
-uid=1000(ytmsync)
-gid=1000(ytmsync)
-```
-
----
-
-### 10.3 Verify mounts
-
-```bash
-docker inspect ytm-sync \
-  --format '{{json .Mounts}}'
-```
-
-Confirm:
-
-```text
-/music       RW=false
-/downloads   RW=false
-/config      RW=true
-```
-
----
-
-# Phase 11 — Functional Regression Test
+# YTM Sync — Upload Integrity & No-Replacement Plan
 
 ## Priority: CRITICAL
 
-Security is only half the release.
+The goal is stronger than “make the matching better.”
 
-Run the actual application.
+The goal is:
 
-### Test A — Initial startup
-
-```text
-Container starts
-        ↓
-Database initializes
-        ↓
-API responds
-        ↓
-UI loads
-```
+> **It must be impossible for an Upload Locker item to silently become a catalog track or overwrite a local file with unverified audio.**
 
 ---
 
-### Test B — YouTube Music authentication
+## Phase 1 — Kill the dangerous fallback
+
+### 1.1 Remove `ytsearch1:` from upload downloads
+
+Current behavior effectively permits:
 
 ```text
-Paste headers
-      ↓
-Connect
-      ↓
-Connection succeeds
-      ↓
-Restart
-      ↓
-Authentication remains stored
-```
-
----
-
-### Test C — Library scan
-
-Use a test music directory containing:
-
-```text
-MP3
-FLAC
-M4A
-OGG
-WMA
-```
-
-Verify metadata extraction.
-
----
-
-### Test D — Matching
-
-Verify:
-
-```text
-Exact match
-Strong match
-Weak match
-Missing
-```
-
-and make sure weak/missing tracks aren't incorrectly uploaded.
-
-Your recent commits specifically changed this behavior toward requiring verified title/artist/album matches. That's good—regression-test it.
-
----
-
-### Test E — Upload
-
-Test:
-
-```text
-one track
-multiple tracks
-failed upload
-retry
-successful upload
-duplicate upload prevention
-```
-
----
-
-### Test F — Queue recovery
-
-This is especially important because queue recovery is a core feature.
-
-Start an upload.
-
-Then:
-
-```bash
-docker compose restart
-```
-
-Verify:
-
-```text
-queue survives
-job isn't duplicated
-job resumes
-status becomes correct
-```
-
----
-
-### Test G — Playlist sync
-
-Test:
-
-```text
-playlist import
-playlist inspection
-missing track detection
-download
-metadata verification
-upload
-```
-
----
-
-### Test H — Metadata replacement
-
-Verify:
-
-```text
-existing file
-replacement download
-metadata update
-verification
-final placement
-```
-
-and make sure no unexpected files are created outside the configured music/download roots.
-
----
-
-# Phase 12 — Traefik Deployment Test
-
-## Priority: CRITICAL for your setup
-
-Deploy:
-
-```text
-Cloudflare
-    ↓
-Traefik
-    ↓
-YTM Sync
-```
-
-### Test 12.1 — HTTP/HTTPS
-
-Ensure users don't reach the backend directly.
-
-### Test 12.2 — Browser
-
-Open:
-
-```text
-https://YOUR-YTM-SYNC-DOMAIN
-```
-
-Verify UI loads.
-
-### Test 12.3 — API
-
-Verify:
-
-```text
-GET /api/status
-```
-
-without token:
-
-```text
-401
-```
-
-with token:
-
-```text
-200
-```
-
-### Test 12.4 — CORS
-
-Allowed domain:
-
-```text
-Access-Control-Allow-Origin: your-domain
-```
-
-Unknown domain:
-
-```text
-NO access-control-allow-origin
-```
-
-### Test 12.5 — Forwarded headers
-
-Verify scheme/IP information is correct when passing:
-
-```text
-Cloudflare → Traefik → YTM Sync
-```
-
----
-
-# Phase 13 — Cloudflare Test
-
-## Priority: HIGH
-
-Test through the actual Cloudflare endpoint.
-
-Verify:
-
-```text
-HTTPS
-API authentication
-CORS
-WebSocket/live updates if used
-large requests
-playlist operations
-long-running downloads
-```
-
-Pay special attention to timeout behavior.
-
-A playlist/download operation that works locally but dies behind Cloudflare/Traefik is a production blocker.
-
----
-
-# Phase 14 — Backup / Restore Test
-
-## Priority: HIGH
-
-Don't just test backup creation.
-
-Test restoration.
-
-### Backup
-
-```bash
-tar -czvf ytm_sync_backup_$(date +%Y%m%d).tar.gz ./config
-```
-
-The README already identifies `/config` as the important persistent data directory.
-
-### Restore test
-
-Create a clean test installation.
-
-Restore:
-
-```text
-database
-authentication
-history
-configuration
-```
-
-Start YTM Sync.
-
-Verify:
-
-```text
-database intact
-queue intact
-YTM authentication intact
-API key intact
-settings intact
-```
-
-This turns "we have backups" into **"we know backups work."**
-
----
-
-# Phase 15 — Documentation Completion
-
-## Priority: MEDIUM
-
-Update README to clearly document:
-
-### Installation
-
-```text
-clone
-.env
-docker compose
-```
-
-### API authentication
-
-Explain:
-
-```text
-YTM Sync automatically generates an API key
-```
-
-and where it is stored.
-
-### Reverse proxy
-
-Add:
-
-```text
-Cloudflare
+Upload ID
    ↓
-Traefik
+youtube.com
+   ↓ fail
+music.youtube.com
+   ↓ fail
+ytsearch1:"Artist - Title"
    ↓
-YTM Sync
+some matching public video
 ```
 
-instructions.
+That last step must never exist for an Upload Locker download.
 
-### Environment variables
+For:
 
-Document:
-
-```text
-PORT
-CONFIG_PATH
-MUSIC_PATH
-DOWNLOADS_PATH
-LOG_LEVEL
-TZ
-YTM_SYNC_API_KEY
-ALLOWED_ORIGINS
-FORWARDED_ALLOW_IPS
+```python
+download_ytm_upload(...)
 ```
 
-The `.env.example` already contains most of the important configuration.
+the only legal source should be the **specific upload identity**.
 
-### Security model
+### 1.2 Separate upload downloading from generic YouTube downloading
 
-Add a short section:
+Create two explicit paths:
 
 ```text
-API requires Bearer authentication.
-Music/download mounts are read-only in Docker.
-Filesystem access is restricted to configured roots.
-External URLs are restricted and validated.
+download_upload(upload_record)
+download_catalog_track(catalog_record)
+```
+
+Never:
+
+```text
+download_track(...)
+```
+
+with ambiguous source semantics.
+
+An upload should carry something like:
+
+```text
+source_type = "ytm_upload"
+source_id = <YouTube video ID>
+```
+
+A catalog track should carry:
+
+```text
+source_type = "catalog"
+source_id = <catalog/video ID>
+```
+
+The downloader should reject a request when the source type is missing or contradictory.
+
+---
+
+# Phase 2 — Make upload identity authoritative
+
+## 2.1 Store the original upload identity
+
+Every Upload Locker record should permanently retain:
+
+```text
+upload_video_id
+upload_url
+source_type
+```
+
+Example:
+
+```text
+source_type: ytm_upload
+upload_video_id: tAXJ0semc4E
+upload_url: https://www.youtube.com/watch?v=tAXJ0semc4E
+```
+
+The title/artist/album should **never be used as the source identifier**.
+
+Metadata is for matching/display.
+
+The video ID is for identity.
+
+---
+
+## 2.2 Never substitute based on metadata
+
+These are insufficient to prove identity:
+
+```text
+Artist
+Title
+Album
+Duration
+Filename
+Normalized filename
+MusicBrainz match
+YouTube search result
+```
+
+For example:
+
+```text
+Local:
+Big 8 - Track Name
+
+Upload:
+Big 8 - Track Name
+
+Public YouTube:
+Big 8 - Track Name
+```
+
+Those can all be completely different recordings.
+
+Therefore:
+
+> A metadata match can identify a candidate, but it can never authorize a replacement.
+
+---
+
+# Phase 3 — Fail closed on private uploads
+
+Your current log is actually the situation we want to handle safely:
+
+```text
+Private video.
+If the owner ... has granted you access, please sign in.
+```
+
+The correct behavior should be:
+
+```text
+UPLOAD DOWNLOAD FAILED
+Reason: private upload unavailable/authentication failure
+
+→ mark download FAILED
+→ preserve local file
+→ do not search YouTube
+→ do not download alternate source
+→ do not replace anything
+```
+
+Not:
+
+```text
+private upload failed
+     ↓
+try another YouTube source
 ```
 
 ---
 
-# Phase 16 — Release Candidate
+# Phase 4 — Add a hard source-integrity gate
 
-Once everything above passes:
-
-### 16.1 Version bump
-
-Set:
+Before any downloaded file is allowed anywhere near the destination:
 
 ```text
-1.0.0
+Download
+   ↓
+Verify
+   ↓
+PASS → continue
+FAIL → delete staging file
 ```
 
-where the application currently defines its version.
+The verification should check the downloaded video's identity.
 
-### 16.2 Build
+At minimum:
 
-```bash
-flutter build web --release
+```text
+expected video ID
+actual extracted video ID
 ```
 
-Then synchronize:
+They must match.
 
-```bash
-rsync -av --delete app/build/web/ backend/web_dist/
+Conceptually:
+
+```python
+if actual_video_id != expected_video_id:
+    raise DownloadIntegrityError(...)
 ```
 
-### 16.3 Run all tests
+A catalog result such as:
 
-```bash
-flutter analyze
-flutter test
+```text
+dQw4w9WgXcQ
 ```
 
-Backend:
+must never be accepted for an upload expecting:
 
-```bash
-pytest
-```
-
-Docker:
-
-```bash
-docker compose build
-docker compose up -d
+```text
+tAXJ0semc4E
 ```
 
 ---
 
-# Phase 17 — Release Candidate Checklist
+# Phase 5 — Never download directly to the user's music file
 
-Don't tag until every box is checked.
+This is extremely important because you said it **already replaced local artist files**.
+
+The pipeline needs to become:
 
 ```text
-[x] main clean
-[x] latest commit verified
-[x] API authentication tested
-[x] invalid authentication tested
-[x] API route enumeration completed
-[x] filesystem traversal tested
-[x] symlink traversal tested
-[x] SSRF tested
-[x] YouTube URL validation tested
-[x] no secrets in repository
-[x] no secrets in Flutter bundle
-[x] Docker runs as UID 1000
-[x] music mount read-only
-[x] downloads mount read-only
-[x] /config writable
-[x] docs disabled
-[x] CORS tested
-[x] forwarded proxy configuration tested
-[x] Flutter analyze passes
-[x] Flutter tests pass
-[x] backend tests pass
-[x] Docker build passes
-[x] fresh install works
-[x] restart works
-[x] queue recovery works
-[x] YTM authentication works
-[x] scanning works
-[x] matching works
-[x] uploading works
-[x] playlist sync works
-[x] metadata replacement works
-[x] backup works
-[x] restore tested
-[x] Traefik works
-[x] Cloudflare works
-[x] direct WAN access blocked
-[x] README updated
-[x] .env.example updated
+YouTube
+   ↓
+/staging/ytm_<upload_id>.tmp
+   ↓
+integrity validation
+   ↓
+metadata validation
+   ↓
+optional audio fingerprint validation
+   ↓
+SAFE VERIFIED FILE
+   ↓
+commit operation
+   ↓
+destination
+```
+
+Never:
+
+```text
+YouTube
+   ↓
+/music/Artist/Song.mp3
 ```
 
 ---
 
-# Phase 18 — Tag v1.0.0
+# Phase 6 — Make replacement impossible by default
 
-Only after the complete checklist passes:
+I would change the write policy to:
 
-```bash
-git checkout main
-git pull
-git tag -a v1.0.0 -m "YTM Sync v1.0.0"
-git push origin v1.0.0
-```
-
-Your existing workflow is configured to build/publish tagged releases as well as `main`.
-
----
-
-# Phase 19 — Production Deployment
-
-Use the released image rather than building random working-tree versions.
-
-Your Compose currently uses:
+### Existing local file + unverified download
 
 ```text
-ghcr.io/jakej985-rgb/ytmusic_sync:latest
+BLOCK
 ```
 
-For your **actual server**, I'd eventually prefer a versioned image:
+### Existing local file + verified exact upload
+
+Still:
 
 ```text
-ghcr.io/jakej985-rgb/ytmusic_sync:1.0.0
+BLOCK by default
 ```
 
-rather than `latest`.
+unless the application has an explicit replacement operation.
 
 That gives you:
 
 ```text
-v1.0.0
-   ↓
-known image
-   ↓
-production
+NEW FILE
+    ↓
+allowed
+
+EXISTING FILE
+    ↓
+never automatically replace
 ```
 
-instead of:
-
-```text
-latest
-   ↓
-whatever was most recently pushed
-```
-
-You can still keep `latest` for convenience.
+This is much safer for your local artist recordings.
 
 ---
 
-# Phase 20 — Post-Release Monitoring
+# Phase 7 — Add a three-way decision
 
-For the first few days, monitor:
-
-```bash
-docker compose logs -f ytm-sync
-```
-
-Watch specifically for:
+Instead of simply:
 
 ```text
-ERROR
-Traceback
-permission denied
-401
-403
-queue failures
-database errors
-yt-dlp failures
-filesystem validation errors
+MATCH / NO MATCH
 ```
 
-Don't automatically loosen security when a path gets rejected.
-
-If something legitimately needs access:
+use:
 
 ```text
-identify exact operation
-        ↓
-identify exact root
-        ↓
-make narrow change
-        ↓
-add regression test
+SAFE
+REVIEW
+BLOCKED
 ```
 
----
+### SAFE
 
-# Recommended Agent Implementation Order
-
-If you're going to hand this to your coding agent, **don't give it all 20 phases at once as one giant "rewrite."**
-
-Give it these batches:
-
-### Agent Task 1 — Configuration
-
-> Implement Phase 1 and update `.env.example` and README. Do not modify unrelated functionality. Add tests for forwarded-header configuration.
-
-### Agent Task 2 — Security Audit
-
-> Perform the Phase 4–7 filesystem, network, authentication, and secret audit. Fix only concrete issues found. Add regression tests for every fix.
-
-### Agent Task 3 — CI
-
-> Verify and harden Phase 9 CI. Ensure Flutter analyze/test/build, backend pytest, and Docker build all run before image publishing. Do not change application functionality.
-
-### Agent Task 4 — Documentation
-
-> Complete Phase 15 documentation. Document API authentication, generated API key retrieval, CORS, reverse proxy configuration, environment variables, Docker security, and backup/restore.
-
-### Agent Task 5 — Release QA
-
-> Implement automated regression tests covering the Phase 11 security and functional matrix. Do not redesign application architecture.
-
-Then **you** perform the actual:
+Exact upload identity verified.
 
 ```text
-Docker deployment
-        ↓
-Traefik
-        ↓
-Cloudflare
-        ↓
-real YouTube Music account
-        ↓
-real music library
-        ↓
-backup/restore
+expected ID == actual ID
+```
+
+### REVIEW
+
+Metadata looks compatible but identity cannot be cryptographically/authoritatively established.
+
+Example:
+
+```text
+same artist
+same title
+same duration
+different/unknown source ID
+```
+
+Do not automatically download/replace.
+
+### BLOCKED
+
+Examples:
+
+```text
+private upload inaccessible
+wrong video ID
+ytsearch fallback
+source type unknown
+download metadata mismatch
+destination already exists
+audio validation failed
 ```
 
 ---
 
-## The important part
+# Phase 8 — Add audio fingerprint protection
 
-**Don't let the agent turn this into another month-long security project.**
+This is the second layer that I strongly recommend because of what happened to your local artists.
 
-The current repository has already made the major security transition. The latest security changes are present in `main`, including the path validation and proxy configuration work.
+Even if the YouTube ID is correct, compare the downloaded audio against the expected upload metadata/audio characteristics.
 
-The remaining job is:
+Use:
 
-**Harden → Test → Deploy → Verify → Tag → Ship.**
+```text
+duration
+codec
+sample rate
+channels
+bitrate
+```
 
-I would consider **Phase 12–14 the real release gate** for your particular setup. Passing unit/security tests is great, but the final proof is that **YTM Sync works through your actual Traefik + Cloudflare deployment with your actual YT Music authentication and music library without breaking the security boundaries.**
+and ideally an acoustic fingerprint such as Chromaprint/AcoustID-style fingerprinting where practical.
+
+The goal isn't to prove two encodings are byte-identical.
+
+The goal is to catch:
+
+```text
+Expected:
+Big 8 - My Track
+3:47
+
+Downloaded:
+Big 8 - My Track
+4:01
+```
+
+or an entirely different recording hidden behind similar metadata.
+
+---
+
+# Phase 9 — Protect the original file
+
+Before any replacement operation:
+
+```text
+existing file
+     ↓
+SHA-256
+     ↓
+database/history
+```
+
+Store:
+
+```text
+original_path
+original_sha256
+original_size
+original_mtime
+replacement_timestamp
+replacement_source_id
+```
+
+Then even an authorized replacement has an audit trail.
+
+But again, my recommended default is:
+
+> **Don't automatically replace existing local files at all.**
+
+---
+
+# Phase 10 — Database model changes
+
+I would add explicit source/integrity fields to the track record.
+
+Something along these lines:
+
+```text
+source_type
+source_id
+source_url
+expected_duration
+downloaded_source_id
+verified
+verification_status
+verification_reason
+original_file_hash
+downloaded_file_hash
+replacement_allowed
+```
+
+And statuses:
+
+```text
+PENDING
+DOWNLOADING
+VERIFYING
+VERIFIED
+REVIEW_REQUIRED
+FAILED
+BLOCKED
+```
+
+This also makes your Sync History much more useful.
+
+---
+
+# Phase 11 — Logging needs to become explicit
+
+Instead of:
+
+```text
+Downloading audio via ...
+```
+
+log:
+
+```text
+UPLOAD DOWNLOAD START
+source_type=ytm_upload
+expected_video_id=tAXJ0semc4E
+```
+
+Then:
+
+```text
+UPLOAD DOWNLOAD SUCCESS
+expected_video_id=tAXJ0semc4E
+actual_video_id=tAXJ0semc4E
+verification=PASS
+```
+
+Or:
+
+```text
+UPLOAD DOWNLOAD BLOCKED
+expected_video_id=tAXJ0semc4E
+actual_video_id=<different ID>
+reason=SOURCE_ID_MISMATCH
+```
+
+Most importantly, when authentication fails:
+
+```text
+UPLOAD DOWNLOAD BLOCKED
+reason=PRIVATE_UPLOAD_UNAVAILABLE
+fallback_search=DISABLED
+replacement=DISABLED
+```
+
+That will make the problem obvious instead of hiding it behind retries.
+
+---
+
+# Phase 12 — Add regression tests specifically for your failure
+
+This should become a mandatory test suite.
+
+### Test A — private upload
+
+```text
+private upload
+↓
+authentication failure
+↓
+download fails
+↓
+NO catalog search
+↓
+NO file replacement
+```
+
+### Test B — same artist/title
+
+```text
+private upload = Artist A / Song X
+public YouTube = Artist A / Song X
+
+upload inaccessible
+↓
+must NOT choose public video
+```
+
+### Test C — wrong video ID
+
+Mock:
+
+```text
+expected=tAXJ0semc4E
+actual=different123
+```
+
+Expected:
+
+```text
+BLOCKED
+```
+
+### Test D — existing local file
+
+```text
+destination exists
+download verified
+```
+
+Expected:
+
+```text
+original preserved
+automatic replacement blocked
+```
+
+### Test E — search fallback
+
+Explicitly assert:
+
+```text
+download_ytm_upload()
+```
+
+can never invoke:
+
+```text
+ytsearch1:
+```
+
+---
+
+# Phase 13 — Add a global safety switch
+
+I would add:
+
+```env
+YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT=false
+```
+
+and make `false` the permanent default.
+
+Even better:
+
+```text
+Automatic replacement:
+OFF
+```
+
+in Settings.
+
+Then an explicit manual action could eventually allow:
+
+```text
+Replace Existing File
+```
+
+with a confirmation showing:
+
+```text
+LOCAL FILE
+/path/to/song.mp3
+SHA256: ...
+
+NEW SOURCE
+YouTube Upload ID: tAXJ0semc4E
+
+VERIFICATION
+✓ Upload ID matches
+✓ Duration matches
+✓ Audio validation passed
+```
+
+---
+
+# Phase 14 — Repair the files that were already replaced
+
+Before we call this fixed, I would add a recovery procedure.
+
+The database/history should tell us:
+
+```text
+original path
+replacement date
+replacement source
+```
+
+Then we can identify suspicious replacements caused by the bad downloader behavior.
+
+Don't let the new code simply rescan those files and assume they're correct.
+
+They need to be treated as:
+
+```text
+POSSIBLY CORRUPTED / REPLACED
+```
+
+until verified.
+
+---
+
+# Phase 15 — Change the architecture
+
+The final architecture should be:
+
+```text
+             ┌───────────────────┐
+             │   Upload Locker   │
+             └─────────┬─────────┘
+                       │
+                 exact upload ID
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Upload Downloader│
+              └────────┬────────┘
+                       │
+                 authenticated
+                       │
+              ┌────────▼────────┐
+              │     Staging      │
+              └────────┬────────┘
+                       │
+                 identity check
+                       │
+                 metadata check
+                       │
+                 audio check
+                       │
+                 ┌─────▼─────┐
+                 │   SAFE?   │
+                 └─────┬─────┘
+                    YES│NO
+                       │
+              ┌────────▼───┐
+              │  Commit    │       BLOCK
+              │  / Copy    │        │
+              └────────────┘        ▼
+                                Preserve
+                                original
+```
+
+## Release gate
+
+I would **not consider YTM Sync ready for release** until these are all true:
+
+```text
+[x] Upload downloads never use ytsearch
+[x] Upload source identity is stored separately from metadata
+[x] Private-upload failure is fail-closed
+[x] Download occurs only in staging
+[x] Downloaded source ID is verified
+[x] Existing files cannot be automatically overwritten
+[x] Replacement requires explicit authorization
+[x] Original SHA-256 is recorded before replacement
+[x] Wrong-source regression tests exist
+[x] Same-title/local-artist test exists
+[x] Private-upload authentication-failure test exists
+[x] Sync history records why a download was accepted/rejected
+[x] Previously replaced files are audited
+```
+
+### Most important change
+
+The single rule I would put at the top of the codebase is:
+
+> **An Upload Locker item may only be downloaded from its exact authenticated upload source. Metadata may never be used to find a replacement source. If the exact source cannot be downloaded, the operation fails and the existing local file remains untouched.**
+
+That is the rule that would have prevented the local artists' files from being replaced.
+
+The repo already has a dedicated `downloader.py`, `matcher.py`, `database.py`, `metadata_tracker.py`, and `queue_service.py`, so this can be implemented as a contained integrity hardening effort rather than rewriting the whole application.
+
+I would make this **Phase 0 of the final release audit**, ahead of the other release-hardening work in your existing `plan.md`.

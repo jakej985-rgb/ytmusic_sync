@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 from pydantic import BaseModel, Field
 
 class MatchType(str, Enum):
@@ -8,6 +8,20 @@ class MatchType(str, Enum):
     STRONG = "strong"
     WEAK = "weak"
     NONE = "none"
+
+class SyncDecision(str, Enum):
+    SAFE = "SAFE"
+    REVIEW = "REVIEW"
+    BLOCKED = "BLOCKED"
+
+class VerificationStatus(str, Enum):
+    PENDING = "PENDING"
+    DOWNLOADING = "DOWNLOADING"
+    VERIFYING = "VERIFYING"
+    VERIFIED = "VERIFIED"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
 
 class UploadStatus(str, Enum):
     NOT_UPLOADED = "not_uploaded"
@@ -17,6 +31,10 @@ class UploadStatus(str, Enum):
     VERIFYING = "verifying"
     VERIFIED = "verified"
     FAILED = "failed"
+    PENDING = "PENDING"
+    DOWNLOADING = "DOWNLOADING"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    BLOCKED = "BLOCKED"
 
 class MusicFile(BaseModel):
     id: Optional[int] = None
@@ -36,14 +54,28 @@ class MusicFile(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     # Joined or calculated attributes
-    upload_status: UploadStatus = UploadStatus.NOT_UPLOADED
+    upload_status: Union[UploadStatus, str] = UploadStatus.NOT_UPLOADED
     matched_upload_id: Optional[str] = None
     match_score: Optional[float] = None
+    # Source & integrity attributes (Phase 10)
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    source_url: Optional[str] = None
+    expected_duration: Optional[float] = None
+    downloaded_source_id: Optional[str] = None
+    verified: bool = False
+    verification_status: Optional[str] = None
+    verification_reason: Optional[str] = None
+    downloaded_file_hash: Optional[str] = None
+    replacement_allowed: bool = False
 
 class YtmUpload(BaseModel):
     id: Optional[int] = None
     entity_id: str
     video_id: Optional[str] = None
+    upload_video_id: Optional[str] = None
+    upload_url: Optional[str] = None
+    source_type: str = "ytm_upload"
     title: str
     artist: Optional[str] = None
     album: Optional[str] = None
@@ -65,12 +97,24 @@ class MatchRecord(BaseModel):
 class SyncJob(BaseModel):
     id: Optional[int] = None
     music_file_id: int
-    status: UploadStatus
+    status: Union[UploadStatus, str]
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     error: Optional[str] = None
     attempts: int = 0
     ytm_entity_id: Optional[str] = None
+    # Phase 10 Source & Integrity Fields
+    source_type: Optional[str] = "ytm_upload"
+    source_id: Optional[str] = None
+    source_url: Optional[str] = None
+    expected_duration: Optional[float] = None
+    downloaded_source_id: Optional[str] = None
+    verified: bool = False
+    verification_status: Union[VerificationStatus, str] = VerificationStatus.PENDING
+    verification_reason: Optional[str] = None
+    original_file_hash: Optional[str] = None
+    downloaded_file_hash: Optional[str] = None
+    replacement_allowed: bool = False
     music_file: Optional[MusicFile] = None
 
 class DashboardStats(BaseModel):
