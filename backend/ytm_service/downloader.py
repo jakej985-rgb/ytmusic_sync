@@ -19,7 +19,7 @@ import re
 import shutil
 import hashlib
 from pathlib import Path
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, Tuple
 from .config import settings
 from .security import validate_youtube_url, validate_fs_path
 from .database import db
@@ -60,8 +60,10 @@ def _generate_netscape_cookies(cookie_raw: str) -> str:
     return path
 
 
-def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]:
-    """Attempt direct audio stream download using the authenticated ytmusicapi session."""
+def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Tuple[Path, str]]:
+    """Attempt direct audio stream download using the authenticated ytmusicapi session.
+    Extracts the authoritative videoId returned in the song_data payload so it can be verified.
+    """
     try:
         from .ytm_client import ytm_client
         if not ytm_client.is_auth_configured():
@@ -70,6 +72,16 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
         yt = ytm_client._get_client()
         # ytmusicapi get_song returns video details and streamingData using authenticated session
         song_data = yt.get_song(video_id)
+        if not isinstance(song_data, dict):
+            return None
+
+        # Extract returned video ID from response (Blocker 1)
+        video_details = song_data.get("videoDetails", {})
+        actual_video_id = video_details.get("videoId") or song_data.get("videoId")
+        if not actual_video_id:
+            logger.warning(f"ytmusicapi get_song({video_id}) did not return a valid videoId in videoDetails")
+            actual_video_id = "MISSING_RETURNED_ID"
+
         streaming_data = song_data.get("streamingData", {})
         formats = streaming_data.get("adaptiveFormats", []) + streaming_data.get("formats", [])
 
@@ -125,8 +137,8 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
             pass
 
         if conv_res.returncode == 0 and final_mp3.exists() and final_mp3.stat().st_size > 0:
-            logger.info(f"Direct stream download & conversion succeeded for {video_id}: {final_mp3} ({final_mp3.stat().st_size} bytes)")
-            return final_mp3
+            logger.info(f"Direct stream download & conversion succeeded for {video_id}: {final_mp3} ({final_mp3.stat().st_size} bytes, returned_id={actual_video_id})")
+            return (final_mp3, str(actual_video_id).strip())
         else:
             logger.warning(f"ffmpeg conversion failed for {video_id}: {conv_res.stderr}")
     except Exception as e:
@@ -234,16 +246,22 @@ def _download_sync(
 
     # 1. First attempt direct download via authenticated ytmusicapi session
     try:
-        direct_file = _download_via_ytmusicapi(clean_id, output_path)
-        if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
-            if source_type == "ytm_upload":
-                return verify_downloaded_upload(
-                    staged_file=direct_file,
-                    expected_source_id=clean_id,
-                    actual_source_id=clean_id,
-                    expected_metadata=expected_metadata
-                )
-            return direct_file
+        api_res = _download_via_ytmusicapi(clean_id, output_path)
+        if api_res:
+            if isinstance(api_res, tuple):
+                direct_file, actual_api_id = api_res
+            else:
+                direct_file, actual_api_id = api_res, clean_id
+
+            if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
+                if source_type == "ytm_upload":
+                    return verify_downloaded_upload(
+                        staged_file=direct_file,
+                        expected_source_id=clean_id,
+                        actual_source_id=actual_api_id,
+                        expected_metadata=expected_metadata
+                    )
+                return direct_file
     except DownloadIntegrityError:
         raise
     except Exception as e:
@@ -403,27 +421,38 @@ def _download_sync(
 
 
 def _extract_source_identity(source_record: Union[str, Dict[str, Any], Any], expected_type: str) -> tuple[str, str]:
-    """Extract and validate (source_type, source_id) from record or string."""
+    """Extract and validate (source_type, source_id) from record or string.
+    Strictly enforces source_type=='ytm_upload' and explicit source_id without loose inferences (Blocker 6).
+    """
     if isinstance(source_record, str):
-        return expected_type, source_record.strip()
+        clean_s = source_record.strip()
+        if not clean_s:
+            raise ValueError(f"Empty source ID string for {expected_type}")
+        return expected_type, clean_s
 
     if isinstance(source_record, dict):
-        rec_type = source_record.get("source_type") or expected_type
+        rec_type = source_record.get("source_type")
+        if not rec_type:
+            if expected_type == "ytm_upload":
+                raise ValueError("Missing mandatory 'source_type' in upload record. Must be explicitly 'ytm_upload'.")
+            rec_type = expected_type
         if rec_type != expected_type:
             raise ValueError(f"Contradictory source_type: expected '{expected_type}', got '{rec_type}'")
-        rec_id = (
-            source_record.get("source_id")
-            or source_record.get("upload_video_id")
-            or source_record.get("video_id")
-        )
+
+        rec_id = source_record.get("source_id") or source_record.get("upload_video_id")
         if not rec_id:
             raise ValueError(f"Missing source_id in {expected_type} record")
         return rec_type, str(rec_id).strip()
 
-    rec_type = getattr(source_record, "source_type", expected_type)
+    rec_type = getattr(source_record, "source_type", None)
+    if not rec_type:
+        if expected_type == "ytm_upload":
+            raise ValueError("Missing mandatory 'source_type' attribute in upload record. Must be explicitly 'ytm_upload'.")
+        rec_type = expected_type
     if rec_type != expected_type:
         raise ValueError(f"Contradictory source_type: expected '{expected_type}', got '{rec_type}'")
-    rec_id = getattr(source_record, "source_id", None) or getattr(source_record, "video_id", None)
+
+    rec_id = getattr(source_record, "source_id", None) or getattr(source_record, "upload_video_id", None)
     if not rec_id:
         raise ValueError(f"Missing source_id in {expected_type} record")
     return rec_type, str(rec_id).strip()
@@ -433,7 +462,8 @@ def commit_staged_file_to_destination(
     staged_file: Path,
     destination_file: Path,
     allow_overwrite: bool = False,
-    replacement_source_id: Optional[str] = None
+    replacement_source_id: Optional[str] = None,
+    authorized_manual_action: bool = False
 ) -> Path:
     """
     Safely commit a verified file from staging to a destination path.
@@ -443,13 +473,16 @@ def commit_staged_file_to_destination(
 
     An existing file will NEVER be overwritten unless:
     1. allow_overwrite is explicitly set to True by an intentional caller, AND
-    2. settings.allow_automatic_replacement is explicitly enabled (YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT=true).
+    2. Either settings.allow_automatic_replacement is explicitly enabled (YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT=true),
+       OR authorized_manual_action is True (an explicit manual replacement confirmation) (Blocker 4).
     Otherwise, replacement is BLOCKED and FileExistsError is raised.
 
-    Phase 9 — Pre-Replacement Protection:
+    Phase 9 & Blocker 5 — Pre-Replacement Protection (Hard Safety Gate):
     Before any authorized overwrite occurs:
     - Calculates the SHA-256 of the existing file.
-    - Saves a snapshot backup into settings.backups_dir.
+    - Saves an immutable snapshot backup into settings.backups_dir.
+    - Verifies the backup file exists, is non-empty, and its SHA-256 matches the original byte-for-byte.
+    - IF BACKUP FAILS OR HASH MISMATCHES: ABORTS IMMEDIATELY and refuses to touch the existing file.
     - Logs and persists an audit trail entry (original_path, sha256, size, mtime, backup_path).
     """
     if not staged_file.exists() or staged_file.stat().st_size == 0:
@@ -458,17 +491,22 @@ def commit_staged_file_to_destination(
     target_path = validate_fs_path(destination_file, allow_create_in_parent=True)
 
     if target_path.exists():
-        if not (allow_overwrite and settings.allow_automatic_replacement):
+        is_authorized = (
+            (allow_overwrite and settings.allow_automatic_replacement) or
+            (allow_overwrite and authorized_manual_action)
+        )
+        if not is_authorized:
             logger.warning(
                 f"REPLACEMENT BLOCKED: Destination file '{target_path}' already exists. "
                 f"Automatic file replacement is BLOCKED by policy to protect local audio recordings. "
-                f"(allow_overwrite={allow_overwrite}, allow_automatic_replacement={settings.allow_automatic_replacement})"
+                f"(allow_overwrite={allow_overwrite}, allow_automatic_replacement={settings.allow_automatic_replacement}, "
+                f"authorized_manual_action={authorized_manual_action})"
             )
             raise FileExistsError(
                 f"Destination file already exists: {target_path}. Automatic replacement blocked by write policy."
             )
 
-        # Authorized replacement: Protect the original file (Phase 9)
+        # Authorized replacement: Protect the original file (Phase 9 & Blocker 5)
         h = hashlib.sha256()
         with open(target_path, "rb") as f:
             while chunk := f.read(65536):
@@ -477,12 +515,40 @@ def commit_staged_file_to_destination(
         orig_size = target_path.stat().st_size
         orig_mtime = target_path.stat().st_mtime
 
-        # Create safety backup snapshot before overwriting
+        # Create safety backup snapshot before overwriting (Hard Gate - Blocker 5)
+        settings.backups_dir.mkdir(parents=True, exist_ok=True)
         backup_file = settings.backups_dir / f"{target_path.stem}_{orig_sha256[:12]}.bak"
         try:
             shutil.copy2(target_path, backup_file)
         except Exception as ex:
-            logger.warning(f"Could not create pre-replacement backup for {target_path}: {ex}")
+            logger.error(f"HARD SAFETY GATE: Failed to create pre-replacement backup for {target_path}: {ex}")
+            raise RuntimeError(
+                f"Pre-replacement backup creation failed for '{target_path}': {ex}. "
+                f"File overwrite ABORTED to guarantee local data preservation."
+            )
+
+        if not backup_file.exists() or backup_file.stat().st_size == 0:
+            raise RuntimeError(
+                f"Pre-replacement backup verification failed: backup file '{backup_file}' is missing or empty. "
+                f"File overwrite ABORTED to guarantee local data preservation."
+            )
+
+        # Verify backup integrity: backup hash MUST match original hash
+        h_bak = hashlib.sha256()
+        with open(backup_file, "rb") as bf:
+            while chunk := bf.read(65536):
+                h_bak.update(chunk)
+        backup_sha256 = h_bak.hexdigest()
+
+        if backup_sha256 != orig_sha256:
+            try:
+                backup_file.unlink()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Pre-replacement backup integrity mismatch: original={orig_sha256} vs backup={backup_sha256}. "
+                f"File overwrite ABORTED to guarantee local data preservation."
+            )
 
         logger.warning(
             f"PRE-REPLACEMENT AUDIT RECORDED: path={target_path} sha256={orig_sha256} "
@@ -497,7 +563,7 @@ def commit_staged_file_to_destination(
                 original_mtime=orig_mtime,
                 replacement_source_id=replacement_source_id or "unknown",
                 replacement_path=str(staged_file),
-                backup_path=str(backup_file) if backup_file.exists() else None
+                backup_path=str(backup_file)
             )
         except Exception as ex:
             logger.error(f"Failed to record file replacement audit trail: {ex}")
@@ -597,11 +663,19 @@ async def download_ytm_upload(
     dest_dir: Optional[Path] = None
 ) -> Path:
     """
-    Download an uploaded YouTube Music track by its video_id and return the local path.
+    Download an uploaded YouTube Music track by its video_id and return the local path (Blocker 7).
+    Constructs an explicit {source_type: 'ytm_upload', source_id: video_id} payload
+    and passes through download_upload().
     Enforces upload-only semantics with no search fallback.
     Always downloads to isolated staging first.
     """
-    return await download_upload(video_id, dest_dir=dest_dir)
+    clean_id = str(video_id).strip()
+    if not clean_id:
+        raise ValueError("Video ID cannot be empty")
+    return await download_upload(
+        {"source_type": "ytm_upload", "source_id": clean_id},
+        dest_dir=dest_dir
+    )
 
 
 def extract_playlist_info_sync(playlist_url_or_id: str) -> dict:

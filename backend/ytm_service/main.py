@@ -16,7 +16,8 @@ from .database import db
 from .models import (
     MusicFile, YtmUpload, SyncJob, DashboardStats,
     ScanRequest, AuthSetupRequest, ConnectionStatus, MusicBrainzMatch,
-    PlaylistTrackDownloadRequest, PlaylistImportRequest
+    PlaylistTrackDownloadRequest, PlaylistImportRequest,
+    ReplicatedPlaylist, ReplicatedPlaylistCreate, ReplicatedPlaylistUpdate
 )
 from .scanner import scanner
 from .ytm_client import ytm_client
@@ -34,6 +35,8 @@ from .scanner import write_metadata_tags
 from .playlist_downloader import playlist_sync_manager, download_and_upload_playlist_track
 from .queue_service import unified_queue_service
 from .metadata_tracker import metadata_tracker
+from .playlist_replicator import playlist_replicator
+from .playlist_watcher import playlist_watcher
 from .security import (
     verify_api_key_header,
     validate_fs_path,
@@ -93,9 +96,12 @@ async def lifespan(app: FastAPI):
     await queue_manager.reconcile_and_resume()
     # Start periodic background scanner
     background_scanner_task = asyncio.create_task(_periodic_scan_loop())
+    # Start playlist watcher
+    playlist_watcher.start()
     yield
     # Shutdown: Clean up background workers
-    logger.info("Stopping background upload worker and periodic scanner...")
+    logger.info("Stopping background upload worker, periodic scanner, and playlist watcher...")
+    playlist_watcher.stop()
     if background_scanner_task:
         background_scanner_task.cancel()
     await queue_manager.stop_worker()
@@ -346,6 +352,148 @@ async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Option
         raise HTTPException(status_code=409, detail=str(re))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start playlist sync: {e}")
+
+
+# ============================================================================
+# Replicated Playlists (1:1 Locker-Only Replica Engine)
+# ============================================================================
+
+@app.get("/api/replicated-playlists")
+async def list_replicated_playlists():
+    """List all configured replicated playlist watchers with current status."""
+    try:
+        replicas = await db.get_replicated_playlists()
+        results = []
+        for r in replicas:
+            results.append(r.model_dump())
+        return results
+    except Exception as e:
+        logger.exception(f"Failed to list replicated playlists: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list replicated playlists: {e}")
+
+
+@app.post("/api/replicated-playlists")
+async def create_replicated_playlist(req: ReplicatedPlaylistCreate):
+    """Configure a new replicated playlist watcher."""
+    try:
+        # If source name not supplied, fetch it from YouTube Music
+        source_name = req.source_playlist_name
+        if not source_name:
+            try:
+                details = await ytm_client.get_playlist_details(req.source_playlist_id)
+                source_name = details.get("title", f"Playlist {req.source_playlist_id}")
+            except Exception:
+                source_name = f"Playlist {req.source_playlist_id}"
+
+        dest_name = req.destination_playlist_name or f"{source_name} - Locker"
+        dest_id = req.destination_playlist_id or ""
+
+        # Check if already configured
+        existing = await db.get_replicated_playlist_by_source_id(req.source_playlist_id)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A replica watcher is already configured for source playlist {req.source_playlist_id} (ID: {existing.id})"
+            )
+
+        new_id = await db.create_replicated_playlist(
+            source_playlist_id=req.source_playlist_id,
+            source_playlist_name=source_name,
+            destination_playlist_id=dest_id,
+            destination_playlist_name=dest_name,
+            enabled=req.enabled,
+            sync_interval_seconds=req.sync_interval_seconds
+        )
+        created = await db.get_replicated_playlist(new_id)
+        return created.model_dump() if created else {"id": new_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to create replicated playlist: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create replicated playlist: {e}")
+
+
+@app.get("/api/replicated-playlists/{replicated_id}")
+async def get_replicated_playlist(replicated_id: int):
+    """Get details, current configuration, and status of a replicated playlist."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
+
+    # Run preview/dry-run to return stats (source count, locker matches, excluded count)
+    try:
+        preview = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True)
+    except Exception as e:
+        logger.warning(f"Could not calculate preview for replica {replicated_id}: {e}")
+        preview = None
+
+    return {
+        "config": config.model_dump(),
+        "preview": preview
+    }
+
+
+@app.put("/api/replicated-playlists/{replicated_id}")
+async def update_replicated_playlist(replicated_id: int, req: ReplicatedPlaylistUpdate):
+    """Update settings for an existing replicated playlist watcher."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
+
+    update_dict = {k: v for k, v in req.model_dump().items() if v is not None}
+    updated = await db.update_replicated_playlist(replicated_id, **update_dict)
+    return updated.model_dump() if updated else {}
+
+
+@app.delete("/api/replicated-playlists/{replicated_id}")
+async def delete_replicated_playlist(replicated_id: int):
+    """Delete a replicated playlist watcher configuration."""
+    deleted = await db.delete_replicated_playlist(replicated_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
+    return {"status": "ok", "message": f"Deleted replica watcher {replicated_id}"}
+
+
+@app.post("/api/replicated-playlists/{replicated_id}/sync")
+async def sync_replicated_playlist(replicated_id: int):
+    """Trigger immediate reconciliation of a replicated playlist."""
+    try:
+        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=False)
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.exception(f"Reconciliation failed for replica {replicated_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Reconciliation failed: {e}")
+
+
+@app.post("/api/replicated-playlists/{replicated_id}/dry-run")
+async def dry_run_replicated_playlist(replicated_id: int):
+    """Preview reconciliation actions (add, remove, move, exclude) without modifying YouTube Music."""
+    try:
+        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True)
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.exception(f"Dry-run failed for replica {replicated_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Dry-run failed: {e}")
+
+
+@app.get("/api/replicated-playlists/{replicated_id}/events")
+async def get_replicated_playlist_events(replicated_id: int, limit: int = 100):
+    """Get audit trail of reconciliation actions (ADD, REMOVE, MOVE, NOOP, EXCLUDE)."""
+    events = await db.get_replicated_playlist_events(replicated_id, limit=limit)
+    return events
+
+
+@app.get("/api/replicated-playlists/{replicated_id}/snapshots/latest")
+async def get_latest_playlist_snapshot(replicated_id: int):
+    """Get the most recent SourcePlaylistSnapshot for a replica (Section 4 of plan)."""
+    snapshot = await db.get_latest_replicated_playlist_snapshot(replicated_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="No snapshot found for this replicated playlist")
+    return snapshot
 
 
 def format_size(bytes_val: Optional[int | float]) -> str:
@@ -660,6 +808,27 @@ async def cancel_all_queue():
     await unified_queue_service.cancel_all()
     return {"status": "ok"}
 
+@app.post("/api/queue/jobs/{job_id}/retry-blocked")
+async def retry_blocked_queue_job(job_id: int):
+    """
+    Manually retry a BLOCKED job (Blocker 3).
+    Guarantees that retry can only occur with the original upload source ID,
+    never converting into a catalog search.
+    """
+    try:
+        updated_job = await db.retry_blocked_sync_job(job_id)
+        if not updated_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "status": "success",
+            "message": f"Job {job_id} re-queued for original upload source",
+            "job": updated_job
+        }
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    except FileNotFoundError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+
 class ResolveNeedsHelpRequest(BaseModel):
     title: str
     artist: Optional[str] = None
@@ -879,17 +1048,18 @@ async def execute_manual_file_replacement(req: FileReplaceExecuteRequest):
 
     staged = await download_upload(upload)
 
-    prev_global = settings.allow_automatic_replacement
     try:
-        settings.allow_automatic_replacement = True
         committed_file = commit_staged_file_to_destination(
             staged_file=staged,
             destination_file=local_p,
             allow_overwrite=True,
-            replacement_source_id=upload_id
+            replacement_source_id=upload_id,
+            authorized_manual_action=True
         )
+    except Exception as ex:
+        logger.error(f"Manual replacement failed: {ex}")
+        raise HTTPException(status_code=500, detail=str(ex))
     finally:
-        settings.allow_automatic_replacement = prev_global
         if staged.exists():
             try:
                 staged.unlink()

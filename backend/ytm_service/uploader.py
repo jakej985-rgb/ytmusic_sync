@@ -192,4 +192,11 @@ class UploadQueueManager:
         else:
             await db.update_sync_job(job_id, UploadStatus.VERIFIED)
 
+        # Trigger event-based reconciliation for any watched replicated playlists (Section 14 of plan)
+        try:
+            from .playlist_watcher import playlist_watcher
+            asyncio.create_task(playlist_watcher.on_new_upload_completed(str(job.source_id or job.music_file_id)))
+        except Exception as ex:
+            logger.debug(f"Could not trigger playlist watcher on upload completion: {ex}")
+
 queue_manager = UploadQueueManager()

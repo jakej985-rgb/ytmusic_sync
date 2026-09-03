@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# ytmusic-sync CLI wrapper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [ -f "${ROOT_DIR}/backend/.venv/bin/python" ]; then
+    PYTHON_BIN="${ROOT_DIR}/backend/.venv/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
+
+PYTHONPATH="${ROOT_DIR}/backend:${PYTHONPATH}" exec "${PYTHON_BIN}" -m ytm_service.cli "$@"

@@ -1,4 +1,5 @@
 import pytest
+import hashlib
 import subprocess
 from unittest.mock import patch, MagicMock
 from pathlib import Path
@@ -1005,7 +1006,7 @@ async def test_phase6_ytmusicapi_path_passes_through_unified_verification_gate(t
     dummy_direct.write_bytes(b"AUTHENTIC DIRECT STREAM FROM YTMUSICAPI")
 
     # 1. Successful verification when duration matches
-    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=dummy_direct), \
+    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=(dummy_direct, "directVid123")), \
          patch("ytm_service.audio_fingerprint.extract_audio_characteristics") as mock_extract:
         from ytm_service.audio_fingerprint import AudioCharacteristics
         mock_extract.return_value = AudioCharacteristics(
@@ -1029,7 +1030,7 @@ async def test_phase6_ytmusicapi_path_passes_through_unified_verification_gate(t
     dummy_mismatch = tmp_path / "direct_mismatch.mp3"
     dummy_mismatch.write_bytes(b"WRONG DURATION AUDIO STREAM")
 
-    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=dummy_mismatch), \
+    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=(dummy_mismatch, "directVid123")), \
          patch("ytm_service.audio_fingerprint.extract_audio_characteristics") as mock_extract:
         from ytm_service.audio_fingerprint import AudioCharacteristics
         mock_extract.return_value = AudioCharacteristics(
@@ -1049,6 +1050,161 @@ async def test_phase6_ytmusicapi_path_passes_through_unified_verification_gate(t
             )
         assert "Audio characteristic verification failed" in str(exc_info.value)
         assert not dummy_mismatch.exists(), "Staging file was not destroyed on direct ytmusicapi verification failure"
+
+
+@pytest.mark.asyncio
+async def test_blocker1_ytmusicapi_wrong_video_id_blocks_destroys_staging_preserves_local_file(tmp_path):
+    """
+    Blocker #1 Regression Test:
+    ytmusicapi returns a different video ID from the requested private upload.
+    Flow:
+      expected: tAXJ0semc4E
+      returned: PUBLIC456
+      → SOURCE_ID_MISMATCH
+      → staging destroyed
+      → local file untouched (BEFORE SHA256 == AFTER SHA256)
+    """
+    local_music = tmp_path / "music" / "Artist" / "Track.mp3"
+    local_music.parent.mkdir(parents=True, exist_ok=True)
+    local_music.write_bytes(b"ORIGINAL UNTOUCHED LOCAL FILE CONTENT 12345")
+    orig_hash = hashlib.sha256(local_music.read_bytes()).hexdigest()
+
+    staged_output = tmp_path / "staging" / "ytm_tAXJ0semc4E.mp3"
+    staged_output.parent.mkdir(parents=True, exist_ok=True)
+
+    dummy_staged = tmp_path / "staging" / "direct_download.mp3"
+    dummy_staged.write_bytes(b"AUDIO_FROM_WRONG_PUBLIC_STREAM")
+
+    # ytmusicapi returns stream accompanied by wrong videoId 'PUBLIC456'
+    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=(dummy_staged, "PUBLIC456")):
+        with pytest.raises(DownloadIntegrityError) as exc_info:
+            _download_sync(
+                video_id="tAXJ0semc4E",
+                output_path=staged_output,
+                source_type="ytm_upload"
+            )
+
+        assert "PUBLIC456" in str(exc_info.value)
+        assert "tAXJ0semc4E" in str(exc_info.value)
+        assert not dummy_staged.exists(), "Staging file was not destroyed after ytmusicapi returned wrong video ID!"
+
+    # Local music file remains byte-for-byte identical
+    after_hash = hashlib.sha256(local_music.read_bytes()).hexdigest()
+    assert orig_hash == after_hash, "Local file was modified despite source ID mismatch!"
+
+
+def test_blocker5_backup_failure_aborts_replacement_and_preserves_file(tmp_path):
+    """
+    Blocker #5 Hard Gate Test:
+    If pre-replacement backup fails or backup hash does not match original:
+    REPLACEMENT MUST ABORT IMMEDIATELY and original file must remain untouched.
+    """
+    from ytm_service.downloader import commit_staged_file_to_destination
+    from ytm_service.config import settings
+
+    music_file = tmp_path / "music" / "LocalArtist" / "Track.mp3"
+    music_file.parent.mkdir(parents=True, exist_ok=True)
+    orig_content = b"PRECIOUS IRREPLACEABLE LOCAL MASTER AUDIO"
+    music_file.write_bytes(orig_content)
+    orig_sha256 = hashlib.sha256(orig_content).hexdigest()
+
+    staged_file = tmp_path / "staging" / "incoming_update.mp3"
+    staged_file.parent.mkdir(parents=True, exist_ok=True)
+    staged_file.write_bytes(b"NEW STREAM")
+
+    backups_dir = tmp_path / "backups"
+
+    # Case A: shutil.copy2 raises error during backup creation
+    with patch.object(settings, "backups_dir", backups_dir), \
+         patch.object(settings, "allow_automatic_replacement", True), \
+         patch("shutil.copy2", side_effect=[IOError("Disk write error during backup"), None]):
+
+        with pytest.raises(RuntimeError) as exc_info:
+            commit_staged_file_to_destination(
+                staged_file=staged_file,
+                destination_file=music_file,
+                allow_overwrite=True
+            )
+        assert "Pre-replacement backup creation failed" in str(exc_info.value)
+        assert music_file.read_bytes() == orig_content, "Original file was altered when backup failed!"
+
+    # Case B: Backup file created has corrupted/different hash
+    with patch.object(settings, "backups_dir", backups_dir), \
+         patch.object(settings, "allow_automatic_replacement", True):
+
+        # Intercept copy2 to create an altered backup file
+        def fake_copy_corrupt(src, dst):
+            Path(dst).write_bytes(b"CORRUPTED BACKUP DATA")
+            return dst
+
+        with patch("shutil.copy2", side_effect=fake_copy_corrupt):
+            with pytest.raises(RuntimeError) as exc_info:
+                commit_staged_file_to_destination(
+                    staged_file=staged_file,
+                    destination_file=music_file,
+                    allow_overwrite=True
+                )
+            assert "Pre-replacement backup integrity mismatch" in str(exc_info.value)
+            assert music_file.read_bytes() == orig_content, "Original file was altered on backup hash mismatch!"
+
+
+@pytest.mark.asyncio
+async def test_blocker3_queue_blocked_terminal_automatic_retry_forbidden_manual_retry_constrained(tmp_path):
+    """
+    Blocker #3 Queue Test:
+    1. A job in BLOCKED status is ignored by get_next_queued_job() and reconcile_stuck_sync_jobs().
+    2. Manual retry via db.retry_blocked_sync_job() strictly locks to original source_id.
+    """
+    from ytm_service.database import Database
+    from ytm_service.models import MusicFile, UploadStatus
+
+    test_db_path = tmp_path / "test_queue.db"
+    db_inst = Database(db_path=test_db_path)
+    await db_inst.init_db()
+
+    mf_id = await db_inst.upsert_music_file({
+        "path": str(tmp_path / "song.mp3"),
+        "filename": "song.mp3",
+        "format": "mp3",
+        "file_size": 1000,
+        "modified_time": 1000.0,
+        "title": "Test Song",
+        "artist": "Test Artist"
+    })
+
+    # Create job in BLOCKED status
+    job_id = await db_inst.create_sync_job(
+        music_file_id=mf_id,
+        source_type="ytm_upload",
+        source_id="ORIGINAL_UPLOAD_ID_999"
+    )
+    await db_inst.update_sync_job(
+        job_id,
+        UploadStatus.BLOCKED,
+        error="Source verification failed: private upload unavailable",
+        verification_status="BLOCKED",
+        verification_reason="PRIVATE_UPLOAD_UNAVAILABLE"
+    )
+
+    # 1. Automatic worker must NEVER pick up BLOCKED job
+    next_job = await db_inst.get_next_queued_job()
+    assert next_job is None, "Automatic worker picked up a BLOCKED job!"
+
+    # 2. Reconcile on startup must NOT unblock BLOCKED job
+    await db_inst.reconcile_stuck_sync_jobs()
+    job_after = await db_inst.get_sync_job_by_id(job_id)
+    assert job_after.status == "BLOCKED"
+
+    # 3. Manual retry endpoint/method resets to queued preserving original source_id
+    re_job = await db_inst.retry_blocked_sync_job(job_id)
+    assert re_job.status == "queued"
+    assert re_job.source_id == "ORIGINAL_UPLOAD_ID_999"
+    assert re_job.source_type == "ytm_upload"
+
+    # Non-blocked job cannot be retried via retry_blocked_sync_job
+    with pytest.raises(ValueError, match="is not BLOCKED"):
+        await db_inst.retry_blocked_sync_job(job_id)
+
 
 
 

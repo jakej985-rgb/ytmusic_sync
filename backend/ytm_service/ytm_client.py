@@ -417,4 +417,85 @@ class YTMClient:
             "tracks": matched_tracks
         }
 
+    async def get_playlist_raw(self, playlist_id: str) -> dict:
+        """Fetch full raw playlist payload directly from YouTube Music."""
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _fetch_sync():
+            yt = self._get_client()
+            if playlist_id == "LM":
+                return yt.get_liked_songs(limit=None)
+            return yt.get_playlist(playlist_id, limit=None)
+
+        return await asyncio.to_thread(_fetch_sync)
+
+    async def create_playlist(
+        self,
+        title: str,
+        description: str = "",
+        privacy_status: str = "PRIVATE",
+        video_ids: Optional[list[str]] = None
+    ) -> str:
+        """Create a new playlist in YouTube Music."""
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _create_sync():
+            yt = self._get_client()
+            res = yt.create_playlist(
+                title=title,
+                description=description,
+                privacy_status=privacy_status,
+                video_ids=video_ids
+            )
+            if isinstance(res, str):
+                return res
+            if isinstance(res, dict):
+                return res.get("id") or res.get("playlistId") or ""
+            return str(res)
+
+        p_id = await asyncio.to_thread(_create_sync)
+        logger.info(f"Created YouTube Music playlist '{title}' with ID: {p_id}")
+        return p_id
+
+    async def add_playlist_items(
+        self,
+        playlist_id: str,
+        video_ids: list[str],
+        duplicates: bool = True
+    ) -> Any:
+        """Add tracks to an existing playlist in YouTube Music."""
+        if not video_ids:
+            return {"status": "ok", "added": 0}
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _add_sync():
+            yt = self._get_client()
+            return yt.add_playlist_items(playlist_id, video_ids, duplicates=duplicates)
+
+        res = await asyncio.to_thread(_add_sync)
+        logger.info(f"Added {len(video_ids)} tracks to playlist {playlist_id}")
+        return res
+
+    async def remove_playlist_items(
+        self,
+        playlist_id: str,
+        video_items: list[dict]
+    ) -> Any:
+        """Remove tracks from a playlist in YouTube Music using videoId & setVideoId."""
+        if not video_items:
+            return {"status": "ok", "removed": 0}
+        if not self.is_auth_configured():
+            raise YTMusicUserError("Not authenticated.")
+
+        def _remove_sync():
+            yt = self._get_client()
+            return yt.remove_playlist_items(playlist_id, video_items)
+
+        res = await asyncio.to_thread(_remove_sync)
+        logger.info(f"Removed {len(video_items)} tracks from playlist {playlist_id}")
+        return res
+
 ytm_client = YTMClient()

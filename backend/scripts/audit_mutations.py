@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Phase 19 — Static Filesystem Mutation & Search Audit Script
-Scans the backend codebase for filesystem mutations and dangerous search patterns
-to ensure that no operation can ever damage, overwrite, or delete a user's music file
+Scans the backend codebase using Python's tokenize module for AST-accurate
+inspection of filesystem mutations and search patterns to ensure that no
+operation can ever damage, overwrite, or delete a user's music file
 without strict integrity verification and pre-replacement backups.
 """
 
 import os
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -32,7 +34,10 @@ SAFE_CONTEXTS = [
     "backups",
     "tests",
     "raw_temp",
-    "commit_staged_file_to_destination"
+    "commit_staged_file_to_destination",
+    "legacy_log",
+    "target_log",
+    ".log"
 ]
 
 
@@ -52,19 +57,37 @@ def run_audit() -> int:
             rel_path = file_path.relative_to(BACKEND_DIR)
 
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                raw_content = f.read()
 
-            in_docstring = False
+            lines = raw_content.splitlines(keepends=True)
+
+            # Find all string and comment spans using tokenize
+            ignored_lines = set()
+            try:
+                tokens = list(tokenize.generate_tokens(iter(lines).__next__))
+                for tok in tokens:
+                    tok_type = tok.type
+                    start_row, _ = tok.start
+                    end_row, _ = tok.end
+                    # Ignore comment tokens and docstring string tokens
+                    if tok_type == tokenize.COMMENT:
+                        for r in range(start_row, end_row + 1):
+                            ignored_lines.add(r)
+                    elif tok_type == tokenize.STRING:
+                        # Check if it's a docstring or multiline comment string
+                        val = tok.string.strip()
+                        if val.startswith('"""') or val.startswith("'''"):
+                            for r in range(start_row, end_row + 1):
+                                ignored_lines.add(r)
+            except Exception:
+                pass
+
             for line_idx, line in enumerate(lines, start=1):
-                stripped = line.strip()
-                if stripped.startswith('"""') or stripped.startswith("'''"):
-                    in_docstring = not in_docstring
-                    continue
-                if in_docstring or stripped.startswith("#"):
+                if line_idx in ignored_lines:
                     continue
 
                 # Allow log file migrations
-                if "legacy_log" in line or "target_log" in line or ".log" in line:
+                if any(s in line for s in ("legacy_log", "target_log", ".log")):
                     continue
 
                 # 1. Check for forbidden ytsearch in non-catalog contexts

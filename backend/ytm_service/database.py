@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any, Union
 from .config import settings
-from .models import MusicFile, YtmUpload, MatchRecord, SyncJob, UploadStatus, MatchType
+from .models import MusicFile, YtmUpload, MatchRecord, SyncJob, UploadStatus, MatchType, ReplicatedPlaylist, ReplicatedPlaylistEvent, SourcePlaylistSnapshot, SourcePlaylistTrackSnapshot
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS music_files (
@@ -113,6 +113,44 @@ CREATE TABLE IF NOT EXISTS file_replacements (
     replacement_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS replicated_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_playlist_id TEXT NOT NULL,
+    source_playlist_name TEXT NOT NULL,
+    destination_playlist_id TEXT NOT NULL,
+    destination_playlist_name TEXT NOT NULL,
+    enabled BOOLEAN DEFAULT 1,
+    sync_interval_seconds INTEGER DEFAULT 300,
+    last_source_revision TEXT,
+    last_sync_at TIMESTAMP,
+    last_sync_status TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_playlist_id, destination_playlist_id)
+);
+
+CREATE TABLE IF NOT EXISTS replicated_playlist_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    replicated_playlist_id INTEGER NOT NULL,
+    source_track_id TEXT,
+    source_video_id TEXT,
+    locker_upload_id TEXT,
+    action TEXT NOT NULL,
+    reason TEXT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(replicated_playlist_id) REFERENCES replicated_playlists(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replicated_playlist_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    replicated_playlist_id INTEGER NOT NULL,
+    revision TEXT NOT NULL,
+    track_count INTEGER NOT NULL,
+    tracks_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(replicated_playlist_id) REFERENCES replicated_playlists(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_music_files_path ON music_files(path);
 CREATE INDEX IF NOT EXISTS idx_music_files_artist_title ON music_files(artist, title);
 CREATE INDEX IF NOT EXISTS idx_ytm_uploads_entity ON ytm_uploads(entity_id);
@@ -120,6 +158,9 @@ CREATE INDEX IF NOT EXISTS idx_matches_music_file ON matches(music_file_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_status ON sync_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_needs_help_video ON needs_help_tracks(video_id);
 CREATE INDEX IF NOT EXISTS idx_file_replacements_path ON file_replacements(original_path);
+CREATE INDEX IF NOT EXISTS idx_replicated_playlists_source ON replicated_playlists(source_playlist_id);
+CREATE INDEX IF NOT EXISTS idx_replicated_playlist_events_rep_id ON replicated_playlist_events(replicated_playlist_id);
+CREATE INDEX IF NOT EXISTS idx_replicated_playlist_snapshots_rep_id ON replicated_playlist_snapshots(replicated_playlist_id);
 """
 
 class Database:
@@ -443,7 +484,12 @@ class Database:
                 return [dict(r) for r in rows]
 
     # YTM Uploads
-    async def upsert_ytm_upload(self, upload_info: dict):
+    async def upsert_ytm_upload(self, upload_info: Union[dict, Any]):
+        if hasattr(upload_info, "model_dump"):
+            upload_info = upload_info.model_dump()
+        elif hasattr(upload_info, "dict"):
+            upload_info = upload_info.dict()
+
         now = datetime.now(timezone.utc).isoformat()
         vid = upload_info.get("video_id") or upload_info.get("upload_video_id")
         upload_url = upload_info.get("upload_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
@@ -985,6 +1031,44 @@ class Database:
                     return None
                 return self._row_to_sync_job(dict(row))
 
+    async def retry_blocked_sync_job(self, job_id: int) -> Optional[SyncJob]:
+        """
+        Manually retry a BLOCKED sync job (Blocker 3).
+        Safety Invariants:
+        - Job must currently be in BLOCKED status.
+        - Automatic workers ignore BLOCKED jobs.
+        - Manual retry strictly locks to the EXACT same original source_type and source_id.
+        - Resets status to 'queued' with attempts=0.
+        """
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM sync_jobs WHERE id = ?", (job_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise FileNotFoundError(f"Sync job {job_id} not found")
+                st = row["status"]
+                v_st = row["verification_status"] if "verification_status" in row.keys() else None
+                if st != "BLOCKED" and v_st != "BLOCKED":
+                    raise ValueError(f"Job {job_id} is not BLOCKED (current status: {st})")
+
+                orig_source_id = row["source_id"] if "source_id" in row.keys() else None
+
+            await db.execute(
+                """
+                UPDATE sync_jobs
+                SET status = 'queued',
+                    verification_status = 'PENDING',
+                    verification_reason = 'Manual retry requested by user for original source ID ' || COALESCE(source_id, ''),
+                    attempts = 0,
+                    error = NULL,
+                    completed_at = NULL
+                WHERE id = ?
+                """,
+                (job_id,)
+            )
+            await db.commit()
+        return await self.get_sync_job_by_id(job_id)
+
     async def get_sync_history(self, limit: int = 100) -> list[SyncJob]:
         async with self.get_connection() as db:
             db.row_factory = aiosqlite.Row
@@ -1226,4 +1310,171 @@ class Database:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
+    async def get_replicated_playlists(self, enabled_only: bool = False) -> list[ReplicatedPlaylist]:
+        """Fetch all configured replicated playlist watchers."""
+        query = "SELECT * FROM replicated_playlists"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY id ASC"
+        async with self.get_connection() as db:
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+                return [ReplicatedPlaylist(**dict(row)) for row in rows]
+
+    async def get_replicated_playlist(self, replicated_id: int) -> Optional[ReplicatedPlaylist]:
+        """Fetch a specific replicated playlist watcher by ID."""
+        async with self.get_connection() as db:
+            async with db.execute("SELECT * FROM replicated_playlists WHERE id = ?", (replicated_id,)) as cursor:
+                row = await cursor.fetchone()
+                return ReplicatedPlaylist(**dict(row)) if row else None
+
+    async def get_replicated_playlist_by_source_id(self, source_playlist_id: str) -> Optional[ReplicatedPlaylist]:
+        """Fetch a replicated playlist watcher by its source YouTube Music playlist ID."""
+        async with self.get_connection() as db:
+            async with db.execute("SELECT * FROM replicated_playlists WHERE source_playlist_id = ?", (source_playlist_id,)) as cursor:
+                row = await cursor.fetchone()
+                return ReplicatedPlaylist(**dict(row)) if row else None
+
+    async def create_replicated_playlist(
+        self,
+        source_playlist_id: str,
+        source_playlist_name: str,
+        destination_playlist_id: str,
+        destination_playlist_name: str,
+        enabled: bool = True,
+        sync_interval_seconds: int = 300
+    ) -> int:
+        """Create a new replicated playlist configuration."""
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO replicated_playlists (
+                    source_playlist_id, source_playlist_name,
+                    destination_playlist_id, destination_playlist_name,
+                    enabled, sync_interval_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    source_playlist_id, source_playlist_name,
+                    destination_playlist_id, destination_playlist_name,
+                    1 if enabled else 0, sync_interval_seconds
+                )
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+            return row["id"]
+
+    async def update_replicated_playlist(self, replicated_id: int, **kwargs) -> Optional[ReplicatedPlaylist]:
+        """Update fields of a replicated playlist configuration."""
+        if not kwargs:
+            return await self.get_replicated_playlist(replicated_id)
+
+        set_clauses = []
+        values = []
+        for k, v in kwargs.items():
+            if k in ("source_playlist_name", "destination_playlist_name", "last_source_revision", "last_sync_status", "last_sync_at"):
+                set_clauses.append(f"{k} = ?")
+                values.append(v)
+            elif k in ("enabled",):
+                set_clauses.append(f"{k} = ?")
+                values.append(1 if v else 0)
+            elif k in ("sync_interval_seconds",):
+                set_clauses.append(f"{k} = ?")
+                values.append(int(v))
+
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(replicated_id)
+
+        async with self.get_connection() as db:
+            await db.execute(
+                f"UPDATE replicated_playlists SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(values)
+            )
+            await db.commit()
+        return await self.get_replicated_playlist(replicated_id)
+
+    async def delete_replicated_playlist(self, replicated_id: int) -> bool:
+        """Delete a replicated playlist configuration."""
+        async with self.get_connection() as db:
+            cursor = await db.execute("DELETE FROM replicated_playlists WHERE id = ?", (replicated_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def record_replicated_playlist_event(
+        self,
+        replicated_playlist_id: int,
+        action: str,
+        source_track_id: Optional[str] = None,
+        source_video_id: Optional[str] = None,
+        locker_upload_id: Optional[str] = None,
+        reason: Optional[str] = None
+    ):
+        """Record an audit event for playlist reconciliation (ADD, REMOVE, MOVE, NOOP, EXCLUDE)."""
+        async with self.get_connection() as db:
+            await db.execute(
+                """
+                INSERT INTO replicated_playlist_events (
+                    replicated_playlist_id, source_track_id, source_video_id,
+                    locker_upload_id, action, reason
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (replicated_playlist_id, source_track_id, source_video_id, locker_upload_id, action, reason)
+            )
+            await db.commit()
+
+    async def get_replicated_playlist_events(self, replicated_playlist_id: int, limit: int = 100) -> list[dict]:
+        """Fetch audit trail events for a replicated playlist."""
+        async with self.get_connection() as db:
+            async with db.execute(
+                "SELECT * FROM replicated_playlist_events WHERE replicated_playlist_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (replicated_playlist_id, limit)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def save_replicated_playlist_snapshot(
+        self,
+        replicated_playlist_id: int,
+        revision: str,
+        tracks: list[dict]
+    ) -> int:
+        """Store source playlist snapshot (Section 4 of plan) to detect changes."""
+        tracks_json = json.dumps(tracks)
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO replicated_playlist_snapshots (
+                    replicated_playlist_id, revision, track_count, tracks_json
+                ) VALUES (?, ?, ?, ?)
+                RETURNING id
+                """,
+                (replicated_playlist_id, revision, len(tracks), tracks_json)
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+            return row["id"]
+
+    async def get_latest_replicated_playlist_snapshot(self, replicated_playlist_id: int) -> Optional[dict]:
+        """Get the most recent source playlist snapshot for a replica."""
+        async with self.get_connection() as db:
+            async with db.execute(
+                """
+                SELECT * FROM replicated_playlist_snapshots
+                WHERE replicated_playlist_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (replicated_playlist_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                data = dict(row)
+                try:
+                    data["tracks"] = json.loads(data.get("tracks_json") or "[]")
+                except Exception:
+                    data["tracks"] = []
+                return data
+
 db = Database()
+

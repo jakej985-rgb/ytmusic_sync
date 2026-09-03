@@ -165,3 +165,63 @@ class PlaylistTrackDownloadRequest(BaseModel):
 class PlaylistImportRequest(BaseModel):
     url: str
 
+
+class ReplicatedPlaylistCreate(BaseModel):
+    source_playlist_id: str
+    source_playlist_name: Optional[str] = None
+    destination_playlist_id: Optional[str] = None
+    destination_playlist_name: Optional[str] = None
+    enabled: bool = True
+    sync_interval_seconds: int = 300
+
+
+class ReplicatedPlaylistUpdate(BaseModel):
+    destination_playlist_name: Optional[str] = None
+    enabled: Optional[bool] = None
+    sync_interval_seconds: Optional[int] = None
+
+
+class ReplicatedPlaylist(BaseModel):
+    id: int
+    source_playlist_id: str
+    source_playlist_name: str
+    destination_playlist_id: str
+    destination_playlist_name: str
+    enabled: bool = True
+    sync_interval_seconds: int = 300
+    last_source_revision: Optional[str] = None
+    last_sync_at: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ReplicatedPlaylistEvent(BaseModel):
+    id: Optional[int] = None
+    replicated_playlist_id: int
+    source_track_id: Optional[str] = None
+    source_video_id: Optional[str] = None
+    locker_upload_id: Optional[str] = None
+    action: str  # ADD, REMOVE, MOVE, NOOP, EXCLUDE
+    reason: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class SourcePlaylistTrackSnapshot(BaseModel):
+    position: int
+    video_id: str
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    set_video_id: Optional[str] = None
+
+
+class SourcePlaylistSnapshot(BaseModel):
+    id: Optional[int] = None
+    replicated_playlist_id: int
+    playlist_name: str
+    revision: str
+    track_count: int
+    tracks: list[SourcePlaylistTrackSnapshot] = []
+    created_at: Optional[str] = None
+
+
