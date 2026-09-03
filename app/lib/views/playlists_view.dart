@@ -27,10 +27,22 @@ class _PlaylistsViewState extends State<PlaylistsView> {
   PlaylistSyncStatusModel? _syncStatus;
   final Set<String> _downloadingVideoIds = {};
 
+  List<ReplicatedPlaylistModel> _replicatedPlaylists = [];
+
+  ReplicatedPlaylistModel? get _currentReplicaConfig {
+    if (_selectedPlaylist == null) return null;
+    try {
+      return _replicatedPlaylists.firstWhere((r) => r.sourcePlaylistId == _selectedPlaylist!.id);
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _loadPlaylists();
+    _loadReplicatedPlaylists();
     _checkInitialSyncStatus();
   }
 
@@ -79,11 +91,22 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     _syncPollTimer = null;
   }
 
+  Future<void> _loadReplicatedPlaylists() async {
+    try {
+      final list = await apiService.fetchReplicatedPlaylists();
+      if (mounted) {
+        setState(() => _replicatedPlaylists = list);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadPlaylists() async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
+
+    _loadReplicatedPlaylists();
 
     try {
       final list = await apiService.fetchPlaylists();
@@ -315,6 +338,514 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     );
   }
 
+  Future<void> _showAllReplicasDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E28),
+        title: const Row(
+          children: [
+            Icon(Icons.sync_alt, color: Colors.tealAccent),
+            SizedBox(width: 10),
+            Text('Active Locker Replicas'),
+          ],
+        ),
+        content: SizedBox(
+          width: 500,
+          child: _replicatedPlaylists.isEmpty
+              ? const Text('No active replicas configured yet.', style: TextStyle(color: Colors.grey))
+              : ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: _replicatedPlaylists.length,
+                  separatorBuilder: (context, index) => const Divider(color: Colors.white10),
+                  itemBuilder: (ctx, idx) {
+                    final r = _replicatedPlaylists[idx];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.queue_music, color: Colors.tealAccent),
+                      title: Text(r.sourcePlaylistName, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text('Replica: ${r.destinationPlaylistName}', style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+                      trailing: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _openReplicationModal(r);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF00897B),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                        child: const Text('Manage', style: TextStyle(fontSize: 12, color: Colors.white)),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openCreateReplicaDialog(YTMPlaylist playlist) async {
+    final destNameController = TextEditingController(text: '${playlist.title} - Locker');
+    bool isCreating = false;
+    String? errorMsg;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF1E1E28),
+          title: const Row(
+            children: [
+              Icon(Icons.copy_all, color: Color(0xFF0288D1)),
+              SizedBox(width: 10),
+              Text('Create 1:1 Locker Replica'),
+            ],
+          ),
+          content: SizedBox(
+            width: 480,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0288D1).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF0288D1).withValues(alpha: 0.3)),
+                  ),
+                  child: const Text(
+                    'Creates an automated YouTube Music playlist containing ONLY songs verified in your Upload Locker, in exact 1:1 source order.',
+                    style: TextStyle(fontSize: 13, color: Colors.white70),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Source Playlist', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 4),
+                Text(
+                  playlist.title,
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 16),
+                const Text('Destination Replica Name', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 4),
+                TextField(
+                  controller: destNameController,
+                  enabled: !isCreating,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.queue_music),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Row(
+                  children: [
+                    Icon(Icons.verified, size: 16, color: Colors.tealAccent),
+                    SizedBox(width: 6),
+                    Text('Mode: Locker Only (Verified Uploads)', style: TextStyle(fontSize: 12, color: Colors.tealAccent)),
+                  ],
+                ),
+                if (isCreating) ...[
+                  const SizedBox(height: 16),
+                  const Row(
+                    children: [
+                      SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 12),
+                      Text('Creating & Reconciling replica playlist...', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    ],
+                  ),
+                ],
+                if (errorMsg != null) ...[
+                  const SizedBox(height: 12),
+                  Text(errorMsg!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: isCreating ? null : () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton.icon(
+              onPressed: isCreating
+                  ? null
+                  : () async {
+                      final destName = destNameController.text.trim();
+                      if (destName.isEmpty) return;
+
+                      setDialogState(() {
+                        isCreating = true;
+                        errorMsg = null;
+                      });
+
+                      try {
+                        final created = await apiService.createReplicatedPlaylist({
+                          'source_playlist_id': playlist.id,
+                          'source_playlist_name': playlist.title,
+                          'destination_playlist_name': destName,
+                          'enabled': true,
+                        });
+                        await apiService.syncReplicatedPlaylist(created.id);
+                        await _loadReplicatedPlaylists();
+                        if (ctx.mounted) {
+                          Navigator.pop(ctx);
+                          _openReplicationModal(created);
+                        }
+                      } catch (e) {
+                        setDialogState(() {
+                          isCreating = false;
+                          errorMsg = e.toString().replaceFirst('Exception: ', '');
+                        });
+                      }
+                    },
+              icon: const Icon(Icons.check, size: 16),
+              label: const Text('Create & Sync Replica'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0288D1),
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openReplicationModal(ReplicatedPlaylistModel replica) async {
+    bool isActionRunning = false;
+    String? actionStatus;
+    ReplicationPreviewModel? preview;
+    bool isLoadingPreview = true;
+    String? loadError;
+    bool showExcludedDetails = false;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          void fetchPreviewData() async {
+            try {
+              final p = await apiService.fetchReplicatedPlaylist(replica.id);
+              if (ctx.mounted) {
+                setModalState(() {
+                  preview = p;
+                  isLoadingPreview = false;
+                });
+              }
+            } catch (e) {
+              if (ctx.mounted) {
+                setModalState(() {
+                  loadError = e.toString().replaceFirst('Exception: ', '');
+                  isLoadingPreview = false;
+                });
+              }
+            }
+          }
+
+          if (isLoadingPreview && preview == null && loadError == null) {
+            fetchPreviewData();
+          }
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E1E28),
+            title: Row(
+              children: [
+                const Icon(Icons.sync_alt, color: Colors.tealAccent),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Playlist Replication', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      Text('1:1 Locker-Only Replica Engine', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.4)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.circle, size: 8, color: Colors.greenAccent),
+                      SizedBox(width: 6),
+                      Text('Watching', style: TextStyle(fontSize: 11, color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 540,
+              child: isLoadingPreview
+                  ? const SizedBox(
+                      height: 200,
+                      child: Center(child: CircularProgressIndicator(color: Colors.tealAccent)),
+                    )
+                  : loadError != null
+                      ? Text('Error loading replica: $loadError', style: const TextStyle(color: Colors.amberAccent))
+                      : SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Config Details (Section 23 of plan)
+                              Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF14141E),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: Colors.white10),
+                                ),
+                                child: Column(
+                                  children: [
+                                    _buildReplicaDetailRow('Source Playlist', preview!.sourcePlaylistName, Icons.queue_music),
+                                    const Divider(height: 20, color: Colors.white10),
+                                    _buildReplicaDetailRow('Locker Replica', preview!.destinationPlaylistName, Icons.cloud_done),
+                                    const Divider(height: 20, color: Colors.white10),
+                                    _buildReplicaDetailRow('Mode', 'Locker Only (1:1 Ordered)', Icons.lock),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Metrics Grid (Section 23 of plan)
+                              Row(
+                                children: [
+                                  _buildMetricCard('Source Tracks', '${preview!.sourceTracksCount}', Colors.blueAccent),
+                                  const SizedBox(width: 8),
+                                  _buildMetricCard('Locker Matches', '${preview!.desiredTracksCount}', Colors.tealAccent),
+                                  const SizedBox(width: 8),
+                                  _buildMetricCard('Excluded', '${preview!.excludedCount}', Colors.amberAccent),
+                                  const SizedBox(width: 8),
+                                  _buildMetricCard('Destination', '${preview!.desiredTracksCount}', Colors.purpleAccent),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Excluded Tracks section (Section 24 & 25 of plan)
+                              if (preview!.excludedCount > 0) ...[
+                                InkWell(
+                                  onTap: () {
+                                    setModalState(() => showExcludedDetails = !showExcludedDetails);
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.amber.withValues(alpha: 0.1),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        const Icon(Icons.info_outline, size: 16, color: Colors.amberAccent),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            '${preview!.excludedCount} tracks not uploaded to locker (excluded from replica)',
+                                            style: const TextStyle(fontSize: 12, color: Colors.amberAccent),
+                                          ),
+                                        ),
+                                        Icon(showExcludedDetails ? Icons.expand_less : Icons.expand_more, size: 18, color: Colors.amberAccent),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                if (showExcludedDetails) ...[
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    constraints: const BoxConstraints(maxHeight: 180),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF14141E),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: Colors.white10),
+                                    ),
+                                    child: ListView.builder(
+                                      shrinkWrap: true,
+                                      itemCount: preview!.excludedTracks.length,
+                                      itemBuilder: (ctx, i) {
+                                        final item = preview!.excludedTracks[i];
+                                        return ListTile(
+                                          dense: true,
+                                          visualDensity: VisualDensity.compact,
+                                          leading: const Icon(Icons.remove_circle_outline, size: 16, color: Colors.amberAccent),
+                                          title: Text('${item.artist} - ${item.title}', style: const TextStyle(fontSize: 13)),
+                                          subtitle: Text(item.humanReason, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(height: 16),
+                              ],
+
+                              if (isActionRunning) ...[
+                                Row(
+                                  children: [
+                                    const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                                    const SizedBox(width: 12),
+                                    Text(actionStatus ?? 'Processing...', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                              ],
+                            ],
+                          ),
+                        ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: isActionRunning
+                    ? null
+                    : () async {
+                        final confirm = await showDialog<bool>(
+                          context: context,
+                          builder: (c) => AlertDialog(
+                            backgroundColor: const Color(0xFF1E1E28),
+                            title: const Text('Delete Replica Configuration?'),
+                            content: const Text('This removes the watcher configuration. The destination playlist on YouTube Music will not be deleted.'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+                              ElevatedButton(
+                                onPressed: () => Navigator.pop(c, true),
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                child: const Text('Delete'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirm == true) {
+                          await apiService.deleteReplicatedPlaylist(replica.id);
+                          await _loadReplicatedPlaylists();
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          if (mounted) setState(() {});
+                        }
+                      },
+                child: const Text('Delete Config', style: TextStyle(color: Colors.redAccent)),
+              ),
+              const Spacer(),
+              TextButton(
+                onPressed: isActionRunning ? null : () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+              OutlinedButton.icon(
+                onPressed: isActionRunning
+                    ? null
+                    : () async {
+                        setModalState(() {
+                          isActionRunning = true;
+                          actionStatus = 'Running dry-run diff calculation...';
+                        });
+                        try {
+                          final res = await apiService.dryRunReplicatedPlaylist(replica.id);
+                          setModalState(() {
+                            isActionRunning = false;
+                            preview = res;
+                          });
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Dry Run Complete: ${res.actions.length} changes planned.')),
+                            );
+                          }
+                        } catch (e) {
+                          setModalState(() => isActionRunning = false);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Dry run failed: $e'), backgroundColor: Colors.redAccent),
+                            );
+                          }
+                        }
+                      },
+                icon: const Icon(Icons.preview, size: 16),
+                label: const Text('Dry Run'),
+              ),
+              ElevatedButton.icon(
+                onPressed: isActionRunning
+                    ? null
+                    : () async {
+                        setModalState(() {
+                          isActionRunning = true;
+                          actionStatus = 'Reconciling destination replica...';
+                        });
+                        try {
+                          final res = await apiService.syncReplicatedPlaylist(replica.id);
+                          await _loadReplicatedPlaylists();
+                          setModalState(() {
+                            isActionRunning = false;
+                            preview = res;
+                          });
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Locker replica reconciled successfully!'), backgroundColor: Colors.green),
+                            );
+                          }
+                        } catch (e) {
+                          setModalState(() => isActionRunning = false);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Reconcile failed: $e'), backgroundColor: Colors.redAccent),
+                            );
+                          }
+                        }
+                      },
+                icon: const Icon(Icons.sync, size: 16),
+                label: const Text('Sync Now'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00897B),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildReplicaDetailRow(String label, String value, IconData icon) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: Colors.grey[400]),
+        const SizedBox(width: 8),
+        Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+        const Spacer(),
+        Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+
+  Widget _buildMetricCard(String title, String value, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF14141E),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.2)),
+        ),
+        child: Column(
+          children: [
+            Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color)),
+            const SizedBox(height: 2),
+            Text(title, style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_selectedPlaylist != null) {
@@ -357,6 +888,18 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                 ),
                 Row(
                   children: [
+                    if (_replicatedPlaylists.isNotEmpty) ...[
+                      OutlinedButton.icon(
+                        onPressed: _showAllReplicasDialog,
+                        icon: const Icon(Icons.sync_alt, size: 16, color: Colors.tealAccent),
+                        label: Text('Locker Replicas (${_replicatedPlaylists.length})', style: const TextStyle(color: Colors.tealAccent)),
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Colors.tealAccent.withValues(alpha: 0.4)),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
                     OutlinedButton.icon(
                       onPressed: _showImportPlaylistDialog,
                       icon: const Icon(Icons.link, size: 16),
@@ -550,6 +1093,27 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                             'Playlist',
                             style: TextStyle(color: Colors.grey[500], fontSize: 12),
                           ),
+                        if (_replicatedPlaylists.any((r) => r.sourcePlaylistId == p.id)) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00897B).withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.sync, size: 10, color: Color(0xFF4DB6AC)),
+                                SizedBox(width: 3),
+                                Text(
+                                  'Replica Active',
+                                  style: TextStyle(color: Color(0xFF4DB6AC), fontSize: 10, fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],
@@ -639,6 +1203,31 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     label: Text(isSyncRunning ? 'Syncing...' : 'Download & Upload Missing ($missingFromUploadsCount)'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF8A2387),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                if (_currentReplicaConfig != null) ...[
+                  ElevatedButton.icon(
+                    onPressed: () => _openReplicationModal(_currentReplicaConfig!),
+                    icon: const Icon(Icons.sync_alt, size: 16),
+                    label: const Text('Locker Replica (Active)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00897B),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ] else ...[
+                  ElevatedButton.icon(
+                    onPressed: () => _openCreateReplicaDialog(playlist),
+                    icon: const Icon(Icons.copy_all, size: 16),
+                    label: const Text('Make Locker Replica'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0288D1),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     ),

@@ -612,6 +612,69 @@ class ApiService {
     }
     throw Exception('Failed to batch delete songs');
   }
+
+  // ---------------------------------------------------------------------------
+  // Replicated Playlists (1:1 Locker-Only Replica)
+  // ---------------------------------------------------------------------------
+
+  Future<List<ReplicatedPlaylistModel>> fetchReplicatedPlaylists({bool enabledOnly = false}) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists?enabled_only=$enabledOnly');
+    final response = await _get(uri);
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => ReplicatedPlaylistModel.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to fetch replicated playlists');
+  }
+
+  Future<ReplicationPreviewModel> fetchReplicatedPlaylist(int id) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists/$id');
+    final response = await _get(uri);
+    if (response.statusCode == 200) {
+      return ReplicationPreviewModel.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to fetch replicated playlist #$id');
+  }
+
+  Future<ReplicatedPlaylistModel> createReplicatedPlaylist(Map<String, dynamic> data) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists');
+    final response = await _post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(data),
+    );
+    if (response.statusCode == 200) {
+      return ReplicatedPlaylistModel.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to create replicated playlist: ${response.body}');
+  }
+
+  Future<ReplicationPreviewModel> syncReplicatedPlaylist(int id) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists/$id/sync');
+    final response = await _post(uri);
+    if (response.statusCode == 200) {
+      return ReplicationPreviewModel.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to sync replicated playlist #$id: ${response.body}');
+  }
+
+  Future<ReplicationPreviewModel> dryRunReplicatedPlaylist(int id) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists/$id/dry-run');
+    final response = await _post(uri);
+    if (response.statusCode == 200) {
+      return ReplicationPreviewModel.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to dry-run replicated playlist #$id: ${response.body}');
+  }
+
+  Future<void> deleteReplicatedPlaylist(int id) async {
+    final uri = Uri.parse('$baseUrl/api/replicated-playlists/$id');
+    final response = await _delete(uri);
+    if (response.statusCode != 200) {
+      throw Exception('Failed to delete replicated playlist #$id');
+    }
+  }
 }
 
 final apiService = ApiService();
+

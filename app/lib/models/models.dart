@@ -677,3 +677,119 @@ class UnifiedQueueResponse {
   }
 }
 
+class ReplicatedPlaylistModel {
+  final int id;
+  final String sourcePlaylistId;
+  final String sourcePlaylistName;
+  final String destinationPlaylistId;
+  final String destinationPlaylistName;
+  final bool enabled;
+  final int syncIntervalSeconds;
+  final String? lastSourceRevision;
+  final String? lastSyncAt;
+  final String? lastSyncStatus;
+
+  ReplicatedPlaylistModel({
+    required this.id,
+    required this.sourcePlaylistId,
+    required this.sourcePlaylistName,
+    required this.destinationPlaylistId,
+    required this.destinationPlaylistName,
+    required this.enabled,
+    required this.syncIntervalSeconds,
+    this.lastSourceRevision,
+    this.lastSyncAt,
+    this.lastSyncStatus,
+  });
+
+  factory ReplicatedPlaylistModel.fromJson(Map<String, dynamic> json) {
+    return ReplicatedPlaylistModel(
+      id: json['id'] ?? 0,
+      sourcePlaylistId: json['source_playlist_id'] ?? '',
+      sourcePlaylistName: json['source_playlist_name'] ?? '',
+      destinationPlaylistId: json['destination_playlist_id'] ?? '',
+      destinationPlaylistName: json['destination_playlist_name'] ?? '',
+      enabled: json['enabled'] ?? true,
+      syncIntervalSeconds: json['sync_interval_seconds'] ?? 300,
+      lastSourceRevision: json['last_source_revision'],
+      lastSyncAt: json['last_sync_at'],
+      lastSyncStatus: json['last_sync_status'],
+    );
+  }
+}
+
+class ExcludedTrackItem {
+  final String videoId;
+  final String title;
+  final String artist;
+  final String reason;
+  final String humanReason;
+
+  ExcludedTrackItem({
+    required this.videoId,
+    required this.title,
+    required this.artist,
+    required this.reason,
+    required this.humanReason,
+  });
+
+  factory ExcludedTrackItem.fromJson(Map<String, dynamic> json) {
+    return ExcludedTrackItem(
+      videoId: json['video_id'] ?? '',
+      title: json['title'] ?? 'Unknown',
+      artist: json['artist'] ?? 'Unknown',
+      reason: json['reason'] ?? 'NOT_PRESENT_IN_LOCKER',
+      humanReason: json['human_reason'] ?? json['reason'] ?? 'Not present in upload locker',
+    );
+  }
+}
+
+class ReplicationPreviewModel {
+  final int replicatedId;
+  final String sourcePlaylistName;
+  final String destinationPlaylistName;
+  final String? destinationPlaylistId;
+  final String? revision;
+  final int sourceTracksCount;
+  final int desiredTracksCount;
+  final int excludedCount;
+  final List<ExcludedTrackItem> excludedTracks;
+  final String status;
+  final List<dynamic> actions;
+  final bool dryRun;
+
+  ReplicationPreviewModel({
+    required this.replicatedId,
+    required this.sourcePlaylistName,
+    required this.destinationPlaylistName,
+    this.destinationPlaylistId,
+    this.revision,
+    required this.sourceTracksCount,
+    required this.desiredTracksCount,
+    required this.excludedCount,
+    required this.excludedTracks,
+    required this.status,
+    required this.actions,
+    required this.dryRun,
+  });
+
+  factory ReplicationPreviewModel.fromJson(Map<String, dynamic> json) {
+    final rawEx = json['excluded_tracks'] as List<dynamic>? ?? [];
+    return ReplicationPreviewModel(
+      replicatedId: json['replicated_id'] ?? 0,
+      sourcePlaylistName: json['source_playlist_name'] ?? '',
+      destinationPlaylistName: json['destination_playlist_name'] ?? '',
+      destinationPlaylistId: json['destination_playlist_id'],
+      revision: json['revision'],
+      sourceTracksCount: json['source_tracks_count'] ?? 0,
+      desiredTracksCount: json['desired_tracks_count'] ?? 0,
+      excludedCount: json['excluded_count'] ?? 0,
+      excludedTracks: rawEx.map((e) => ExcludedTrackItem.fromJson(e as Map<String, dynamic>)).toList(),
+      status: json['status'] ?? 'UNKNOWN',
+      actions: json['actions'] as List<dynamic>? ?? [],
+      dryRun: json['dry_run'] ?? false,
+    );
+  }
+}
+
+
