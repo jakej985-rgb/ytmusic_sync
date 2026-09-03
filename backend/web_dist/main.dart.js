@@ -7960,28 +7960,30 @@ a.h(0,"last_source_revision")
 a.h(0,"last_sync_at")
 a.h(0,"last_sync_status")
 return new A.kp(p,s,r,q)},
-aEl(a){var s,r,q,p,o,n,m=t.kc,l=m.a(a.h(0,"excluded_tracks"))
-if(l==null)l=[]
-a.h(0,"replicated_id")
-s=a.h(0,"source_playlist_name")
-if(s==null)s=""
-r=a.h(0,"destination_playlist_name")
+aEl(a){var s,r,q,p,o,n,m,l=t.P,k=l.b(a.h(0,"preview"))?l.a(a.h(0,"preview")):a
+l=t.kc
+s=l.a(k.h(0,"excluded_tracks"))
+if(s==null)s=[]
+k.h(0,"replicated_id")
+r=k.h(0,"source_playlist_name")
 if(r==null)r=""
-a.h(0,"destination_playlist_id")
-a.h(0,"revision")
-q=a.h(0,"source_tracks_count")
-if(q==null)q=0
-p=a.h(0,"desired_tracks_count")
+q=k.h(0,"destination_playlist_name")
+if(q==null)q=""
+k.h(0,"destination_playlist_id")
+k.h(0,"revision")
+p=k.h(0,"source_tracks_count")
 if(p==null)p=0
-o=a.h(0,"excluded_count")
+o=k.h(0,"desired_tracks_count")
 if(o==null)o=0
-n=J.dD(l,new A.afH(),t.Ch)
-n=A.Y(n,n.$ti.i("ah.E"))
-a.h(0,"status")
-m=m.a(a.h(0,"actions"))
-if(m==null)m=[]
-a.h(0,"dry_run")
-return new A.Pb(s,r,q,p,o,n,m)},
+n=k.h(0,"excluded_count")
+if(n==null)n=0
+m=J.dD(s,new A.afH(),t.Ch)
+m=A.Y(m,m.$ti.i("ah.E"))
+k.h(0,"status")
+l=l.a(k.h(0,"actions"))
+if(l==null)l=[]
+k.h(0,"dry_run")
+return new A.Pb(r,q,p,o,n,m,l)},
 Lt:function Lt(a,b,c,d,e,f,g,h,i,j){var _=this
 _.a=a
 _.b=b

@@ -773,7 +773,10 @@ class ReplicationPreviewModel {
     required this.dryRun,
   });
 
-  factory ReplicationPreviewModel.fromJson(Map<String, dynamic> json) {
+  factory ReplicationPreviewModel.fromJson(Map<String, dynamic> rawJson) {
+    final json = (rawJson['preview'] is Map<String, dynamic>)
+        ? rawJson['preview'] as Map<String, dynamic>
+        : rawJson;
     final rawEx = json['excluded_tracks'] as List<dynamic>? ?? [];
     return ReplicationPreviewModel(
       replicatedId: json['replicated_id'] ?? 0,

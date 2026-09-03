@@ -1373,7 +1373,7 @@ class Database:
         set_clauses = []
         values = []
         for k, v in kwargs.items():
-            if k in ("source_playlist_name", "destination_playlist_name", "last_source_revision", "last_sync_status", "last_sync_at"):
+            if k in ("destination_playlist_id", "source_playlist_name", "destination_playlist_name", "last_source_revision", "last_sync_status", "last_sync_at"):
                 set_clauses.append(f"{k} = ?")
                 values.append(v)
             elif k in ("enabled",):

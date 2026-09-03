@@ -427,10 +427,10 @@ async def get_replicated_playlist(replicated_id: int):
         logger.warning(f"Could not calculate preview for replica {replicated_id}: {e}")
         preview = None
 
-    return {
-        "config": config.model_dump(),
-        "preview": preview
-    }
+    res = dict(preview) if preview else {}
+    res["config"] = config.model_dump()
+    res["preview"] = preview
+    return res
 
 
 @app.put("/api/replicated-playlists/{replicated_id}")
