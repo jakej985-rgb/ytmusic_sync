@@ -992,6 +992,66 @@ async def test_phase14_audit_flag_and_restore_replaced_files(tmp_path, temp_db):
         assert corrupted_song.read_bytes() == original_good_content
 
 
+@pytest.mark.asyncio
+async def test_phase6_ytmusicapi_path_passes_through_unified_verification_gate(tmp_path):
+    """
+    Phase 6 / Blocker #1:
+    Verify that even if _download_via_ytmusicapi succeeds in downloading a stream,
+    it MUST pass through verify_downloaded_upload().
+    If metadata/duration verification fails, it must destroy the staging file and raise DownloadIntegrityError.
+    """
+    output_path = tmp_path / "ytm_test_file.mp3"
+    dummy_direct = tmp_path / "direct_download.mp3"
+    dummy_direct.write_bytes(b"AUTHENTIC DIRECT STREAM FROM YTMUSICAPI")
+
+    # 1. Successful verification when duration matches
+    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=dummy_direct), \
+         patch("ytm_service.audio_fingerprint.extract_audio_characteristics") as mock_extract:
+        from ytm_service.audio_fingerprint import AudioCharacteristics
+        mock_extract.return_value = AudioCharacteristics(
+            duration=200.0,
+            sample_rate=44100,
+            channels=2,
+            codec="mp3",
+            bitrate=320000
+        )
+
+        res = _download_sync(
+            video_id="directVid123",
+            output_path=output_path,
+            source_type="ytm_upload",
+            expected_metadata={"duration": 200.0}
+        )
+        assert res == dummy_direct
+        assert dummy_direct.exists()
+
+    # 2. Failed verification when duration mismatches (e.g. 200s vs 250s)
+    dummy_mismatch = tmp_path / "direct_mismatch.mp3"
+    dummy_mismatch.write_bytes(b"WRONG DURATION AUDIO STREAM")
+
+    with patch("ytm_service.downloader._download_via_ytmusicapi", return_value=dummy_mismatch), \
+         patch("ytm_service.audio_fingerprint.extract_audio_characteristics") as mock_extract:
+        from ytm_service.audio_fingerprint import AudioCharacteristics
+        mock_extract.return_value = AudioCharacteristics(
+            duration=250.0,
+            sample_rate=44100,
+            channels=2,
+            codec="mp3",
+            bitrate=320000
+        )
+
+        with pytest.raises(DownloadIntegrityError) as exc_info:
+            _download_sync(
+                video_id="directVid123",
+                output_path=output_path,
+                source_type="ytm_upload",
+                expected_metadata={"duration": 200.0}
+            )
+        assert "Audio characteristic verification failed" in str(exc_info.value)
+        assert not dummy_mismatch.exists(), "Staging file was not destroyed on direct ytmusicapi verification failure"
+
+
+
 
 
 

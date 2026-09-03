@@ -1,396 +1,538 @@
-Yes. After looking directly at the repo, I would treat this as a **data-loss bug**, not just a downloader bug.
+Absolutely. Based on the audit of the uploaded repository, I would make this the **completion plan for the Upload Integrity / No-Wrong-Track Replacement fix**, and I would put it **ahead of the final release audit**.
 
-The current `downloader.py` explicitly builds three possible sources for an upload: the YouTube watch URL, the Music watch URL, and finally a `ytsearch1:` fallback query. That fallback is exactly the kind of behavior that can turn “download my upload” into “download a similarly named public song.”
+# YTM Sync — Upload Integrity Completion Plan
 
-Your current project also explicitly says local files are not supposed to be modified or deleted, so replacing an artist's local recording with a different recording violates the intended safety model.
+**Repository:** `jakej985-rgb/ytmusic_sync`
+**Goal:** Guarantee that a private YouTube Music Upload Locker track can never be silently replaced by a different YouTube Music/catalog recording.
 
-# YTM Sync — Upload Integrity & No-Replacement Plan
-
-## Priority: CRITICAL
-
-The goal is stronger than “make the matching better.”
-
-The goal is:
-
-> **It must be impossible for an Upload Locker item to silently become a catalog track or overwrite a local file with unverified audio.**
+**Current status:** Implementation substantially present, but **release is BLOCKED** until the verification path and test suite are completed.
 
 ---
 
-## Phase 1 — Kill the dangerous fallback
+# 0. RELEASE SAFETY RULE
 
-### 1.1 Remove `ytsearch1:` from upload downloads
+This is the rule everything below is built around:
 
-Current behavior effectively permits:
+> **An Upload Locker track may only be downloaded from its exact authenticated upload source. Metadata may identify a track, but metadata can never authorize a replacement source. If the exact upload cannot be downloaded and verified, the operation must fail closed and the existing local file must remain untouched.**
+
+Therefore:
 
 ```text
-Upload ID
-   ↓
-youtube.com
-   ↓ fail
-music.youtube.com
-   ↓ fail
-ytsearch1:"Artist - Title"
-   ↓
-some matching public video
+PRIVATE UPLOAD UNAVAILABLE
+        ↓
+       FAIL
+        ↓
+NO SEARCH
+NO SUBSTITUTE
+NO REPLACEMENT
+NO DELETE
+NO RENAME
+NO OVERWRITE
 ```
 
-That last step must never exist for an Upload Locker download.
+This becomes a **non-negotiable release requirement**.
 
-For:
+---
+
+# Phase 1 — Freeze and Backup
+
+## 1.1 Stop production syncing
+
+Before making changes:
+
+```bash
+docker compose stop ytm-sync
+```
+
+Do **not** test the new code against the real music collection yet.
+
+---
+
+## 1.2 Backup the current database
+
+Back up:
+
+```text
+/config/database/ytm_sync.db
+```
+
+and the complete config directory.
+
+Example:
+
+```bash
+tar -czvf ytm_sync_pre_integrity_fix_$(date +%Y%m%d_%H%M%S).tar.gz ./config
+```
+
+---
+
+## 1.3 Preserve the currently affected files
+
+Because some local artist recordings were already replaced, create a separate list of suspicious files.
+
+Do **not** automatically rescan/reconcile them yet.
+
+They should be classified:
+
+```text
+POSSIBLY_REPLACED
+```
+
+until verified.
+
+---
+
+# Phase 2 — Establish the Current Baseline
+
+## 2.1 Verify the current commit
+
+```bash
+git checkout main
+git pull
+git status
+git rev-parse HEAD
+```
+
+Record the commit.
+
+---
+
+## 2.2 Create a working branch
+
+Use something like:
+
+```bash
+git checkout -b fix/upload-integrity
+```
+
+Do not make this work directly on `main`.
+
+---
+
+# Phase 3 — Fix the Downloader Architecture
+
+The repository currently has the critical downloader in:
+
+```text
+backend/ytm_service/downloader.py
+```
+
+along with:
+
+```text
+matcher.py
+database.py
+metadata_tracker.py
+queue_service.py
+```
+
+These are the areas that need to remain aligned.
+
+---
+
+## 3.1 Separate Upload and Catalog download APIs
+
+There should be two explicit concepts:
 
 ```python
 download_ytm_upload(...)
 ```
 
-the only legal source should be the **specific upload identity**.
+and:
 
-### 1.2 Separate upload downloading from generic YouTube downloading
-
-Create two explicit paths:
-
-```text
-download_upload(upload_record)
-download_catalog_track(catalog_record)
+```python
+download_catalog_track(...)
 ```
 
-Never:
+An Upload Locker download must never call generic catalog-resolution logic.
+
+### Upload path
 
 ```text
-download_track(...)
+Upload record
+    ↓
+exact upload ID
+    ↓
+authenticated YouTube Music
+    ↓
+download
 ```
 
-with ambiguous source semantics.
-
-An upload should carry something like:
+### Catalog path
 
 ```text
-source_type = "ytm_upload"
-source_id = <YouTube video ID>
+Catalog record
+    ↓
+catalog source
+    ↓
+YouTube/catalog resolver
 ```
 
-A catalog track should carry:
-
-```text
-source_type = "catalog"
-source_id = <catalog/video ID>
-```
-
-The downloader should reject a request when the source type is missing or contradictory.
+Never cross these paths.
 
 ---
 
-# Phase 2 — Make upload identity authoritative
+# Phase 4 — Remove All Upload Search Fallbacks
 
-## 2.1 Store the original upload identity
-
-Every Upload Locker record should permanently retain:
+Search the entire repository for:
 
 ```text
-upload_video_id
-upload_url
-source_type
+ytsearch
 ```
 
-Example:
+and:
 
 ```text
-source_type: ytm_upload
-upload_video_id: tAXJ0semc4E
-upload_url: https://www.youtube.com/watch?v=tAXJ0semc4E
+fallback_query
 ```
 
-The title/artist/album should **never be used as the source identifier**.
+and:
 
-Metadata is for matching/display.
+```text
+youtube search
+```
 
-The video ID is for identity.
+and:
+
+```text
+search1
+```
+
+Every occurrence needs to be classified.
+
+The rule:
+
+```text
+UPLOAD + SEARCH = BUG
+```
 
 ---
 
-## 2.2 Never substitute based on metadata
-
-These are insufficient to prove identity:
+## 4.1 Uploads must never execute
 
 ```text
-Artist
-Title
-Album
-Duration
-Filename
-Normalized filename
-MusicBrainz match
-YouTube search result
+ytsearch1:
+```
+
+Even if:
+
+```text
+private upload unavailable
+```
+
+Even if:
+
+```text
+title matches perfectly
+```
+
+Even if:
+
+```text
+artist matches perfectly
+```
+
+Even if:
+
+```text
+duration matches
+```
+
+Even if:
+
+```text
+MusicBrainz says it's the same song
+```
+
+It must still fail.
+
+---
+
+# Phase 5 — Make Source Identity Mandatory
+
+Every upload record needs an explicit identity:
+
+```text
+source_type = ytm_upload
+source_id = exact YouTube upload ID
 ```
 
 For example:
 
 ```text
-Local:
-Big 8 - Track Name
-
-Upload:
-Big 8 - Track Name
-
-Public YouTube:
-Big 8 - Track Name
+source_type: ytm_upload
+source_id: tAXJ0semc4E
 ```
 
-Those can all be completely different recordings.
+Do not rely on:
 
-Therefore:
+```text
+title
+artist
+album
+filename
+duration
+normalized metadata
+```
 
-> A metadata match can identify a candidate, but it can never authorize a replacement.
+as source identity.
 
 ---
 
-# Phase 3 — Fail closed on private uploads
+## 5.1 Reject ambiguous records
 
-Your current log is actually the situation we want to handle safely:
-
-```text
-Private video.
-If the owner ... has granted you access, please sign in.
-```
-
-The correct behavior should be:
+If an upload record arrives without:
 
 ```text
-UPLOAD DOWNLOAD FAILED
-Reason: private upload unavailable/authentication failure
-
-→ mark download FAILED
-→ preserve local file
-→ do not search YouTube
-→ do not download alternate source
-→ do not replace anything
+source_type
+source_id
 ```
 
-Not:
+the system should produce:
 
 ```text
-private upload failed
-     ↓
-try another YouTube source
+BLOCKED
+reason=UPLOAD_SOURCE_ID_MISSING
 ```
+
+rather than guessing.
 
 ---
 
-# Phase 4 — Add a hard source-integrity gate
+# Phase 6 — Fix the ytmusicapi Bypass
 
-Before any downloaded file is allowed anywhere near the destination:
+This is the **highest-priority code fix from the audit**.
 
-```text
-Download
-   ↓
-Verify
-   ↓
-PASS → continue
-FAIL → delete staging file
-```
-
-The verification should check the downloaded video's identity.
-
-At minimum:
+Currently there are effectively two download routes:
 
 ```text
-expected video ID
-actual extracted video ID
+ytmusicapi
 ```
 
-They must match.
+and:
 
-Conceptually:
+```text
+yt-dlp
+```
+
+The yt-dlp route has source verification.
+
+The direct ytmusicapi route can return success before the same authoritative identity verification has been applied.
+
+That creates an integrity gap.
+
+---
+
+## 6.1 Create one shared verification function
+
+For example:
 
 ```python
-if actual_video_id != expected_video_id:
-    raise DownloadIntegrityError(...)
+verify_downloaded_upload(
+    staged_file,
+    expected_source_id,
+    expected_metadata
+)
 ```
 
-A catalog result such as:
+Every download mechanism must call it.
+
+---
+
+## 6.2 Required pipeline
+
+Change:
 
 ```text
-dQw4w9WgXcQ
+ytmusicapi
+ ↓
+success
 ```
 
-must never be accepted for an upload expecting:
+to:
 
 ```text
+ytmusicapi
+ ↓
+staging
+ ↓
+source identity verification
+ ↓
+metadata verification
+ ↓
+audio integrity verification
+ ↓
+verified
+```
+
+And:
+
+```text
+yt-dlp
+ ↓
+staging
+ ↓
+source identity verification
+ ↓
+metadata verification
+ ↓
+audio integrity verification
+ ↓
+verified
+```
+
+The two paths must converge before either can return success.
+
+---
+
+# Phase 7 — Source-ID Verification
+
+For every upload:
+
+```text
+EXPECTED
 tAXJ0semc4E
 ```
 
+must be compared with:
+
+```text
+ACTUAL
+tAXJ0semc4E
+```
+
+Result:
+
+```text
+MATCH → continue
+MISMATCH → BLOCK
+```
+
+Never:
+
+```text
+MISMATCH → try another source
+```
+
 ---
 
-# Phase 5 — Never download directly to the user's music file
+## 7.1 Add explicit failure reason
 
-This is extremely important because you said it **already replaced local artist files**.
+Use something like:
 
-The pipeline needs to become:
+```text
+SOURCE_ID_MISMATCH
+```
+
+Log:
+
+```text
+expected_source_id=...
+actual_source_id=...
+```
+
+but **never expose cookies or authentication credentials**.
+
+---
+
+# Phase 8 — Staging Must Remain Mandatory
+
+The current staging architecture is good and should be retained.
+
+The sequence must be:
 
 ```text
 YouTube
-   ↓
-/staging/ytm_<upload_id>.tmp
-   ↓
-integrity validation
-   ↓
-metadata validation
-   ↓
-optional audio fingerprint validation
-   ↓
-SAFE VERIFIED FILE
-   ↓
-commit operation
-   ↓
-destination
+ ↓
+/config/staging
+ ↓
+verify
+ ↓
+commit
 ```
 
 Never:
 
 ```text
 YouTube
-   ↓
-/music/Artist/Song.mp3
+ ↓
+/music/artist/song.mp3
 ```
 
 ---
 
-# Phase 6 — Make replacement impossible by default
+# Phase 9 — Strengthen Commit Protection
 
-I would change the write policy to:
+The commit function already has overwrite protection.
 
-### Existing local file + unverified download
+Make this the permanent default:
+
+```python
+allow_overwrite=False
+```
+
+and:
+
+```python
+allow_automatic_replacement=False
+```
+
+---
+
+## 9.1 Existing destination
+
+If:
+
+```text
+/music/Artist/Song.mp3
+```
+
+already exists:
 
 ```text
 BLOCK
 ```
 
-### Existing local file + verified exact upload
-
-Still:
-
-```text
-BLOCK by default
-```
-
-unless the application has an explicit replacement operation.
-
-That gives you:
-
-```text
-NEW FILE
-    ↓
-allowed
-
-EXISTING FILE
-    ↓
-never automatically replace
-```
-
-This is much safer for your local artist recordings.
+unless the user explicitly performs a replacement operation.
 
 ---
 
-# Phase 7 — Add a three-way decision
+## 9.2 Automatic sync cannot replace
 
-Instead of simply:
-
-```text
-MATCH / NO MATCH
-```
-
-use:
-
-```text
-SAFE
-REVIEW
-BLOCKED
-```
-
-### SAFE
-
-Exact upload identity verified.
-
-```text
-expected ID == actual ID
-```
-
-### REVIEW
-
-Metadata looks compatible but identity cannot be cryptographically/authoritatively established.
-
-Example:
-
-```text
-same artist
-same title
-same duration
-different/unknown source ID
-```
-
-Do not automatically download/replace.
-
-### BLOCKED
-
-Examples:
-
-```text
-private upload inaccessible
-wrong video ID
-ytsearch fallback
-source type unknown
-download metadata mismatch
-destination already exists
-audio validation failed
-```
-
----
-
-# Phase 8 — Add audio fingerprint protection
-
-This is the second layer that I strongly recommend because of what happened to your local artists.
-
-Even if the YouTube ID is correct, compare the downloaded audio against the expected upload metadata/audio characteristics.
-
-Use:
-
-```text
-duration
-codec
-sample rate
-channels
-bitrate
-```
-
-and ideally an acoustic fingerprint such as Chromaprint/AcoustID-style fingerprinting where practical.
-
-The goal isn't to prove two encodings are byte-identical.
-
-The goal is to catch:
-
-```text
-Expected:
-Big 8 - My Track
-3:47
-
-Downloaded:
-Big 8 - My Track
-4:01
-```
-
-or an entirely different recording hidden behind similar metadata.
-
----
-
-# Phase 9 — Protect the original file
-
-Before any replacement operation:
+The normal sync worker should never be able to do:
 
 ```text
 existing file
-     ↓
+ ↓
+replace
+```
+
+Its only legal behaviors are:
+
+```text
+existing file + same verified content
+        ↓
+skip
+
+existing file + different content
+        ↓
+block/review
+```
+
+---
+
+# Phase 10 — Add Pre-Replacement Hashing
+
+Before any explicitly authorized replacement:
+
+```text
+existing file
+ ↓
 SHA-256
-     ↓
-database/history
+ ↓
+database/audit record
+ ↓
+replacement
 ```
 
 Store:
@@ -400,138 +542,268 @@ original_path
 original_sha256
 original_size
 original_mtime
-replacement_timestamp
 replacement_source_id
+replacement_timestamp
 ```
 
-Then even an authorized replacement has an audit trail.
-
-But again, my recommended default is:
-
-> **Don't automatically replace existing local files at all.**
+This gives us a recovery trail.
 
 ---
 
-# Phase 10 — Database model changes
+# Phase 11 — Metadata Verification
 
-I would add explicit source/integrity fields to the track record.
-
-Something along these lines:
+After downloading, inspect:
 
 ```text
-source_type
-source_id
-source_url
-expected_duration
-downloaded_source_id
-verified
-verification_status
-verification_reason
-original_file_hash
-downloaded_file_hash
-replacement_allowed
+title
+artist
+album
+duration
 ```
 
-And statuses:
+Compare against the Upload Locker record.
+
+But remember:
+
+> Metadata verification is a secondary check, not source identity.
+
+So:
+
+```text
+source ID = required
+metadata = additional safety
+```
+
+Not:
+
+```text
+metadata = source identity
+```
+
+---
+
+# Phase 12 — Audio Verification
+
+Run:
+
+```text
+duration
+sample rate
+channels
+codec
+file size
+```
+
+against expected values where available.
+
+Flag suspicious differences.
+
+Example:
+
+```text
+Expected: 3:47
+Downloaded: 4:12
+```
+
+→
+
+```text
+BLOCKED
+AUDIO_METADATA_MISMATCH
+```
+
+---
+
+## 12.1 Optional stronger protection
+
+Add an acoustic fingerprint where practical.
+
+This isn't required to establish the YouTube upload identity, but it provides another defense against accidentally accepting a different recording.
+
+---
+
+# Phase 13 — Formal Download State Machine
+
+Do not allow a simple:
+
+```text
+downloaded = true
+```
+
+state.
+
+Use:
 
 ```text
 PENDING
+   ↓
 DOWNLOADING
+   ↓
 VERIFYING
+   ↓
 VERIFIED
-REVIEW_REQUIRED
+   ↓
+COMMITTED
+```
+
+Failure paths:
+
+```text
+DOWNLOADING
+    ↓
 FAILED
+```
+
+or:
+
+```text
+VERIFYING
+    ↓
 BLOCKED
 ```
 
-This also makes your Sync History much more useful.
+or:
+
+```text
+VERIFYING
+    ↓
+REVIEW_REQUIRED
+```
 
 ---
 
-# Phase 11 — Logging needs to become explicit
+# Phase 14 — Define Block Reasons
 
-Instead of:
+Standardize them.
+
+At minimum:
 
 ```text
-Downloading audio via ...
+UPLOAD_SOURCE_ID_MISSING
+PRIVATE_UPLOAD_UNAVAILABLE
+AUTHENTICATION_FAILED
+SOURCE_ID_MISMATCH
+METADATA_MISMATCH
+AUDIO_DURATION_MISMATCH
+AUDIO_INTEGRITY_FAILED
+DESTINATION_EXISTS
+AUTOMATIC_REPLACEMENT_DISABLED
+CATALOG_FALLBACK_BLOCKED
+DOWNLOAD_FAILED
 ```
 
-log:
+This makes troubleshooting much easier.
+
+---
+
+# Phase 15 — Logging Requirements
+
+For every upload:
+
+### Start
 
 ```text
 UPLOAD DOWNLOAD START
 source_type=ytm_upload
-expected_video_id=tAXJ0semc4E
+source_id=XXXXXXXX
 ```
 
-Then:
+### Success
 
 ```text
-UPLOAD DOWNLOAD SUCCESS
-expected_video_id=tAXJ0semc4E
-actual_video_id=tAXJ0semc4E
+UPLOAD DOWNLOAD VERIFIED
+source_id=XXXXXXXX
 verification=PASS
 ```
 
-Or:
+### Private failure
 
 ```text
 UPLOAD DOWNLOAD BLOCKED
-expected_video_id=tAXJ0semc4E
-actual_video_id=<different ID>
+source_id=XXXXXXXX
+reason=PRIVATE_UPLOAD_UNAVAILABLE
+catalog_fallback=DISABLED
+```
+
+### Wrong source
+
+```text
+UPLOAD DOWNLOAD BLOCKED
+expected_source_id=XXXXXXXX
+actual_source_id=YYYYYYYY
 reason=SOURCE_ID_MISMATCH
 ```
 
-Most importantly, when authentication fails:
+### Existing file
 
 ```text
-UPLOAD DOWNLOAD BLOCKED
-reason=PRIVATE_UPLOAD_UNAVAILABLE
-fallback_search=DISABLED
-replacement=DISABLED
+COMMIT BLOCKED
+destination_exists=true
+automatic_replacement=false
 ```
 
-That will make the problem obvious instead of hiding it behind retries.
+Never log:
+
+```text
+cookies
+Authorization headers
+session tokens
+```
 
 ---
 
-# Phase 12 — Add regression tests specifically for your failure
+# Phase 16 — Regression Test Suite
 
-This should become a mandatory test suite.
+This is where the current repository needs work because the audit found that pytest currently fails during collection because of the missing `aiosqlite` dependency.
 
-### Test A — private upload
+First fix the test environment.
 
-```text
-private upload
-↓
-authentication failure
-↓
-download fails
-↓
-NO catalog search
-↓
-NO file replacement
+Then run:
+
+```bash
+pytest -q tests/test_upload_integrity.py
 ```
 
-### Test B — same artist/title
+---
+
+# Phase 17 — Mandatory Test Cases
+
+## Test 1 — Private upload inaccessible
 
 ```text
-private upload = Artist A / Song X
-public YouTube = Artist A / Song X
-
-upload inaccessible
-↓
-must NOT choose public video
+Upload ID = ABC123
+Authentication = fails
 ```
 
-### Test C — wrong video ID
-
-Mock:
+Expected:
 
 ```text
-expected=tAXJ0semc4E
-actual=different123
+FAILED/BLOCKED
 ```
+
+and:
+
+```text
+ytsearch = NEVER CALLED
+```
+
+---
+
+## Test 2 — Same artist/title public video exists
+
+This is the **critical artist-protection test**.
+
+```text
+Private upload:
+Artist X - Track A
+ID = PRIVATE123
+
+Public video:
+Artist X - Track A
+ID = PUBLIC456
+```
+
+Private upload fails.
 
 Expected:
 
@@ -539,174 +811,683 @@ Expected:
 BLOCKED
 ```
 
-### Test D — existing local file
+NOT:
 
 ```text
-destination exists
-download verified
+PUBLIC456 downloaded
+```
+
+---
+
+# Test 3 — Wrong source ID
+
+Expected:
+
+```text
+expected=PRIVATE123
+actual=PUBLIC456
+
+→ SOURCE_ID_MISMATCH
+→ BLOCK
+```
+
+---
+
+# Test 4 — Existing local file
+
+```text
+/music/Artist/Track.mp3
+```
+
+already exists.
+
+Sync runs.
+
+Expected:
+
+```text
+original SHA256 unchanged
+```
+
+---
+
+# Test 5 — ytmusicapi path
+
+Mock ytmusicapi returning an incorrect source.
+
+Expected:
+
+```text
+verification fails
+```
+
+This test specifically closes the audit finding.
+
+---
+
+# Test 6 — yt-dlp path
+
+Mock yt-dlp returning the wrong video.
+
+Expected:
+
+```text
+SOURCE_ID_MISMATCH
+```
+
+---
+
+# Test 7 — No `ytsearch` execution
+
+Patch/mock the search invocation.
+
+Run:
+
+```text
+download_ytm_upload(...)
+```
+
+Assert:
+
+```text
+ytsearch1 was never invoked
+```
+
+---
+
+# Test 8 — Catalog tracks still work
+
+This is important.
+
+We don't want to break legitimate catalog downloads.
+
+Verify:
+
+```text
+source_type=catalog
+```
+
+can still use its intended resolver/search behavior.
+
+So:
+
+```text
+Upload → strict
+Catalog → normal
+```
+
+---
+
+# Test 9 — Staging failure
+
+Force:
+
+```text
+staging write failure
 ```
 
 Expected:
 
 ```text
-original preserved
-automatic replacement blocked
-```
-
-### Test E — search fallback
-
-Explicitly assert:
-
-```text
-download_ytm_upload()
-```
-
-can never invoke:
-
-```text
-ytsearch1:
+destination unchanged
 ```
 
 ---
 
-# Phase 13 — Add a global safety switch
+# Test 10 — Verification failure
 
-I would add:
+Download a bad file.
 
-```env
-YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT=false
-```
-
-and make `false` the permanent default.
-
-Even better:
+Expected:
 
 ```text
-Automatic replacement:
-OFF
-```
-
-in Settings.
-
-Then an explicit manual action could eventually allow:
-
-```text
-Replace Existing File
-```
-
-with a confirmation showing:
-
-```text
-LOCAL FILE
-/path/to/song.mp3
-SHA256: ...
-
-NEW SOURCE
-YouTube Upload ID: tAXJ0semc4E
-
-VERIFICATION
-✓ Upload ID matches
-✓ Duration matches
-✓ Audio validation passed
+staging file removed/quarantined
+destination unchanged
 ```
 
 ---
 
-# Phase 14 — Repair the files that were already replaced
+# Phase 18 — Run Full Test Suite
 
-Before we call this fixed, I would add a recovery procedure.
+Once the targeted tests pass:
 
-The database/history should tell us:
-
-```text
-original path
-replacement date
-replacement source
+```bash
+pytest -q
 ```
 
-Then we can identify suspicious replacements caused by the bad downloader behavior.
-
-Don't let the new code simply rescan those files and assume they're correct.
-
-They need to be treated as:
+Do not proceed if:
 
 ```text
-POSSIBLY CORRUPTED / REPLACED
+collection errors
 ```
 
-until verified.
+or:
+
+```text
+test failures
+```
+
+remain.
+
+Release requirement:
+
+```text
+0 collection errors
+0 failures
+```
 
 ---
 
-# Phase 15 — Change the architecture
+# Phase 19 — Static Source Audit
 
-The final architecture should be:
+Search the complete repository for dangerous operations:
 
-```text
-             ┌───────────────────┐
-             │   Upload Locker   │
-             └─────────┬─────────┘
-                       │
-                 exact upload ID
-                       │
-                       ▼
-              ┌─────────────────┐
-              │ Upload Downloader│
-              └────────┬────────┘
-                       │
-                 authenticated
-                       │
-              ┌────────▼────────┐
-              │     Staging      │
-              └────────┬────────┘
-                       │
-                 identity check
-                       │
-                 metadata check
-                       │
-                 audio check
-                       │
-                 ┌─────▼─────┐
-                 │   SAFE?   │
-                 └─────┬─────┘
-                    YES│NO
-                       │
-              ┌────────▼───┐
-              │  Commit    │       BLOCK
-              │  / Copy    │        │
-              └────────────┘        ▼
-                                Preserve
-                                original
+```bash
+grep -R "ytsearch" backend/
+grep -R "unlink" backend/
+grep -R "os.remove" backend/
+grep -R "os.replace" backend/
+grep -R "shutil.move" backend/
+grep -R "shutil.copy" backend/
+grep -R "rename" backend/
+grep -R "overwrite" backend/
 ```
 
-## Release gate
+Every occurrence must be reviewed.
 
-I would **not consider YTM Sync ready for release** until these are all true:
+The question for every filesystem mutation is:
+
+> Can this operation ever affect a user's existing music file without an explicit verified authorization?
+
+If yes:
+
+**BLOCK RELEASE.**
+
+---
+
+# Phase 20 — Real Test Library
+
+Create a completely isolated test library:
 
 ```text
-[x] Upload downloads never use ytsearch
-[x] Upload source identity is stored separately from metadata
-[x] Private-upload failure is fail-closed
-[x] Download occurs only in staging
-[x] Downloaded source ID is verified
-[x] Existing files cannot be automatically overwritten
-[x] Replacement requires explicit authorization
-[x] Original SHA-256 is recorded before replacement
-[x] Wrong-source regression tests exist
-[x] Same-title/local-artist test exists
-[x] Private-upload authentication-failure test exists
-[x] Sync history records why a download was accepted/rejected
-[x] Previously replaced files are audited
+/test-music/
+    Artist A/
+    Artist B/
+    Local Artist/
 ```
 
-### Most important change
+Put intentionally similar recordings inside.
 
-The single rule I would put at the top of the codebase is:
+Example:
 
-> **An Upload Locker item may only be downloaded from its exact authenticated upload source. Metadata may never be used to find a replacement source. If the exact source cannot be downloaded, the operation fails and the existing local file remains untouched.**
+```text
+Artist A - Song.mp3
+Local Artist - Song.mp3
+Local Artist - Song (Live).mp3
+```
 
-That is the rule that would have prevented the local artists' files from being replaced.
+Also create files with identical:
 
-The repo already has a dedicated `downloader.py`, `matcher.py`, `database.py`, `metadata_tracker.py`, and `queue_service.py`, so this can be implemented as a contained integrity hardening effort rather than rewriting the whole application.
+```text
+artist
+title
+album
+```
 
-I would make this **Phase 0 of the final release audit**, ahead of the other release-hardening work in your existing `plan.md`.
+but different audio.
+
+This simulates the exact problem that occurred.
+
+---
+
+# Phase 21 — Real YouTube Test Accounts/Tracks
+
+Do not use your primary artist collection initially.
+
+Test with:
+
+```text
+public catalog track
+private upload
+duplicate title
+duplicate artist/title
+different recording
+```
+
+Test the following:
+
+### Case A
+
+Exact upload available:
+
+```text
+PASS
+```
+
+### Case B
+
+Exact upload unavailable:
+
+```text
+BLOCK
+```
+
+### Case C
+
+Same-title public track exists:
+
+```text
+BLOCK
+```
+
+### Case D
+
+Wrong source returned:
+
+```text
+BLOCK
+```
+
+### Case E
+
+Existing local file:
+
+```text
+PRESERVE
+```
+
+---
+
+# Phase 22 — Verify No File Changes
+
+Before every test:
+
+```bash
+sha256sum /test-music/**/*
+```
+
+After every test:
+
+```bash
+sha256sum /test-music/**/*
+```
+
+Compare the results.
+
+For all failed/blocked downloads:
+
+```text
+BEFORE HASH == AFTER HASH
+```
+
+must be true.
+
+This is the most important physical safety validation.
+
+---
+
+# Phase 23 — Recovery Audit for Already-Replaced Files
+
+Once the new system is proven safe, investigate the files affected by the previous bug.
+
+For each:
+
+```text
+local path
+database record
+sync history
+previous source ID
+timestamp
+SHA-256
+```
+
+Determine:
+
+```text
+VERIFIED
+POSSIBLY WRONG
+UNKNOWN
+```
+
+Do **not** automatically overwrite questionable files during recovery.
+
+---
+
+# Phase 24 — UI Safety
+
+The UI should make blocked downloads obvious.
+
+Instead of:
+
+```text
+Download failed
+```
+
+show:
+
+```text
+Upload unavailable
+
+This track was NOT replaced because the exact
+YouTube Music upload could not be verified.
+
+Reason:
+Private upload authentication failed.
+
+Local file:
+PRESERVED
+```
+
+For source mismatch:
+
+```text
+Download blocked
+
+Expected upload:
+XXXXXXXX
+
+Received:
+YYYYYYYY
+
+Local file:
+PRESERVED
+```
+
+This is especially important because the application is supposed to protect people's collections.
+
+---
+
+# Phase 25 — Sync Queue Safety
+
+The queue must understand:
+
+```text
+BLOCKED
+```
+
+as a terminal state until manually retried.
+
+It must **not** automatically retry using another source.
+
+Bad:
+
+```text
+upload failed
+ ↓
+catalog fallback
+```
+
+Good:
+
+```text
+upload failed
+ ↓
+BLOCKED
+ ↓
+wait for authentication/user action
+```
+
+---
+
+# Phase 26 — Database Migration
+
+If the schema needs additional fields, add a proper migration.
+
+Potential fields:
+
+```text
+source_type
+source_id
+verification_status
+verification_reason
+verified_source_id
+original_sha256
+replacement_timestamp
+```
+
+Do not destroy existing sync history.
+
+Run migration tests against a copy of a real database.
+
+---
+
+# Phase 27 — Docker Verification
+
+Build clean:
+
+```bash
+docker compose build --no-cache
+```
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+Check:
+
+```bash
+docker compose ps
+docker compose logs -f ytm-sync
+```
+
+Then verify:
+
+```text
+yt-dlp
+ffmpeg
+ytmusicapi
+authentication
+database
+staging
+```
+
+all work inside the actual container.
+
+---
+
+# Phase 28 — Production Dry Run
+
+Before enabling writes:
+
+```text
+DOWNLOAD
+   ↓
+VERIFY
+   ↓
+REPORT
+```
+
+but:
+
+```text
+NO COMMIT
+```
+
+Run against the real library in **dry-run mode**.
+
+The application should tell us:
+
+```text
+23 uploads
+19 verified
+2 blocked
+2 review
+0 replacements
+```
+
+Nothing should change on disk.
+
+---
+
+# Phase 29 — Controlled Production Test
+
+Pick **one expendable test track**.
+
+Run:
+
+```text
+1 upload
+ ↓
+download
+ ↓
+verify
+ ↓
+commit
+```
+
+Verify:
+
+```text
+source ID
+metadata
+duration
+file hash
+destination
+database
+sync history
+```
+
+Then stop the sync worker.
+
+---
+
+# Phase 30 — Final Production Validation
+
+Only after the one-track test succeeds:
+
+```text
+5 tracks
+ ↓
+verify
+ ↓
+10 tracks
+ ↓
+verify
+ ↓
+full collection
+```
+
+Do not jump immediately from one test to the entire artist library.
+
+---
+
+# Phase 31 — Final Release Gate
+
+The release cannot be marked ready until every item below is true.
+
+```text
+UPLOAD INTEGRITY
+[x] Exact upload ID stored
+[x] Upload source type explicit
+[x] Missing source ID blocks download
+[x] Private upload failure blocks download
+[x] Upload cannot invoke ytsearch
+[x] Catalog fallback impossible for uploads
+[x] ytmusicapi path verifies source identity
+[x] yt-dlp path verifies source identity
+[x] Metadata verification works
+[x] Audio integrity verification works
+
+FILE SAFETY
+[x] Downloads use staging
+[x] Existing files protected
+[x] Automatic replacement disabled
+[x] Failed downloads cannot reach destination
+[x] Verification failures cannot reach destination
+[x] Original hashes recorded before authorized replacement
+[x] No unapproved delete
+[x] No unapproved rename
+[x] No unapproved overwrite
+
+QUEUE SAFETY
+[x] Failed upload becomes BLOCKED
+[x] Retry does not change source
+[x] Retry cannot become catalog search
+[x] Authentication failure waits for correction
+
+TESTING
+[x] aiosqlite/dependencies fixed
+[x] upload integrity tests collect
+[x] upload integrity tests pass
+[x] ytmusicapi verification test passes
+[x] wrong-source test passes
+[x] same-title artist test passes
+[x] existing-file test passes
+[x] no-search test passes
+[x] full pytest suite passes
+[x] Docker test passes
+[x] dry-run passes
+
+PRODUCTION
+[x] isolated test library passes
+[x] one-track real test passes
+[x] five-track test passes
+[x] real collection dry-run passes
+[x] no unexpected file modifications
+```
+
+---
+
+# Recommended implementation order
+
+Don't tackle all 31 phases simultaneously.
+
+Use this exact order:
+
+```text
+1. Freeze production
+        ↓
+2. Fix aiosqlite/test environment
+        ↓
+3. Fix ytmusicapi verification
+        ↓
+4. Make source identity mandatory
+        ↓
+5. Eliminate upload search/fallback paths
+        ↓
+6. Harden commit/overwrite protection
+        ↓
+7. Add/fix regression tests
+        ↓
+8. Run targeted tests
+        ↓
+9. Run entire test suite
+        ↓
+10. Static filesystem mutation audit
+        ↓
+11. Docker rebuild
+        ↓
+12. Isolated test library
+        ↓
+13. Real one-track test
+        ↓
+14. Small production batch
+        ↓
+15. Full dry-run
+        ↓
+16. Final release audit
+        ↓
+17. Release
+```
+
+## 🚨 The three hard blockers
+
+If we're prioritizing, these are the three things I would **not compromise on**:
+
+### BLOCKER #1
+
+**The ytmusicapi direct-download path must go through the same source verification as yt-dlp.**
+
+### BLOCKER #2
+
+**An Upload Locker failure must never invoke `ytsearch`, metadata search, or catalog substitution.**
+
+### BLOCKER #3
+
+**An existing local file must remain byte-for-byte unchanged when an upload download fails, is mismatched, or cannot be verified.**
+
+If those three are proven with automated tests, the specific failure that replaced your local artists' recordings becomes dramatically harder to reintroduce.
+
+The existing repository already has much of the foundation for this—particularly staging, source tracking, overwrite controls, and integrity tests—so I would **finish and verify this implementation rather than redesign the whole application**.

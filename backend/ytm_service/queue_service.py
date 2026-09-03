@@ -51,10 +51,17 @@ class UnifiedQueueService:
         for job in recent_sync_jobs:
             if job.id in seen_job_ids:
                 continue
-            if job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED, UploadStatus.FAILED):
+            if job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED, UploadStatus.FAILED, UploadStatus.BLOCKED) or getattr(job, "verification_status", None) == "BLOCKED":
                 mf = job.music_file
-                st = "completed" if job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED) else "failed"
-                step = "Uploaded to YouTube Music locker" if st == "completed" else f"Upload failed: {job.error or 'Unknown error'}"
+                if job.status == UploadStatus.BLOCKED or getattr(job, "verification_status", None) == "BLOCKED":
+                    st = "blocked"
+                    step = f"Download blocked: {job.verification_reason or job.error or 'Upload unavailable'} — local file PRESERVED"
+                elif job.status in (UploadStatus.UPLOADED, UploadStatus.VERIFIED):
+                    st = "completed"
+                    step = "Uploaded to YouTube Music locker"
+                else:
+                    st = "failed"
+                    step = f"Upload failed: {job.error or 'Unknown error'}"
                 local_items.append({
                     "id": f"local_job_{job.id}",
                     "category": "local_upload",
@@ -66,7 +73,7 @@ class UnifiedQueueService:
                     "current_step": step,
                     "source": "Local Music Library",
                     "created_at": job.completed_at or job.started_at,
-                    "error": job.error
+                    "error": job.error or job.verification_reason
                 })
                 seen_job_ids.add(job.id)
 

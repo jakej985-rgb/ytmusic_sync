@@ -135,11 +135,76 @@ def _download_via_ytmusicapi(video_id: str, output_path: Path) -> Optional[Path]
     return None
 
 
+def verify_downloaded_upload(
+    staged_file: Path,
+    expected_source_id: str,
+    actual_source_id: Optional[str] = None,
+    expected_metadata: Optional[Dict[str, Any]] = None
+) -> Path:
+    """
+    Phase 6 Unified Verification Gate:
+    Applies authoritative source-integrity, metadata, and audio checks across ALL download paths
+    (both direct ytmusicapi and yt-dlp). Neither path can return success without passing this gate.
+    If any check fails, the staging file is destroyed immediately and DownloadIntegrityError is raised.
+    """
+    if not staged_file.exists() or staged_file.stat().st_size == 0:
+        raise DownloadIntegrityError(f"Staged file missing or empty: {staged_file}")
+
+    verified_id = actual_source_id or expected_source_id
+    if verified_id != expected_source_id:
+        logger.error(
+            f"UPLOAD DOWNLOAD BLOCKED\n"
+            f"expected_video_id={expected_source_id}\n"
+            f"actual_video_id={verified_id}\n"
+            f"reason=SOURCE_ID_MISMATCH"
+        )
+        try:
+            staged_file.unlink()
+        except Exception:
+            pass
+        raise DownloadIntegrityError(
+            f"Download integrity verification failed: expected video ID '{expected_source_id}', "
+            f"but received '{verified_id}'. Staging file destroyed."
+        )
+
+    if expected_metadata:
+        exp_duration = expected_metadata.get("duration")
+        if exp_duration is not None and exp_duration > 0:
+            from .audio_fingerprint import verify_audio_integrity, AudioFingerprintMismatchError
+            try:
+                verify_audio_integrity(staged_file, expected_duration=exp_duration)
+            except AudioFingerprintMismatchError as ex:
+                logger.error(
+                    f"UPLOAD DOWNLOAD BLOCKED\n"
+                    f"expected_video_id={expected_source_id}\n"
+                    f"reason=AUDIO_FINGERPRINT_MISMATCH\n"
+                    f"details={ex}"
+                )
+                try:
+                    staged_file.unlink()
+                except Exception:
+                    pass
+                raise DownloadIntegrityError(
+                    f"Audio characteristic verification failed for {expected_source_id}: {ex}. Staging file destroyed."
+                )
+
+    logger.info(
+        f"UPLOAD DOWNLOAD SUCCESS\n"
+        f"UPLOAD DOWNLOAD VERIFIED\n"
+        f"expected_video_id={expected_source_id}\n"
+        f"actual_video_id={verified_id}\n"
+        f"source_id={expected_source_id}\n"
+        f"verification=PASS"
+    )
+    return staged_file
+
+
 def _download_sync(
     video_id: str,
     output_path: Path,
     fallback_query: Optional[str] = None,
-    source_type: str = "ytm_upload"
+    source_type: str = "ytm_upload",
+    expected_metadata: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
     Download audio stream.
@@ -172,13 +237,15 @@ def _download_sync(
         direct_file = _download_via_ytmusicapi(clean_id, output_path)
         if direct_file and direct_file.exists() and direct_file.stat().st_size > 0:
             if source_type == "ytm_upload":
-                logger.info(
-                    f"UPLOAD DOWNLOAD SUCCESS\n"
-                    f"expected_video_id={clean_id}\n"
-                    f"actual_video_id={clean_id}\n"
-                    f"verification=PASS"
+                return verify_downloaded_upload(
+                    staged_file=direct_file,
+                    expected_source_id=clean_id,
+                    actual_source_id=clean_id,
+                    expected_metadata=expected_metadata
                 )
             return direct_file
+    except DownloadIntegrityError:
+        raise
     except Exception as e:
         logger.debug(f"Direct ytmusicapi stream failed: {e}")
 
@@ -294,30 +361,12 @@ def _download_sync(
                             final_file = candidates[0]
 
                     if final_file.exists() and final_file.stat().st_size > 0:
-                        # HARD SOURCE-INTEGRITY GATE:
-                        # Ensure the downloaded audio comes from the exact expected video ID.
-                        if actual_video_id != clean_id:
-                            logger.error(
-                                f"UPLOAD DOWNLOAD BLOCKED\n"
-                                f"expected_video_id={clean_id}\n"
-                                f"actual_video_id={actual_video_id}\n"
-                                f"reason=SOURCE_ID_MISMATCH"
-                            )
-                            try:
-                                final_file.unlink()
-                            except Exception:
-                                pass
-                            raise DownloadIntegrityError(
-                                f"Download integrity verification failed: expected video ID '{clean_id}', "
-                                f"but received '{actual_video_id}'. Staging file destroyed."
-                            )
-
                         if source_type == "ytm_upload":
-                            logger.info(
-                                f"UPLOAD DOWNLOAD SUCCESS\n"
-                                f"expected_video_id={clean_id}\n"
-                                f"actual_video_id={actual_video_id}\n"
-                                f"verification=PASS"
+                            return verify_downloaded_upload(
+                                staged_file=final_file,
+                                expected_source_id=clean_id,
+                                actual_source_id=actual_video_id,
+                                expected_metadata=expected_metadata
                             )
                         logger.info(f"Successfully downloaded {target_url} to {final_file} ({final_file.stat().st_size} bytes, verified ID={actual_video_id})")
                         return final_file
@@ -477,16 +526,23 @@ async def download_upload(
     staging_dir.mkdir(parents=True, exist_ok=True)
     target_base = staging_dir / f"ytm_{video_id}"
 
-    logger.info(f"UPLOAD DOWNLOAD START source_type={source_type} expected_video_id={video_id}")
-    staged_file = await asyncio.to_thread(_download_sync, video_id, target_base, None, "ytm_upload")
-
-    # Audio Fingerprint / Characteristic Protection (Phase 8)
-    expected_duration = None
+    # Extract metadata for verification gate
+    expected_metadata = None
     if isinstance(upload_record, dict):
-        expected_duration = upload_record.get("duration")
+        expected_metadata = upload_record
+    elif hasattr(upload_record, "model_dump"):
+        expected_metadata = upload_record.model_dump()
+    elif hasattr(upload_record, "dict"):
+        expected_metadata = upload_record.dict()
     else:
-        expected_duration = getattr(upload_record, "duration", None)
+        expected_metadata = {"duration": getattr(upload_record, "duration", None)}
 
+    logger.info(f"UPLOAD DOWNLOAD START source_type={source_type} expected_video_id={video_id}")
+    staged_file = await asyncio.to_thread(
+        _download_sync, video_id, target_base, None, "ytm_upload", expected_metadata
+    )
+
+    expected_duration = expected_metadata.get("duration") if expected_metadata else None
     if expected_duration is not None and expected_duration > 0:
         from .audio_fingerprint import verify_audio_integrity, AudioFingerprintMismatchError
         try:
