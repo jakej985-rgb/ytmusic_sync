@@ -328,6 +328,7 @@ class PlaylistReplicatorService:
                 description=ownership_desc
             )
             await db.update_replicated_playlist(replicated_id, destination_playlist_id=dest_id)
+            config.destination_playlist_id = dest_id
 
         # 5. Calculate diff
         diff = calculate_reconciliation_diff(current_dest_tracks, desired_tracks)
@@ -354,9 +355,13 @@ class PlaylistReplicatorService:
             # B. If reordering was needed or destination had complete drift:
             # If current remaining does not match desired sequence, sync desired items
             if diff["reordered"]:
-                # Re-fetch after removals
-                updated_dest = await ytm_client.get_playlist_raw(dest_id)
-                curr_remaining = updated_dest.get("tracks", [])
+                # Re-fetch after removals only if destination originally had items
+                if current_dest_tracks:
+                    updated_dest = await ytm_client.get_playlist_raw(dest_id)
+                    curr_remaining = updated_dest.get("tracks", [])
+                else:
+                    curr_remaining = []
+
                 curr_remaining_vids = [t.get("videoId") for t in curr_remaining]
                 desired_vids = [t["video_id"] for t in desired_tracks]
 

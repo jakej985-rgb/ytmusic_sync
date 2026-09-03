@@ -426,7 +426,15 @@ class YTMClient:
             yt = self._get_client()
             if playlist_id == "LM":
                 return yt.get_liked_songs(limit=None)
-            return yt.get_playlist(playlist_id, limit=None)
+            try:
+                return yt.get_playlist(playlist_id, limit=None)
+            except Exception as e:
+                err_msg = str(e).lower()
+                # Empty or newly created playlists raise KeyError contents or sectionListRenderer
+                if "contents" in err_msg or "sectionlistrenderer" in err_msg:
+                    logger.info(f"Playlist {playlist_id} is empty or has no contents renderer yet.")
+                    return {"id": playlist_id, "title": "", "tracks": []}
+                raise
 
         return await asyncio.to_thread(_fetch_sync)
 
@@ -465,37 +473,52 @@ class YTMClient:
         video_ids: list[str],
         duplicates: bool = True
     ) -> Any:
-        """Add tracks to an existing playlist in YouTube Music."""
+        """Add tracks to an existing playlist in YouTube Music, batching in safe chunks."""
         if not video_ids:
             return {"status": "ok", "added": 0}
         if not self.is_auth_configured():
             raise YTMusicUserError("Not authenticated.")
 
-        def _add_sync():
+        def _add_chunk_sync(chunk):
             yt = self._get_client()
-            return yt.add_playlist_items(playlist_id, video_ids, duplicates=duplicates)
+            return yt.add_playlist_items(playlist_id, chunk, duplicates=duplicates)
 
-        res = await asyncio.to_thread(_add_sync)
+        chunk_size = 50
+        last_res = None
+        for i in range(0, len(video_ids), chunk_size):
+            chunk = video_ids[i:i + chunk_size]
+            last_res = await asyncio.to_thread(_add_chunk_sync, chunk)
+            if i + chunk_size < len(video_ids):
+                await asyncio.sleep(0.5)
+
         logger.info(f"Added {len(video_ids)} tracks to playlist {playlist_id}")
-        return res
+        return last_res
 
     async def remove_playlist_items(
         self,
         playlist_id: str,
         video_items: list[dict]
     ) -> Any:
-        """Remove tracks from a playlist in YouTube Music using videoId & setVideoId."""
+        """Remove tracks from a playlist in YouTube Music using videoId & setVideoId, batching in safe chunks."""
         if not video_items:
             return {"status": "ok", "removed": 0}
         if not self.is_auth_configured():
             raise YTMusicUserError("Not authenticated.")
 
-        def _remove_sync():
+        def _remove_chunk_sync(chunk):
             yt = self._get_client()
-            return yt.remove_playlist_items(playlist_id, video_items)
+            return yt.remove_playlist_items(playlist_id, chunk)
 
-        res = await asyncio.to_thread(_remove_sync)
+        chunk_size = 50
+        last_res = None
+        for i in range(0, len(video_items), chunk_size):
+            chunk = video_items[i:i + chunk_size]
+            last_res = await asyncio.to_thread(_remove_chunk_sync, chunk)
+            if i + chunk_size < len(video_items):
+                await asyncio.sleep(0.5)
+
         logger.info(f"Removed {len(video_items)} tracks from playlist {playlist_id}")
-        return res
+        return last_res
 
 ytm_client = YTMClient()
+
