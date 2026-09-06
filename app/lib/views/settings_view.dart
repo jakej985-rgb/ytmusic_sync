@@ -1,4 +1,7 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import 'components/folder_browser_dialog.dart';
@@ -19,6 +22,9 @@ class _SettingsViewState extends State<SettingsView> {
   List<RootFolderStats> _folderStats = [];
   AppSettings? _settings;
   ConnectionStatus? _authStatus;
+  AuthState _authState = AuthState.disconnected;
+  Timer? _authPollTimer;
+  String? _currentSessionId;
   bool _isLoading = true;
   bool _isSavingAuth = false;
   String? _authMessage;
@@ -32,6 +38,7 @@ class _SettingsViewState extends State<SettingsView> {
 
   @override
   void dispose() {
+    _authPollTimer?.cancel();
     _headersController.dispose();
     _folderPathController.dispose();
     _apiKeyController.dispose();
@@ -51,6 +58,11 @@ class _SettingsViewState extends State<SettingsView> {
           _folderStats = stats;
           _settings = settings;
           _authStatus = authStatus;
+          if (authStatus.connected) {
+            _authState = AuthState.connected;
+          } else if (!_authState.isConnecting) {
+            _authState = AuthState.disconnected;
+          }
           _isLoading = false;
         });
       }
@@ -120,6 +132,162 @@ class _SettingsViewState extends State<SettingsView> {
     }
   }
 
+  Future<void> _startBrowserAuth() async {
+    setState(() {
+      _authState = AuthState.starting;
+      _authMessage = null;
+    });
+
+    try {
+      final session = await apiService.startAuth(
+        originUrl: kIsWeb ? Uri.base.origin : null,
+      );
+      _currentSessionId = session.sessionId;
+
+      if (!mounted) return;
+      setState(() {
+        _authState = AuthState.waitingForBrowser;
+      });
+
+      final uri = Uri.parse(session.authUrl);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+
+      _startAuthPolling(session.sessionId);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _authState = AuthState.failed;
+          _authMessage = 'Failed to start authentication session: $e';
+        });
+      }
+    }
+  }
+
+  void _startAuthPolling(String sessionId) {
+    _authPollTimer?.cancel();
+    _authPollTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      try {
+        final session = await apiService.getAuthSession(sessionId);
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+
+        if (session.status == AuthState.connected || session.connected) {
+          timer.cancel();
+          setState(() {
+            _authState = AuthState.connected;
+            _authStatus = ConnectionStatus(
+              connected: true,
+              message: 'Connected to YouTube Music successfully.',
+              userName: session.userName,
+            );
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Connected to YouTube Music as ${session.userName ?? "account"}'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        } else if (session.status == AuthState.failed) {
+          timer.cancel();
+          setState(() {
+            _authState = AuthState.failed;
+            _authMessage = session.errorMessage ?? 'Authentication failed during verification.';
+          });
+        } else if (session.status == AuthState.expired) {
+          timer.cancel();
+          setState(() {
+            _authState = AuthState.expired;
+            _authMessage = 'Authentication session expired. Please try again.';
+          });
+        } else if (session.status == AuthState.cancelled) {
+          timer.cancel();
+          setState(() {
+            _authState = AuthState.cancelled;
+            _authMessage = 'Authentication was cancelled.';
+          });
+        } else {
+          setState(() {
+            _authState = session.status;
+          });
+        }
+      } catch (_) {
+        // Keep polling
+      }
+    });
+  }
+
+  Future<void> _cancelAuth() async {
+    _authPollTimer?.cancel();
+    if (_currentSessionId != null) {
+      try {
+        await apiService.cancelAuthSession(_currentSessionId!);
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        _authState = AuthState.cancelled;
+        _authMessage = 'Authentication cancelled.';
+      });
+    }
+  }
+
+  Future<void> _disconnectAuth() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Disconnect YouTube Music?'),
+        content: const Text(
+          'Are you sure you want to disconnect? Stored credentials will be safely removed from your server.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Disconnect', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final status = await apiService.disconnectAuth();
+      if (mounted) {
+        setState(() {
+          _authStatus = status;
+          _authState = AuthState.disconnected;
+          _isLoading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('YouTube Music account disconnected.'),
+            backgroundColor: Colors.orangeAccent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to disconnect: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _submitAuthHeaders() async {
     final raw = _headersController.text.trim();
     if (raw.isEmpty) return;
@@ -181,8 +349,6 @@ class _SettingsViewState extends State<SettingsView> {
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
-
-    final isConnected = _authStatus?.connected ?? false;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28.0),
@@ -247,83 +413,7 @@ class _SettingsViewState extends State<SettingsView> {
           const SizedBox(height: 24),
 
           // 1. YouTube Music Auth Section
-          _buildCard(
-            title: '1. YouTube Music Connection',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      isConnected ? Icons.check_circle : Icons.warning_amber_rounded,
-                      color: isConnected ? Colors.greenAccent : Colors.redAccent,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      isConnected ? 'Status: Connected' : 'Status: Not Connected',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: isConnected ? Colors.greenAccent : Colors.redAccent,
-                      ),
-                    ),
-                    const Spacer(),
-                    OutlinedButton.icon(
-                      onPressed: _testConnection,
-                      icon: const Icon(Icons.network_check, size: 16),
-                      label: const Text('Test Connection'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Instructions to connect:',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '1. Open music.youtube.com in your web browser and ensure you are logged in.\n'
-                  '2. Press F12 to open Developer Tools, then click the Network tab.\n'
-                  '3. In the Filter box, type "browse" (or click "Library" / "Explore" on YouTube Music).\n'
-                  '4. Right-click on a "browse" request row ➔ hover over "Copy Value" ➔ click "Copy Request Headers" (or "Copy as cURL").\n'
-                  '5. Paste the copied text directly into the box below and click "Connect YouTube Music".',
-                  style: TextStyle(color: Colors.grey[400], height: 1.4, fontSize: 12),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _headersController,
-                  maxLines: 4,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                  decoration: InputDecoration(
-                    hintText: 'Paste request headers here (e.g. cookie: ..., authorization: ...)',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                    filled: true,
-                    fillColor: const Color(0xFF14141A),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _isSavingAuth ? null : _submitAuthHeaders,
-                      icon: _isSavingAuth
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.link),
-                      label: const Text('Connect YouTube Music'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFFF0000),
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-                if (_authMessage != null) ...[
-                  const SizedBox(height: 10),
-                  Text(_authMessage!, style: const TextStyle(color: Colors.amberAccent, fontSize: 12)),
-                ],
-              ],
-            ),
-          ),
+          _buildYouTubeMusicConnectionCard(),
           const SizedBox(height: 24),
 
           // 2. Root Folders Section (Radarr-Style)
@@ -653,6 +743,278 @@ class _SettingsViewState extends State<SettingsView> {
     );
   }
 
+  Widget _buildYouTubeMusicConnectionCard() {
+    final isConnected = _authState == AuthState.connected || (_authStatus?.connected ?? false);
+    final isConnecting = _authState.isConnecting;
+
+    return _buildCard(
+      title: '1. YouTube Music Account',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Status Row
+          Row(
+            children: [
+              Icon(
+                isConnected
+                    ? Icons.check_circle
+                    : (isConnecting ? Icons.sync : Icons.radio_button_checked),
+                color: isConnected
+                    ? Colors.greenAccent
+                    : (isConnecting ? Colors.amberAccent : Colors.redAccent),
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                isConnected ? 'Connected' : _authState.label,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isConnected
+                      ? Colors.greenAccent
+                      : (isConnecting ? Colors.amberAccent : Colors.redAccent),
+                ),
+              ),
+              if (isConnected && _authStatus?.userName != null) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    _authStatus!.userName!,
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                ),
+              ],
+              const Spacer(),
+              if (isConnected) ...[
+                OutlinedButton.icon(
+                  onPressed: _testConnection,
+                  icon: const Icon(Icons.network_check, size: 16),
+                  label: const Text('Test Connection'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _disconnectAuth,
+                  icon: const Icon(Icons.link_off, size: 16, color: Colors.redAccent),
+                  label: const Text('Disconnect', style: TextStyle(color: Colors.redAccent)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.redAccent),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Card Body
+          if (isConnected) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF14141A),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.verified_user, color: Colors.greenAccent, size: 24),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _authStatus?.userName ?? 'YouTube Music Account Linked',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Your account is authorized to synchronize library uploads and playlists. Credentials are encrypted and stored safely on your server.',
+                          style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else if (isConnecting) ...[
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF14141A),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.amberAccent),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _authState == AuthState.starting
+                              ? 'Starting connection session...'
+                              : _authState == AuthState.waitingForBrowser
+                                  ? 'Waiting for browser authorization...'
+                                  : 'Verifying connection with YouTube Music...',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.amberAccent),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _cancelAuth,
+                        child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '1. Sign in to YouTube Music in the browser tab that just opened.\n'
+                    '2. The companion extension will automatically capture your session authorization and link your account.\n'
+                    '3. Return here once complete.',
+                    style: TextStyle(color: Colors.grey[300], fontSize: 12, height: 1.4),
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            // Disconnected / Failed / Cancelled / Expired
+            if (_authState.canRetry || _authMessage != null) ...[
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1F1315),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.4)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.error_outline, size: 20, color: Colors.redAccent),
+                        SizedBox(width: 10),
+                        Text(
+                          "We couldn't connect your YouTube Music account.",
+                          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.redAccent, fontSize: 14),
+                        ),
+                      ],
+                    ),
+                    if (_authMessage != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _authMessage!,
+                        style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: _startBrowserAuth,
+                      icon: const Icon(Icons.refresh, size: 16),
+                      label: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.bold)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else ...[
+              Text(
+                'Connect your YouTube Music account to synchronize your uploads and playlists.\n'
+                'Your music stays on your server, and your password is never stored by YTM Sync.',
+                style: TextStyle(color: Colors.grey[300], fontSize: 13, height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _startBrowserAuth,
+                icon: const Icon(Icons.link, size: 18),
+                label: const Text('Connect YouTube Music', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF0000),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                ),
+              ),
+            ],
+          ],
+
+          const SizedBox(height: 16),
+
+          // Advanced / Developer Options (Accordion)
+          Theme(
+            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text(
+                'Advanced / Developer Authentication',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey),
+              ),
+              subtitle: const Text(
+                'For developers and troubleshooting only (manual header input)',
+                style: TextStyle(fontSize: 11, color: Colors.white38),
+              ),
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF14141A),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Directly supply raw session authorization headers for headless environments or manual configuration:',
+                        style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _headersController,
+                        maxLines: 4,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                        decoration: InputDecoration(
+                          hintText: 'cookie: ...\nauthorization: SAPISIDHASH ...',
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                          filled: true,
+                          fillColor: const Color(0xFF0D0D11),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      ElevatedButton.icon(
+                        onPressed: _isSavingAuth ? null : _submitAuthHeaders,
+                        icon: _isSavingAuth
+                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.code, size: 16),
+                        label: const Text('Save Manual Headers'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueGrey[800],
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildTableHeader(String text) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -668,20 +1030,23 @@ class _SettingsViewState extends State<SettingsView> {
   }
 
   Widget _buildCard({required String title, required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1B1B22),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          child,
-        ],
+    return Material(
+      color: const Color(0xFF1B1B22),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            child,
+          ],
+        ),
       ),
     );
   }

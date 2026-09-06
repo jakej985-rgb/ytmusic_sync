@@ -6,7 +6,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,15 @@ from .models import (
 )
 from .scanner import scanner
 from .ytm_client import ytm_client
+from .auth_service import auth_service
+from .auth_session import (
+    AuthStartRequest,
+    AuthStartResponse,
+    AuthSessionResponse,
+    AuthCompleteRequest,
+    AuthCallbackRequest,
+    AuthCancelRequest,
+)
 from .matcher import matcher
 from .uploader import queue_manager
 from .musicbrainz import musicbrainz_client
@@ -128,7 +137,10 @@ app.add_middleware(
 async def authenticate_api_requests(request: Request, call_next):
     path = request.url.path
     # Allow public health endpoint and static frontend files
-    if path == "/health" or not path.startswith("/api/"):
+    if (
+        path == "/health"
+        or not path.startswith("/api/")
+    ):
         return await call_next(request)
     # Allow CORS preflight OPTIONS requests without credentials
     if request.method == "OPTIONS":
@@ -170,8 +182,157 @@ async def get_auth_status():
         user_name=res.get("user_name")
     )
 
+@app.post("/api/auth/start", response_model=AuthStartResponse)
+async def start_auth_session(request: Request, req: Optional[AuthStartRequest] = None):
+    """Start a new short-lived, single-use authentication session."""
+    origin_url = req.origin_url if (req and req.origin_url) else None
+    if not origin_url:
+        # Detect reverse proxy or direct host (Traefik, Cloudflare, Docker, LAN, localhost)
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host"))
+        if host:
+            origin_url = f"{proto}://{host}"
+        else:
+            origin_url = str(request.base_url).rstrip("/")
+
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    return await auth_service.start_session(origin_url=origin_url, client_ip=client_ip)
+
+@app.get("/api/auth/session/{session_id}", response_model=AuthSessionResponse)
+async def get_auth_session(session_id: str):
+    """Check the status of an ongoing authentication session."""
+    session = await auth_service.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Authentication session not found")
+    return session
+
+@app.post("/api/auth/session/{session_id}/complete", response_model=AuthSessionResponse)
+async def complete_auth_session(session_id: str, req: AuthCompleteRequest):
+    """Receive authentication headers from companion extension or helper and validate them."""
+    if not req.raw_headers.strip():
+        raise HTTPException(status_code=400, detail="Headers cannot be empty")
+    try:
+        session = await auth_service.complete_session(session_id, req.raw_headers)
+        return session
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to complete authentication: {e}")
+
+@app.post("/api/auth/callback", response_model=AuthSessionResponse)
+async def auth_callback_post(req: AuthCallbackRequest):
+    """Callback endpoint for companion extensions/helpers submitting credentials."""
+    if not req.raw_headers.strip():
+        raise HTTPException(status_code=400, detail="Headers cannot be empty")
+    try:
+        session = await auth_service.complete_session(req.session_id, req.raw_headers)
+        return session
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to complete authentication: {e}")
+
+@app.get("/api/auth/callback", response_class=HTMLResponse)
+async def auth_callback_get(session_id: Optional[str] = None):
+    """Friendly browser landing page after authentication callback."""
+    if not session_id:
+        return HTMLResponse(
+            content="""<!DOCTYPE html>
+<html>
+<head><title>YTM Sync - Missing Session</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }
+.card { background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }
+h2 { color: #f44336; margin-top: 0; }
+p { color: #aaa; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Invalid Request</h2>
+  <p>Missing session parameter. Please return to YTM Sync.</p>
+</div>
+</body>
+</html>""",
+            status_code=400
+        )
+
+    session = await auth_service.get_session(session_id)
+    if not session or not session.connected:
+        return HTMLResponse(
+            content="""<!DOCTYPE html>
+<html>
+<head><title>YTM Sync - Authentication Pending</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }
+.card { background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }
+h2 { color: #f44336; margin-top: 0; }
+p { color: #aaa; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Authentication Pending or Incomplete</h2>
+  <p>The authentication session has not completed or has expired. Please return to YTM Sync and try again.</p>
+</div>
+</body>
+</html>""",
+            status_code=400
+        )
+
+    user_disp = session.user_name or "Connected Account"
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
+<html>
+<head><title>YTM Sync - Connected</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }}
+.card {{ background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }}
+h2 {{ color: #4caf50; margin-top: 0; }}
+p {{ color: #ccc; line-height: 1.5; }}
+.user {{ font-weight: bold; color: #fff; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>✓ YouTube Music Connected</h2>
+  <p>Successfully linked account: <span class="user">{user_disp}</span></p>
+  <p>You can now safely close this window and return to YTM Sync.</p>
+</div>
+</body>
+</html>""",
+        status_code=200
+    )
+
+@app.post("/api/auth/session/{session_id}/cancel", response_model=AuthSessionResponse)
+async def cancel_auth_session(session_id: str):
+    """Cancel an active authentication session."""
+    session = await auth_service.cancel_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Authentication session not found")
+    return session
+
+@app.post("/api/auth/cancel", response_model=AuthSessionResponse)
+async def cancel_auth_post(req: AuthCancelRequest):
+    """Cancel an active authentication session via POST /api/auth/cancel."""
+    session = await auth_service.cancel_session(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Authentication session not found")
+    return session
+
+@app.post("/api/auth/disconnect", response_model=ConnectionStatus)
+async def disconnect_auth():
+    """Safely disconnect YouTube Music account and remove stored credentials."""
+    res = await auth_service.disconnect()
+    return ConnectionStatus(
+        connected=res["connected"],
+        message=res["message"],
+        user_name=res.get("user_name")
+    )
+
 @app.post("/api/auth/setup", response_model=ConnectionStatus)
 async def setup_auth(req: AuthSetupRequest):
+    """Direct/Developer setup: Parse raw headers and store credentials."""
     if not req.raw_headers.strip():
         raise HTTPException(status_code=400, detail="Headers cannot be empty")
     try:
@@ -207,6 +368,11 @@ async def get_ytm_playlists():
 async def get_playlist_sync_status():
     """Get active playlist download/sync progress."""
     return playlist_sync_manager.status
+
+@app.post("/api/ytm/playlists/cancel-sync")
+async def cancel_playlist_sync():
+    """Cancel any active background playlist download/sync."""
+    return playlist_sync_manager.cancel_sync()
 
 @app.post("/api/ytm/playlists/download-track")
 async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):

@@ -267,6 +267,8 @@ async def download_and_upload_playlist_track(
         up_res = await ytm_client.upload_file(str(downloaded_file))
         if not up_res.get("success"):
             raise RuntimeError(f"YouTube Music upload failed: {up_res.get('response')}")
+        if up_res.get("already_exists"):
+            logger.info(f"Track '{final_title}' already exists in YouTube Music cloud locker (409). Treating as uploaded.")
 
         # Save a local copy if directory exists and is writable within approved roots
         local_saved_path: Optional[str] = None
@@ -347,6 +349,18 @@ class PlaylistSyncManager:
 
     @property
     def status(self) -> PlaylistSyncStatus:
+        if self._task and self._task.done() and self._status.is_running:
+            self._status.is_running = False
+        return self._status
+
+    def cancel_sync(self) -> PlaylistSyncStatus:
+        """Cancel the current running playlist sync."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._status.is_running = False
+        self._current_track_dict = None
+        self._queue = []
+        logger.info("Playlist sync was cancelled by user.")
         return self._status
 
     def start_sync(
@@ -357,6 +371,9 @@ class PlaylistSyncManager:
         destination_dir: Optional[str] = None
     ) -> PlaylistSyncStatus:
         """Start a background sync for missing playlist tracks."""
+        if self._task and self._task.done():
+            self._status.is_running = False
+
         if self._status.is_running:
             raise RuntimeError("A playlist sync is already in progress.")
 

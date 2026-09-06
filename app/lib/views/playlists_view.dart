@@ -216,9 +216,12 @@ class _PlaylistsViewState extends State<PlaylistsView> {
           }
         });
 
+        final alreadyEx = res['already_exists'] == true;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Downloaded, tagged, and uploaded "${track.title}" to YouTube Music!'),
+            content: Text(alreadyEx
+                ? '"${track.title}" is already in your YouTube Music locker!'
+                : 'Downloaded, tagged, and uploaded "${track.title}" to YouTube Music!'),
             backgroundColor: Colors.green,
           ),
         );
@@ -555,6 +558,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
 
           return AlertDialog(
             backgroundColor: const Color(0xFF1E1E28),
+            actionsAlignment: MainAxisAlignment.spaceBetween,
             title: Row(
               children: [
                 const Icon(Icons.sync_alt, color: Colors.tealAccent),
@@ -594,116 +598,124 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                       child: Center(child: CircularProgressIndicator(color: Colors.tealAccent)),
                     )
                   : loadError != null
-                      ? Text('Error loading replica: $loadError', style: const TextStyle(color: Colors.amberAccent))
-                      : SingleChildScrollView(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              // Config Details (Section 23 of plan)
-                              Container(
-                                padding: const EdgeInsets.all(16),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF14141E),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: Colors.white10),
-                                ),
-                                child: Column(
-                                  children: [
-                                    _buildReplicaDetailRow('Source Playlist', preview!.sourcePlaylistName, Icons.queue_music),
-                                    const Divider(height: 20, color: Colors.white10),
-                                    _buildReplicaDetailRow('Locker Replica', preview!.destinationPlaylistName, Icons.cloud_done),
-                                    const Divider(height: 20, color: Colors.white10),
-                                    _buildReplicaDetailRow('Mode', 'Locker Only (1:1 Ordered)', Icons.lock),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-
-                              // Metrics Grid (Section 23 of plan)
-                              Row(
+                      ? Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Text('Error loading replica: $loadError', style: const TextStyle(color: Colors.amberAccent)),
+                        )
+                      : preview == null
+                          ? const Padding(
+                              padding: EdgeInsets.all(16.0),
+                              child: Text('No preview data available', style: TextStyle(color: Colors.grey)),
+                            )
+                          : SingleChildScrollView(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _buildMetricCard('Source Tracks', '${preview!.sourceTracksCount}', Colors.blueAccent),
-                                  const SizedBox(width: 8),
-                                  _buildMetricCard('Locker Matches', '${preview!.desiredTracksCount}', Colors.tealAccent),
-                                  const SizedBox(width: 8),
-                                  _buildMetricCard('Excluded', '${preview!.excludedCount}', Colors.amberAccent),
-                                  const SizedBox(width: 8),
-                                  _buildMetricCard('Destination', '${preview!.desiredTracksCount}', Colors.purpleAccent),
-                                ],
-                              ),
-                              const SizedBox(height: 16),
-
-                              // Excluded Tracks section (Section 24 & 25 of plan)
-                              if (preview!.excludedCount > 0) ...[
-                                InkWell(
-                                  onTap: () {
-                                    setModalState(() => showExcludedDetails = !showExcludedDetails);
-                                  },
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  // Config Details (Section 23 of plan)
+                                  Container(
+                                    padding: const EdgeInsets.all(16),
                                     decoration: BoxDecoration(
-                                      color: Colors.amber.withValues(alpha: 0.1),
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+                                      color: const Color(0xFF14141E),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(color: Colors.white10),
                                     ),
-                                    child: Row(
+                                    child: Column(
                                       children: [
-                                        const Icon(Icons.info_outline, size: 16, color: Colors.amberAccent),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: Text(
-                                            '${preview!.excludedCount} tracks not uploaded to locker (excluded from replica)',
-                                            style: const TextStyle(fontSize: 12, color: Colors.amberAccent),
-                                          ),
-                                        ),
-                                        Icon(showExcludedDetails ? Icons.expand_less : Icons.expand_more, size: 18, color: Colors.amberAccent),
+                                        _buildReplicaDetailRow('Source Playlist', preview!.sourcePlaylistName, Icons.queue_music),
+                                        const Divider(height: 20, color: Colors.white10),
+                                        _buildReplicaDetailRow('Locker Replica', preview!.destinationPlaylistName, Icons.cloud_done),
+                                        const Divider(height: 20, color: Colors.white10),
+                                        _buildReplicaDetailRow('Mode', 'Locker Only (1:1 Ordered)', Icons.lock),
                                       ],
                                     ),
                                   ),
-                                ),
-                                if (showExcludedDetails) ...[
-                                  const SizedBox(height: 8),
-                                  Container(
-                                    constraints: const BoxConstraints(maxHeight: 180),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF14141E),
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: Colors.white10),
-                                    ),
-                                    child: ListView.builder(
-                                      shrinkWrap: true,
-                                      itemCount: preview!.excludedTracks.length,
-                                      itemBuilder: (ctx, i) {
-                                        final item = preview!.excludedTracks[i];
-                                        return ListTile(
-                                          dense: true,
-                                          visualDensity: VisualDensity.compact,
-                                          leading: const Icon(Icons.remove_circle_outline, size: 16, color: Colors.amberAccent),
-                                          title: Text('${item.artist} - ${item.title}', style: const TextStyle(fontSize: 13)),
-                                          subtitle: Text(item.humanReason, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ],
-                                const SizedBox(height: 16),
-                              ],
+                                  const SizedBox(height: 16),
 
-                              if (isActionRunning) ...[
-                                Row(
-                                  children: [
-                                    const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                                    const SizedBox(width: 12),
-                                    Text(actionStatus ?? 'Processing...', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                  // Metrics Grid (Section 23 of plan)
+                                  Row(
+                                    children: [
+                                      _buildMetricCard('Source Tracks', '${preview!.sourceTracksCount}', Colors.blueAccent),
+                                      const SizedBox(width: 8),
+                                      _buildMetricCard('Locker Matches', '${preview!.desiredTracksCount}', Colors.tealAccent),
+                                      const SizedBox(width: 8),
+                                      _buildMetricCard('Excluded', '${preview!.excludedCount}', Colors.amberAccent),
+                                      const SizedBox(width: 8),
+                                      _buildMetricCard('Destination', '${preview!.desiredTracksCount}', Colors.purpleAccent),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 16),
+
+                                  // Excluded Tracks section (Section 24 & 25 of plan)
+                                  if (preview!.excludedCount > 0) ...[
+                                    InkWell(
+                                      onTap: () {
+                                        setModalState(() => showExcludedDetails = !showExcludedDetails);
+                                      },
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                        decoration: BoxDecoration(
+                                          color: Colors.amber.withValues(alpha: 0.1),
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            const Icon(Icons.info_outline, size: 16, color: Colors.amberAccent),
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Text(
+                                                '${preview!.excludedCount} tracks not uploaded to locker (excluded from replica)',
+                                                style: const TextStyle(fontSize: 12, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                                              ),
+                                            ),
+                                            Icon(showExcludedDetails ? Icons.expand_less : Icons.expand_more, size: 18, color: Colors.amberAccent),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    if (showExcludedDetails) ...[
+                                      const SizedBox(height: 8),
+                                      Container(
+                                        constraints: const BoxConstraints(maxHeight: 180),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF14141E),
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: Colors.white10),
+                                        ),
+                                        child: ListView.builder(
+                                          shrinkWrap: true,
+                                          itemCount: preview!.excludedTracks.length,
+                                          itemBuilder: (ctx, i) {
+                                            final item = preview!.excludedTracks[i];
+                                            return ListTile(
+                                              dense: true,
+                                              visualDensity: VisualDensity.compact,
+                                              leading: const Icon(Icons.remove_circle_outline, size: 16, color: Colors.amberAccent),
+                                              title: Text('${item.artist} - ${item.title}', style: const TextStyle(fontSize: 13)),
+                                              subtitle: Text(item.humanReason, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                    const SizedBox(height: 16),
                                   ],
-                                ),
-                                const SizedBox(height: 12),
-                              ],
-                            ],
-                          ),
-                        ),
+
+                                  if (isActionRunning) ...[
+                                    Row(
+                                      children: [
+                                        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                                        const SizedBox(width: 12),
+                                        Text(actionStatus ?? 'Processing...', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                  ],
+                                ],
+                              ),
+                            ),
             ),
             actions: [
               TextButton(
@@ -735,77 +747,83 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                       },
                 child: const Text('Delete Config', style: TextStyle(color: Colors.redAccent)),
               ),
-              const Spacer(),
-              TextButton(
-                onPressed: isActionRunning ? null : () => Navigator.pop(ctx),
-                child: const Text('Close'),
-              ),
-              OutlinedButton.icon(
-                onPressed: isActionRunning
-                    ? null
-                    : () async {
-                        setModalState(() {
-                          isActionRunning = true;
-                          actionStatus = 'Running dry-run diff calculation...';
-                        });
-                        try {
-                          final res = await apiService.dryRunReplicatedPlaylist(replica.id);
-                          setModalState(() {
-                            isActionRunning = false;
-                            preview = res;
-                          });
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Dry Run Complete: ${res.actions.length} changes planned.')),
-                            );
-                          }
-                        } catch (e) {
-                          setModalState(() => isActionRunning = false);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Dry run failed: $e'), backgroundColor: Colors.redAccent),
-                            );
-                          }
-                        }
-                      },
-                icon: const Icon(Icons.preview, size: 16),
-                label: const Text('Dry Run'),
-              ),
-              ElevatedButton.icon(
-                onPressed: isActionRunning
-                    ? null
-                    : () async {
-                        setModalState(() {
-                          isActionRunning = true;
-                          actionStatus = 'Reconciling destination replica...';
-                        });
-                        try {
-                          final res = await apiService.syncReplicatedPlaylist(replica.id);
-                          await _loadReplicatedPlaylists();
-                          setModalState(() {
-                            isActionRunning = false;
-                            preview = res;
-                          });
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Locker replica reconciled successfully!'), backgroundColor: Colors.green),
-                            );
-                          }
-                        } catch (e) {
-                          setModalState(() => isActionRunning = false);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Reconcile failed: $e'), backgroundColor: Colors.redAccent),
-                            );
-                          }
-                        }
-                      },
-                icon: const Icon(Icons.sync, size: 16),
-                label: const Text('Sync Now'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00897B),
-                  foregroundColor: Colors.white,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: isActionRunning ? null : () => Navigator.pop(ctx),
+                    child: const Text('Close'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: isActionRunning
+                        ? null
+                        : () async {
+                            setModalState(() {
+                              isActionRunning = true;
+                              actionStatus = 'Running dry-run diff calculation...';
+                            });
+                            try {
+                              final res = await apiService.dryRunReplicatedPlaylist(replica.id);
+                              setModalState(() {
+                                isActionRunning = false;
+                                preview = res;
+                              });
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Dry Run Complete: ${res.actions.length} changes planned.')),
+                                );
+                              }
+                            } catch (e) {
+                              setModalState(() => isActionRunning = false);
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Dry run failed: $e'), backgroundColor: Colors.redAccent),
+                                );
+                              }
+                            }
+                          },
+                    icon: const Icon(Icons.preview, size: 16),
+                    label: const Text('Dry Run'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: isActionRunning
+                        ? null
+                        : () async {
+                            setModalState(() {
+                              isActionRunning = true;
+                              actionStatus = 'Reconciling destination replica...';
+                            });
+                            try {
+                              final res = await apiService.syncReplicatedPlaylist(replica.id);
+                              await _loadReplicatedPlaylists();
+                              setModalState(() {
+                                isActionRunning = false;
+                                preview = res;
+                              });
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Locker replica reconciled successfully!'), backgroundColor: Colors.green),
+                                );
+                              }
+                            } catch (e) {
+                              setModalState(() => isActionRunning = false);
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Reconcile failed: $e'), backgroundColor: Colors.redAccent),
+                                );
+                              }
+                            }
+                          },
+                    icon: const Icon(Icons.sync, size: 16),
+                    label: const Text('Sync Now'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00897B),
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
               ),
             ],
           );
@@ -820,8 +838,15 @@ class _PlaylistsViewState extends State<PlaylistsView> {
         Icon(icon, size: 16, color: Colors.grey[400]),
         const SizedBox(width: 8),
         Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
-        const Spacer(),
-        Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+        ),
       ],
     );
   }
@@ -1274,9 +1299,54 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                             ),
                           ],
                         ),
-                        Text(
-                          '${(_syncStatus!.progress * 100).toInt()}%',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '${(_syncStatus!.progress * 100).toInt()}%',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(width: 10),
+                            InkWell(
+                              onTap: () async {
+                                try {
+                                  await apiService.cancelPlaylistSync();
+                                  _syncPollTimer?.cancel();
+                                  if (mounted) {
+                                    setState(() {
+                                      _syncStatus = null;
+                                    });
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Playlist sync cancelled.')),
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('Failed to cancel: $e'), backgroundColor: Colors.redAccent),
+                                    );
+                                  }
+                                }
+                              },
+                              borderRadius: BorderRadius.circular(4),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.4)),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.close, size: 12, color: Colors.redAccent),
+                                    SizedBox(width: 4),
+                                    Text('Cancel', style: TextStyle(fontSize: 11, color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),

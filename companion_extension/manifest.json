@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "YTM Sync — Account Linker",
+  "version": "1.0.0",
+  "description": "Seamlessly link your YouTube Music account to your self-hosted YTM Sync server with 1 click.",
+  "permissions": [
+    "cookies",
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://music.youtube.com/*",
+    "*://*.youtube.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://music.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YTM Sync Account Linker"
+  }
+}

@@ -69,37 +69,56 @@ def match_source_track_to_locker(source_track: dict, locker_lookup: dict) -> tup
     if vid and vid in locker_lookup["by_entity_id"]:
         return locker_lookup["by_entity_id"][vid], None
 
-    # Tier 3: Strict exact metadata equality with duration sanity check
-    # Used only if unambiguous (exactly 1 locker candidate matches)
-    norm_art = normalize_text(source_track.get("artist"))
-    norm_tit = normalize_text(source_track.get("title"))
-
-    if not norm_art:
+    # Tier 3: Metadata matching with title cleaning
+    raw_tit = str(source_track.get("title") or "").strip()
+    raw_art = str(source_track.get("artist") or "").strip()
+    if not raw_art:
         artists = source_track.get("artists")
         if isinstance(artists, list) and artists:
             first = artists[0]
-            norm_art = normalize_text(first.get("name") if isinstance(first, dict) else str(first))
+            raw_art = str(first.get("name") if isinstance(first, dict) else str(first))
 
-    if norm_art and norm_tit:
-        candidates = locker_lookup["by_exact_metadata"].get((norm_art, norm_tit), [])
-        if len(candidates) == 1:
-            candidate = candidates[0]
-            # Verify duration if both available
-            src_dur = source_track.get("duration_seconds")
-            if src_dur is None and "duration" in source_track:
-                src_dur = parse_duration(source_track["duration"])
-            cand_dur = candidate.get("duration")
+    from .playlist_downloader import clean_youtube_title
+    clean_t, det_a = clean_youtube_title(raw_tit, raw_art)
+    effective_art = raw_art or det_a or ""
+    effective_tit = clean_t or raw_tit
 
-            if src_dur and cand_dur:
-                if abs(float(src_dur) - float(cand_dur)) <= 3.0:
-                    return candidate, None
-                else:
-                    return None, "DURATION_MISMATCH"
-            return candidate, None
-        elif len(candidates) > 1:
-            return None, "IDENTITY_AMBIGUOUS"
+    candidate_keys = []
+    norm_eff_art = normalize_text(effective_art)
+    norm_eff_tit = normalize_text(effective_tit)
+    if norm_eff_art and norm_eff_tit:
+        candidate_keys.append((norm_eff_art, norm_eff_tit))
 
-    return None, "NOT_PRESENT_IN_LOCKER"
+    norm_raw_art = normalize_text(raw_art)
+    norm_raw_tit = normalize_text(raw_tit)
+    if norm_raw_art and norm_raw_tit and (norm_raw_art, norm_raw_tit) not in candidate_keys:
+        candidate_keys.append((norm_raw_art, norm_raw_tit))
+
+    candidates = []
+    for key in candidate_keys:
+        matches = locker_lookup["by_exact_metadata"].get(key, [])
+        if matches:
+            candidates = matches
+            break
+
+    if not candidates:
+        return None, "NOT_PRESENT_IN_LOCKER"
+
+    if len(candidates) == 1:
+        return candidates[0], None
+
+    # If multiple candidates exist (e.g. duplicate uploads), resolve by duration if available
+    src_dur = source_track.get("duration_seconds")
+    if src_dur is None and "duration" in source_track:
+        src_dur = parse_duration(source_track["duration"])
+
+    if src_dur:
+        candidates_with_dur = [c for c in candidates if c.get("duration")]
+        if candidates_with_dur:
+            best_cand = min(candidates_with_dur, key=lambda c: abs(float(src_dur) - float(c.get("duration"))))
+            return best_cand, None
+
+    return None, "IDENTITY_AMBIGUOUS"
 
 
 def filter_source_tracks_for_replica(source_tracks: list[dict], locker_lookup: dict) -> tuple[list[dict], list[dict]]:

@@ -1,3 +1,5 @@
+export 'auth_state.dart';
+
 class DashboardStats {
   final bool ytmConnected;
   final String? accountName;

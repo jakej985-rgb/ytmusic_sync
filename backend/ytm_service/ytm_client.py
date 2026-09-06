@@ -75,10 +75,28 @@ class YTMClient:
     def reset_client(self):
         self._ytm = None
 
+    def disconnect_auth(self) -> dict:
+        """Safely disconnect YouTube Music account, removing stored headers and resetting the client."""
+        self.reset_client()
+        if settings.auth_file.exists():
+            try:
+                settings.auth_file.unlink()
+            except OSError as e:
+                logger.warning(f"Error removing auth file: {e}")
+        return {
+            "connected": False,
+            "message": "Disconnected from YouTube Music successfully.",
+            "user_name": None
+        }
+
     async def setup_auth(self, raw_headers: str) -> dict:
         """Parse raw browser headers and write securely to auth_file with 0600 permissions."""
         def _setup_sync():
             settings.auth_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(settings.auth_file.parent, stat.S_IRWXU)
+            except OSError:
+                pass
             cleaned_headers = preprocess_headers(raw_headers)
             # Use ytmusicapi's setup parser
             res = setup(filepath=str(settings.auth_file), headers_raw=cleaned_headers)
@@ -101,23 +119,39 @@ class YTMClient:
 
         def _test_sync():
             yt = self._get_client()
+            user_name = None
+            try:
+                acc_info = yt.get_account_info()
+                user_name = acc_info.get("accountName") or acc_info.get("channelHandle")
+            except Exception as e:
+                logger.debug(f"Could not retrieve user account name: {e}")
+
             # Fetch 1 upload song to verify upload browse capabilities
-            res = yt.get_library_upload_songs(limit=1)
-            return res
+            yt.get_library_upload_songs(limit=1)
+            return user_name
 
         try:
-            await asyncio.to_thread(_test_sync)
+            detected_user = await asyncio.to_thread(_test_sync)
             return {
                 "connected": True,
                 "message": "Connected to YouTube Music successfully.",
-                "user_name": "Connected Account"
+                "user_name": detected_user
             }
         except Exception as e:
-            logger.error(f"YTM connection test failed: {e}")
+            logger.error(f"YTM connection test failed: {e}", exc_info=True)
             self.reset_client()
+            err_str = str(e).lower()
+            if "timeout" in err_str or "timed out" in err_str:
+                msg = "Connection timed out while contacting YouTube Music."
+            elif any(x in err_str for x in ["connection refused", "unreachable", "name or service not known", "nodename nor servname"]):
+                msg = "YouTube Music servers are unreachable. Please check your network connection."
+            elif any(x in err_str for x in ["401", "403", "unauthorized", "forbidden"]):
+                msg = "Credentials were rejected by YouTube Music. Please relink your account."
+            else:
+                msg = "Account verification failed. Please check your credentials."
             return {
                 "connected": False,
-                "message": f"Connection failed: {str(e)}",
+                "message": msg,
                 "user_name": None
             }
 
@@ -201,9 +235,12 @@ class YTMClient:
 
         result_str = await asyncio.to_thread(_upload_sync)
         # Check success indicators from ytmusicapi
-        is_success = "STATUS_SUCCEEDED" in result_str or "200" in result_str or "SUCCEEDED" in result_str
+        # 409 means the file already exists in user's cloud locker
+        already_exists = "409" in result_str or "already exists" in result_str.lower()
+        is_success = "STATUS_SUCCEEDED" in result_str or "200" in result_str or "SUCCEEDED" in result_str or already_exists
         return {
             "success": is_success,
+            "already_exists": already_exists,
             "response": result_str
         }
 
@@ -299,14 +336,14 @@ class YTMClient:
 
         uploads_set = set()
         uploads_video_ids = set()
+        uploads_by_title: dict[str, list[str]] = {}
         for u in uploads:
-            # We must require both artist and title to match!
-            # Loose matching on title alone caused completely different tracks or deleted tracks
-            # to falsely claim they were in uploads!
+            # Require both artist and title to match, with collaborator tolerance
             u_art = normalize_text(u.artist)
             u_tit = normalize_text(u.title)
             if u_tit:
                 uploads_set.add(f"{u_art}|{u_tit}")
+                uploads_by_title.setdefault(u_tit, []).append(u_art)
             if u.video_id and not (u.entity_id and u.entity_id.startswith("up_")):
                 uploads_video_ids.add(u.video_id)
 
@@ -388,7 +425,19 @@ class YTMClient:
 
             local_path = local_map.get(norm_key) or local_map.get(title_key)
             in_local = local_path is not None
+
             in_uploads = (norm_key in uploads_set) or (vid in uploads_video_ids)
+            if not in_uploads and title_key in uploads_by_title:
+                c_art = normalize_text(c["artist"])
+                for u_art in uploads_by_title[title_key]:
+                    if c_art and u_art and (c_art in u_art or u_art in c_art):
+                        in_uploads = True
+                        break
+                    parts_c = {p.strip() for p in re.split(r"[,/&]|(?:\b(?:feat|ft|featuring|with|x)\b)", c_art) if p.strip()}
+                    parts_u = {p.strip() for p in re.split(r"[,/&]|(?:\b(?:feat|ft|featuring|with|x)\b)", u_art) if p.strip()}
+                    if parts_c & parts_u:
+                        in_uploads = True
+                        break
 
             matched_tracks.append({
                 "video_id": vid,

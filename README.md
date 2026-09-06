@@ -127,16 +127,29 @@ Inside the Web UI under **Settings** $\rightarrow$ **Music Folders**, you can ad
 
 ---
 
-## 8. YouTube Music Authentication Setup
+## 8. YouTube Music Authentication
 
-Because Google OAuth credentials are not authorized by Google for personal music uploads, authentication is established using browser session cookies/headers:
+Linking your YouTube Music account allows YTM Sync to synchronize your music locker and playlists without storing your Google password:
 
-1. Open [music.youtube.com](https://music.youtube.com) in Chrome/Firefox/Brave and sign in.
-2. Press **F12** to open Developer Tools, then click the **Network** tab.
-3. Click any request to `music.youtube.com` (such as `browse` or `player`).
-4. Under **Request Headers**, copy all headers (or right-click $\rightarrow$ *Copy as cURL*).
-5. In **YTM Sync** $\rightarrow$ **Settings**, paste into the headers box and click **Connect YouTube Music**.
-6. Credentials are saved locally with restricted permissions (`0600`) at `/config/auth/headers_auth.json`.
+1. Open YTM Sync.
+2. Go to Settings.
+3. Click Connect YouTube Music.
+4. Complete authentication in your browser.
+5. Return to YTM Sync.
+
+YTM Sync will verify the connection automatically.
+
+> **Companion Extension**: For effortless 1-click linking without manual steps, load the lightweight browser extension in [`companion_extension/`](companion_extension/README.md).
+
+### Advanced / Developer Authentication
+
+For headless servers, automated scripts, or troubleshooting, manual header configuration is supported in the **Advanced / Developer Authentication** accordion in Settings:
+
+1. In Settings, expand **Advanced / Developer Authentication**.
+2. Paste raw headers (`Cookie: ...` and `Authorization: SAPISIDHASH ...`) or cURL command.
+3. Click **Save Manual Headers**.
+
+Credentials are saved locally on your server with restricted `0600` permissions at `/config/auth/headers_auth.json`.
 
 ---
 
@@ -229,7 +242,7 @@ docker compose exec ytm-sync curl -f http://localhost:8080/health
 ```
 
 ### YouTube Music Shows "NOT CONNECTED"
-- Your browser session may have expired. Re-copy fresh request headers from `music.youtube.com` into **Settings**.
+- Your browser session may have expired. In **Settings**, click **Connect YouTube Music** (or **Try Again**) to re-authorize.
 - Confirm `/config/auth/headers_auth.json` exists and is readable by UID `1000`.
 
 ### Music Files Not Detected

@@ -105,6 +105,47 @@ class ApiService {
     throw Exception('Failed to load auth status');
   }
 
+  Future<AuthSessionInfo> startAuth({String? originUrl}) async {
+    final body = originUrl != null ? jsonEncode({'origin_url': originUrl}) : null;
+    final response = await _post(
+      Uri.parse('$baseUrl/api/auth/start'),
+      headers: {'Content-Type': 'application/json'},
+      body: body,
+    );
+    if (response.statusCode == 200) {
+      return AuthSessionInfo.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to start auth session');
+  }
+
+  Future<AuthSessionInfo> getAuthSession(String sessionId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/auth/session/$sessionId'));
+    if (response.statusCode == 200) {
+      return AuthSessionInfo.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to get auth session');
+  }
+
+  Future<AuthSessionInfo> cancelAuthSession(String sessionId) async {
+    final response = await _post(Uri.parse('$baseUrl/api/auth/session/$sessionId/cancel'));
+    if (response.statusCode == 200) {
+      return AuthSessionInfo.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to cancel auth session');
+  }
+
+  Future<ConnectionStatus> disconnectAuth() async {
+    final response = await _post(Uri.parse('$baseUrl/api/auth/disconnect'));
+    if (response.statusCode == 200) {
+      return ConnectionStatus.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to disconnect account');
+  }
+
   Future<ConnectionStatus> setupAuth(String rawHeaders) async {
     final response = await _post(
       Uri.parse('$baseUrl/api/auth/setup'),
@@ -397,6 +438,14 @@ class ApiService {
       return PlaylistSyncStatusModel.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     }
     throw Exception('Failed to fetch sync status');
+  }
+
+  Future<PlaylistSyncStatusModel> cancelPlaylistSync() async {
+    final response = await _post(Uri.parse('$baseUrl/api/ytm/playlists/cancel-sync'));
+    if (response.statusCode == 200) {
+      return PlaylistSyncStatusModel.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    }
+    throw Exception('Failed to cancel sync');
   }
 
   Future<Map<String, dynamic>> downloadAndUploadPlaylistTrack(Map<String, dynamic> trackData) async {
