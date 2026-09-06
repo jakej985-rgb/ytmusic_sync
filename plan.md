@@ -1,1255 +1,1064 @@
-Ah — yes, that is a **different architecture**, and I understand what you mean now.
+Yes. I inspected the latest ytmusic_sync-main.zip you uploaded, rather than basing this only on the existing Issue #11.
 
-You want **ytmusic_sync to watch an existing YouTube Music playlist**, and maintain a **1:1 replica of that playlist using only songs that are actually in your local upload locker**.
+The current repo confirms the account-linking flow is still fundamentally manual: the Flutter Settings screen asks users to open DevTools, copy YouTube Music request headers, paste them into a text box, and send them to /api/auth/setup. The backend then passes those headers into ytmusicapi.setup(). The existing API already has /api/auth/status, /api/auth/setup, and /api/auth/test.
 
-### Example
+Here is the plan I would give the coding agent.
 
-You have a YT Music playlist:
+YTM Sync — Beginner-Friendly YouTube Music Account Linking
 
-**`My Local Artists`**
+Goal
 
-```text
-1. Artist A - Song 1
-2. Artist B - Song 2
-3. Artist C - Song 3
-4. Artist D - Song 4
-```
+Replace the current:
 
-Your locker contains uploads for only:
+> Open DevTools → Network → find request → copy headers → paste headers → Connect
 
-```text
-Artist A - Song 1
-Artist B - Song 2
-Artist D - Song 4
-```
 
-The generated/replicated playlist should be:
 
-```text
-1. Artist A - Song 1
-2. Artist B - Song 2
-3. Artist D - Song 4
-```
+experience with:
 
-**Artist C is excluded because it isn't an uploaded locker track.**
+> Connect YouTube Music → authenticate in browser → automatically return to YTM Sync
 
-And when the source playlist changes:
 
-```text
-Source YT Music playlist
-        ↓
-      WATCH
-        ↓
-Read playlist order
-        ↓
-Match against LOCKER UPLOADS
-        ↓
-Exclude anything not uploaded
-        ↓
-Reconcile destination playlist
-        ↓
-1:1 ordered locker-only copy
-```
 
-That's the feature I'd build.
+The important part is that we do not simply hide the existing header textbox. The authentication architecture needs to be changed so normal users don't have to interact with browser developer tools.
+
 
 ---
 
-# Detailed implementation plan
+Phase 1 — Audit the Existing Authentication
 
-## 1. Define the two playlists
+1.1 Map the current flow
 
-There should be a clear distinction between:
+Document the current path:
 
-### Source playlist
+Flutter Settings
+      ↓
+_headersController
+      ↓
+POST /api/auth/setup
+      ↓
+AuthSetupRequest
+      ↓
+ytm_client.setup_auth()
+      ↓
+ytmusicapi.setup()
+      ↓
+/config/auth/headers_auth.json
+      ↓
+test_connection()
 
-The playlist you want to watch.
+Relevant existing code:
 
-Example:
+app/lib/views/settings_view.dart
 
-```text
-Source:
-"406 Playlist"
-```
+app/lib/services/api_service.dart
 
-### Replicated playlist
+backend/ytm_service/main.py
 
-The playlist ytmusic_sync maintains.
+backend/ytm_service/ytm_client.py
 
-Example:
+authentication models/configuration
 
-```text
-Destination:
-"406 Playlist - Locker"
-```
+existing API tests
 
-Configuration:
 
-```text
-Source playlist:
-406 Playlist
+1.2 Identify what can and cannot be automated
 
-Destination playlist:
-406 Playlist - Locker
+This is important.
 
-Mode:
-LOCKER ONLY
+A normal web page cannot simply read the user's YouTube Music cookies because of browser security restrictions.
 
-Enabled:
-YES
-```
+Therefore, do not implement a fake "one-click" button that secretly expects the browser to expose cookies.
 
----
+The implementation needs a legitimate browser-assisted authentication mechanism.
 
-# 2. The locker is the authority
-
-This is the most important part.
-
-The source playlist determines:
-
-> **Which songs and what order?**
-
-The locker determines:
-
-> **Which songs are allowed to exist in the replicated playlist?**
-
-So:
-
-```text
-SOURCE PLAYLIST
-      │
-      │ order + desired tracks
-      ▼
-MATCH ENGINE
-      ▲
-      │
-      │ allowed tracks
-      │
-LOCKER DATABASE
-```
-
-The source playlist **cannot authorize a track by itself**.
-
-If the track isn't in the locker, it doesn't make the destination playlist.
 
 ---
 
-# 3. Don't match by title alone
+Phase 2 — Design the New Authentication Architecture
 
-Because of the wrong local-artist issue you've been fighting, this needs very strong identity matching.
+Preferred UX
 
-Bad:
+The final experience should be:
 
-```text
-artist + title
-```
+┌─────────────────────────────────────────┐
+│ YouTube Music                           │
+│                                         │
+│  🔴 Not Connected                       │
+│                                         │
+│  Connect YTM Sync to your YouTube       │
+│  Music account.                         │
+│                                         │
+│     [ Connect YouTube Music ]           │
+│                                         │
+│  Your music stays on your server.       │
+└─────────────────────────────────────────┘
 
-Better:
+User presses:
 
-```text
-YT Music video ID
-```
+Connect YouTube Music
 
-Best for your system would be something like:
+Then:
 
-```text
-LockerUpload
-├── upload_id
-├── ytmusic_video_id
-├── ytmusic_track_id
-├── artist
-├── title
-├── album
-├── duration
-├── file_path
-└── upload_status
-```
-
-The matching engine should prefer stable IDs.
-
----
-
-# 4. Source playlist scanner
-
-Create a service:
-
-```text
-PlaylistWatcher
-```
-
-It periodically retrieves:
-
-```text
-source playlist
-```
-
-and produces:
-
-```text
-SourcePlaylistSnapshot
-```
-
-Example:
-
-```text
-Playlist:
-406 Playlist
-
-Revision:
-abc123
-
-Tracks:
-
-1 → video_id=A
-2 → video_id=B
-3 → video_id=C
-4 → video_id=D
-```
-
-Store the snapshot so you know what changed.
-
----
-
-# 5. Locker lookup
-
-Then query only successful uploads.
-
-Conceptually:
-
-```sql
-SELECT *
-FROM uploads
-WHERE upload_status = 'SUCCESS'
-AND ytmusic_video_id IS NOT NULL;
-```
-
-Build a lookup:
-
-```text
-video_id
+YTM Sync
    ↓
-locker upload
-```
+Create authentication session
+   ↓
+Open YouTube Music authentication
+   ↓
+User signs in normally
+   ↓
+Authentication callback/companion mechanism
+   ↓
+YTM Sync receives authentication
+   ↓
+Validate connection
+   ↓
+Save credentials securely
+   ↓
+Connected
+
+
+---
+
+Phase 3 — Investigate the Best Automatic Authentication Method
+
+Before writing the implementation, have the agent investigate which method is technically viable with the current deployment model.
+
+Option A — Browser-assisted local authentication
+
+Preferred if feasible.
+
+The application launches the user's browser and uses a local callback such as:
+
+http://127.0.0.1:<port>/auth/callback
+
+The browser handles authentication.
+
+YTM Sync receives the callback and completes authentication.
+
+Option B — Browser extension / companion mechanism
+
+If browser security prevents the required credentials from being obtained through the web UI, investigate a very small browser companion/extension.
+
+The extension could:
+
+1. Detect an authenticated YouTube Music session.
+
+
+2. Obtain only the required authentication information.
+
+
+3. Send it securely to the user's YTM Sync instance.
+
+
+4. Complete the connection automatically.
+
+
+
+The UI would still remain:
+
+Connect YouTube Music
+
+rather than exposing DevTools.
+
+Option C — Local desktop helper
+
+For native desktop installations, investigate whether a tiny local helper can:
+
+Flutter app
+    ↓
+Local authentication helper
+    ↓
+Browser
+    ↓
+YouTube Music
+    ↓
+Authentication data
+    ↓
+YTM Sync
+
+Important
+
+Do not assume Google OAuth will work for YouTube Music uploads simply because it is cleaner.
+
+The current application intentionally uses ytmusicapi browser-session authentication. The new system needs to preserve the authentication method that actually gives the application access to the user's YouTube Music uploads.
+
+
+---
+
+Phase 4 — Create an Authentication Session API
+
+Instead of immediately accepting:
+
+POST /api/auth/setup
+{
+    "raw_headers": "..."
+}
+
+introduce a proper authentication session.
+
+For example:
+
+POST /api/auth/start
+
+Response:
+
+{
+  "session_id": "...",
+  "auth_url": "...",
+  "status": "pending"
+}
+
+Then provide:
+
+GET /api/auth/session/{session_id}
+
+Possible states:
+
+pending
+authenticating
+processing
+connected
+failed
+cancelled
+expired
 
 Example:
 
-```text
-A → Locker Song A
-B → Locker Song B
-D → Locker Song D
-```
+{
+  "status": "connected",
+  "connected": true,
+  "user_name": "Example User"
+}
+
 
 ---
 
-# 6. Build the replicated playlist
+Phase 5 — Authentication Callback
 
-Now walk the source playlist **in its exact order**.
-
-Source:
-
-```text
-1 A
-2 B
-3 C
-4 D
-5 E
-```
-
-Locker:
-
-```text
-A
-B
-D
-```
-
-Generated destination:
-
-```text
-1 A
-2 B
-3 D
-```
-
-So the algorithm is essentially:
-
-```text
-for track in source_playlist:
-
-    if track exists in locker:
-        add track to desired_playlist
-
-    else:
-        skip
-```
-
-This gives you the important behavior:
-
-### Source playlist controls order
-
-### Locker controls eligibility
-
----
-
-# 7. Destination playlist reconciliation
-
-This should **not simply append everything**.
-
-You specifically want a **1:1 copy**.
-
-Therefore the destination playlist needs reconciliation.
+Implement a controlled callback mechanism.
 
 Example:
 
-### Current destination
+GET /api/auth/callback
 
-```text
-A
-B
-D
-```
+The callback should:
 
-### Source changes
+1. Validate the authentication session.
 
-```text
-B
-A
-D
-```
 
-The destination should become:
+2. Verify the request belongs to the active authentication attempt.
 
-```text
-B
-A
-D
-```
 
-not:
+3. Process authentication data.
 
-```text
-A
-B
-D
-B
-A
-D
-```
 
----
+4. Store credentials securely.
 
-# 8. Additions
 
-Source:
+5. Reset/reinitialize ytm_client.
 
-```text
-A
-B
-C
-D
-```
 
-Locker:
+6. Test the connection.
 
-```text
-A
-B
-D
-```
 
-Destination:
+7. Mark the session as successful.
 
-```text
-A
-B
-D
-```
 
-Then you upload C into the locker.
 
-Locker becomes:
+Never expose credentials through:
 
-```text
-A
-B
-C
-D
-```
+query strings
 
-Watcher detects it.
+normal UI
 
-Destination becomes:
+logs
 
-```text
-A
-B
-C
-D
-```
+error messages
+
+browser-visible JSON responses
+
+
 
 ---
 
-# 9. Removals
+Phase 6 — Secure Authentication Storage
 
-This is equally important.
+Keep the existing security properties.
 
-Source:
+The current implementation already writes the authentication file with restricted permissions.
 
-```text
-A
-B
-D
-```
+Preserve:
 
-Locker:
+/config/auth/headers_auth.json
 
-```text
-A
-B
-C
-D
-```
+with:
 
-Destination:
+0600
 
-```text
-A
-B
-D
-```
+Also verify:
 
-C stays excluded.
+parent directory permissions
 
-If B is removed from the source:
+container ownership
 
-```text
-A
-D
-```
+no credential logging
 
-Destination must become:
+no credential inclusion in API errors
 
-```text
-A
-D
-```
+no credential inclusion in Flutter state
 
-The system removes B from the replicated playlist.
+no credential persistence in browser local storage
+
+
+Important
+
+The Flutter application should know:
+
+Connected
+User: Jake
+
+It should not know or display:
+
+cookie=...
+authorization=...
+SAPISID=...
+
 
 ---
 
-# 10. Reordering
+Phase 7 — Replace the Current Settings UI
 
-If source changes:
+The current SettingsView should be redesigned.
 
-```text
-A
-B
-C
-D
-```
+Remove from normal UI
 
-to:
+Remove the normal-user presentation of:
 
-```text
-D
-B
-A
-C
-```
+F12 instructions
 
-and all four are in the locker:
+DevTools instructions
 
-Destination must become:
+Network tab instructions
 
-```text
-D
-B
-A
-C
-```
+request-header instructions
 
-Therefore the sync engine needs to compare **ordered lists**, not just sets.
+raw header textbox
+
+"paste headers here"
+
+raw authentication responses
+
+
+The existing _headersController should no longer be part of the normal connection workflow.
+
 
 ---
 
-# 11. Locker-only guarantee
+Phase 8 — New Connection Card
 
-I'd make this an explicit invariant:
+Build a dedicated account connection component.
 
-```text
-DESTINATION_TRACKS
-    ⊆
-LOCKER_UPLOADS
-```
+Example:
+
+YouTube Music
+
+🔴 Not Connected
+
+Connect your YouTube Music account to synchronize
+your uploads and playlists.
+
+[ 🔗 Connect YouTube Music ]
+
+Your YouTube Music password is never stored by YTM Sync.
+
+When clicked:
+
+Connecting...
+
+Opening YouTube Music authentication...
+
+Then:
+
+Waiting for authorization...
+
+Complete the sign-in in your browser.
+
+Then:
+
+✓ YouTube Music Connected
+
+Account
+Jake's YouTube Music
+
+[ Test Connection ] [ Disconnect ]
+
+
+---
+
+Phase 9 — Connection State Machine
+
+Don't rely on one boolean.
+
+Create explicit states.
+
+For example:
+
+enum AuthState {
+  disconnected,
+  starting,
+  waitingForBrowser,
+  authenticating,
+  verifying,
+  connected,
+  failed,
+  cancelled,
+  expired,
+}
+
+This makes the UI predictable.
+
+State mapping
+
+State	UI
+
+disconnected	Connect button
+starting	Starting…
+waitingForBrowser	Complete authentication in browser
+authenticating	Connecting…
+verifying	Verifying account…
+connected	Account connected
+failed	Friendly error + Retry
+cancelled	Authentication cancelled
+expired	Session expired + Retry
+
+
+
+---
+
+Phase 10 — Account Information
+
+When authentication succeeds, display whatever safe account information ytmusicapi can reliably provide.
+
+For example:
+
+✓ Connected
+
+YouTube Music
+Jake's Account
+
+Connected successfully.
+
+Do not display authentication headers.
+
+If no reliable account name exists, simply show:
+
+✓ YouTube Music Connected
+
+instead of inventing an account identity.
+
+
+---
+
+Phase 11 — Disconnect / Relink
+
+Add:
+
+Disconnect YouTube Music
+
+The backend should safely:
+
+1. Remove/invalidate the stored authentication.
+
+
+2. Reset ytm_client.
+
+
+3. Clear cached authentication state.
+
+
+4. Return the UI to disconnected.
+
+
+
+Then:
+
+[ Connect YouTube Music ]
+
+should start a completely new authentication session.
+
+Also support:
+
+Reconnect
+
+without requiring the user to manually delete files.
+
+
+---
+
+Phase 12 — Advanced Developer Authentication
+
+Do not necessarily delete the existing raw-header mechanism.
+
+Move it to:
+
+Advanced
+  └── Developer Authentication
+
+Example:
+
+Advanced Authentication
+
+For developers and troubleshooting only.
+
+[ Use manual request headers ]
+
+Opening that section can expose the current manual process.
+
+This gives developers a fallback without forcing normal users through it.
+
+
+---
+
+Phase 13 — API Changes
+
+Update ApiService.
+
+Current:
+
+setupAuth(String rawHeaders)
+
+should no longer be the primary API.
+
+Add methods along the lines of:
+
+Future<AuthSession> startAuth();
+
+Future<AuthSession> getAuthSession(String sessionId);
+
+Future<ConnectionStatus> cancelAuth(String sessionId);
+
+Future<ConnectionStatus> disconnectAuth();
+
+Future<ConnectionStatus> testAuth();
+
+Keep setupAuth() only if the advanced/manual authentication path remains.
+
+
+---
+
+Phase 14 — Backend Authentication Service
+
+Rather than putting the entire flow in main.py, create a dedicated authentication service.
+
+Something like:
+
+backend/ytm_service/
+    auth_service.py
+    auth_session.py
+    ytm_client.py
+
+Responsibilities:
+
+auth_service.py
+
+start authentication
+
+track sessions
+
+process callbacks
+
+validate sessions
+
+complete authentication
+
+disconnect
+
+expiration
+
+cleanup
+
+
+ytm_client.py
+
+Continue owning:
+
+ytmusicapi
+
+authentication file
+
+connection testing
+
+playlist access
+
+uploads
+
+YTM operations
+
+
+This keeps authentication orchestration separate from the YTM client.
+
+
+---
+
+Phase 15 — Session Security
+
+Authentication sessions must be:
+
+short-lived
+
+unpredictable
+
+single-use
+
+tied to the initiating client where practical
+
+deleted after successful completion
+
+deleted after cancellation
+
+automatically expired
+
+
+Example:
+
+Session created
+     ↓
+10-minute expiration
+     ↓
+Authentication completed
+     ↓
+Session destroyed
+
+Never create permanent authentication session IDs.
+
+
+---
+
+Phase 16 — Docker Compatibility
+
+This is extremely important for YTM Sync.
+
+The application is commonly run as:
+
+Docker
+   ↓
+Web UI
+   ↓
+User's browser
+
+The new authentication flow must work when:
+
+YTM Sync server != user's computer
+
+For example:
+
+Home Server
+192.168.x.x
+     ↓
+Browser on laptop
+
+Don't implement something that only works with:
+
+localhost
+
+unless the application can detect and correctly support that environment.
+
+Test:
+
+Local
+
+localhost → browser → YTM Sync
+
+LAN
+
+server IP → browser → YTM Sync
+
+Docker
+
+browser → Docker → backend
+
+Reverse proxy
+
+browser
+   ↓
+Traefik / Cloudflare
+   ↓
+YTM Sync
+
+
+---
+
+Phase 17 — Authentication Failure Handling
+
+Every failure should produce a useful message.
+
+Instead of:
+
+HTTP 400
+Failed to setup authentication: ...
+
+show:
+
+We couldn't connect your YouTube Music account.
+
+Your authentication session may have expired.
+
+[ Try Again ]
+
+Possible errors:
+
+cancelled
+
+timeout
+
+invalid authentication
+
+expired session
+
+YouTube Music unavailable
+
+callback failed
+
+server unreachable
+
+credentials rejected
+
+account verification failed
+
+
+Developer details should go to logs, not the normal UI.
+
+
+---
+
+Phase 18 — Testing
+
+Add backend tests for:
+
+Authentication API
+
+GET /api/auth/status
+POST /api/auth/start
+GET /api/auth/session/{id}
+POST /api/auth/cancel
+POST /api/auth/disconnect
+POST /api/auth/test
+
+Session tests
+
+session creation
+
+random session IDs
+
+expiration
+
+successful completion
+
+cancellation
+
+reuse prevention
+
+invalid session
+
+expired session
+
+
+Security tests
+
+Verify:
+
+credentials never returned by API
+credentials never appear in normal responses
+credentials never appear in logs
+
+Existing compatibility tests
+
+Make sure:
+
+/api/auth/setup
+
+still works if the manual developer method is retained.
+
+
+---
+
+Phase 19 — Flutter Tests
+
+Test the UI state machine.
+
+At minimum:
+
+Disconnected
+     ↓
+Connect
+     ↓
+Starting
+     ↓
+Waiting
+     ↓
+Authenticating
+     ↓
+Verifying
+     ↓
+Connected
 
 And:
 
-```text
-DESTINATION_ORDER
-    =
-SOURCE_ORDER
-    filtered by LOCKER_UPLOADS
-```
+Connect
+   ↓
+Cancelled
+   ↓
+Disconnected
 
-That's essentially the mathematical definition of what you're asking for.
+Connect
+   ↓
+Expired
+   ↓
+Retry
 
----
+Connect
+   ↓
+Failed
+   ↓
+Retry
 
-# 12. What happens when a song isn't uploaded?
-
-Don't create it.
-
-Don't search YouTube Music for an alternative.
-
-Don't download it.
-
-Don't fuzzy-match another artist.
-
-Don't substitute another version.
-
-Example:
-
-```text
-Source:
-Local Artist - My Song
-
-Locker:
-Local Artist - My Song ❌
-```
-
-Result:
-
-```text
-Destination:
-[excluded]
-```
-
-Log:
-
-```text
-INFO Source track excluded:
-Local Artist - My Song
-
-Reason:
-Not present in upload locker
-```
-
-This is particularly important for your local-artist problem.
 
 ---
 
-# 13. What happens after an upload?
+Phase 20 — UX Polish
 
-This is where the system gets useful.
+The final screen should feel like a normal application.
 
-Suppose the source playlist already contains:
+Don't say:
 
-```text
-A
-B
-C
-D
-```
+> Authentication headers
 
-Locker:
 
-```text
-A
-B
-D
-```
 
-Destination:
+Say:
 
-```text
-A
-B
-D
-```
+> Connect your YouTube Music account
 
-Later your normal sync process uploads C.
 
-The playlist watcher sees:
 
-```text
-C now exists in locker
-```
+Don't say:
 
-and destination becomes:
+> Authentication configuration
 
-```text
-A
-B
-C
-D
-```
 
-**without requiring you to manually edit the playlist.**
 
----
+Say:
 
-# 14. Two triggers
+> YouTube Music Account
 
-I'd support two ways to trigger reconciliation.
 
-### A. Playlist change
 
-```text
-Source playlist changed
-       ↓
-Reconcile
-```
+Don't say:
 
-### B. Locker change
+> Headers file configured
 
-```text
-New upload completed
-       ↓
-Reconcile affected playlists
-```
 
-That means you don't have to wait for the playlist polling interval after an upload.
+
+Say:
+
+> Connected
+
+
+
+Don't say:
+
+> Test authentication request
+
+
+
+Say:
+
+> Test Connection
+
+
+
 
 ---
 
-# 15. Efficient reconciliation
+Phase 21 — Update Documentation
 
-Don't rebuild every playlist every time.
+The README currently explicitly tells users to:
 
-Track dependencies:
+> Press F12 → Network → copy request headers → paste them.
 
-```text
-Playlist A
- ├── Song A
- ├── Song B
- └── Song C
 
-Playlist B
- ├── Song C
- └── Song D
-```
 
-If Song C gets uploaded:
+That section must be rewritten.
 
-```text
-Song C
- ↓
-Playlist A affected
-Playlist B affected
-```
+New documentation should be approximately:
 
-Only those need reconciliation.
+## YouTube Music Authentication
 
----
+1. Open YTM Sync.
+2. Go to Settings.
+3. Click Connect YouTube Music.
+4. Complete authentication in your browser.
+5. Return to YTM Sync.
 
-# 16. Configuration model
+YTM Sync will verify the connection automatically.
 
-I'd use something like:
+The manual developer authentication method can move to:
 
-```text
-ReplicatedPlaylist
-├── id
-├── source_playlist_id
-├── source_playlist_name
-├── destination_playlist_id
-├── destination_playlist_name
-├── enabled
-├── sync_interval
-├── last_source_revision
-├── last_sync_at
-└── last_sync_status
-```
+Advanced / Developer Authentication
 
-Example:
+or a separate troubleshooting document.
 
-```text
-Source:
-406 Lyricists
-
-Destination:
-406 Lyricists - Locker
-
-Mode:
-Locker Only
-
-Status:
-Watching
-
-Last Sync:
-2026-09-02 20:42
-```
 
 ---
 
-# 17. Multiple replicated playlists
+Phase 22 — Remove Stale UI/Documentation
 
-Design it so eventually you can have:
+Search the entire repository for:
 
-```text
-YT Music Playlist          Locker Replica
+F12
+Developer Tools
+Request Headers
+Copy Request Headers
+Copy as cURL
+raw_headers
+headers_auth
+Dev Mode
 
-Local Artists       →      Local Artists - Locker
+Classify each result:
 
-406 Lyricists        →      406 Lyricists - Locker
+Keep
 
-Favorites            →      Favorites - Locker
-```
+Backend implementation/security code.
 
-Each operates independently.
+Move
 
----
+Developer documentation/manual authentication.
 
-# 18. Destination playlist ownership
+Remove
 
-I'd strongly recommend that the application clearly marks playlists it manages.
+Normal-user instructions that are no longer necessary.
 
-For example:
+This prevents the old workflow from remaining hidden somewhere else.
 
-```text
-managed_by = ytmusic_sync
-replica_mode = locker_only
-source_playlist_id = XXXXX
-```
-
-That prevents the application from accidentally treating an unrelated playlist as one it should control.
 
 ---
 
-# 19. Never modify the source playlist
+Phase 23 — Full Regression Test
 
-The source playlist is **read-only from ytmusic_sync's perspective**.
+After implementation:
 
-The application should never:
+flutter analyze
+flutter test
 
-* remove songs
-* add songs
-* reorder songs
-* rename it
-* modify it
+Backend:
 
-Only:
+pytest
 
-```text
-READ SOURCE
-     ↓
-CALCULATE DESIRED STATE
-     ↓
-UPDATE DESTINATION
-```
+Then:
 
----
+docker compose build --no-cache
+docker compose up -d
 
-# 20. Destination playlist reconciliation states
+Verify:
 
-Track operations:
+/health
 
-```text
-ADD
-REMOVE
-MOVE
-NOOP
-```
+Then manually test:
 
-Example:
+Fresh installation
 
-```text
-Source:
-A B D E
+Not Connected
+    ↓
+Connect
+    ↓
+Browser
+    ↓
+Connected
 
-Locker:
-A B C D
+Existing authenticated installation
 
-Destination:
-A B C
+Container restart
+    ↓
+Account still connected
 
-Reconciliation:
+Invalid authentication
 
-ADD D
-REMOVE C
-```
+Invalid
+    ↓
+Friendly error
+    ↓
+Reconnect
 
-Final:
+Disconnect
 
-```text
-A B D
-```
+Connected
+    ↓
+Disconnect
+    ↓
+Not Connected
+
 
 ---
 
-# 21. Important: duplicate source tracks
+Phase 24 — Final Acceptance Checklist
 
-YouTube Music playlists can potentially contain repeated tracks.
+The agent should not consider this complete until all of these are true:
 
-You need to decide whether the replica preserves them.
+[ ] Normal users never need DevTools.
 
-For a true **1:1 playlist replica**, I recommend:
+[ ] Normal users never need to copy headers.
 
-> **Preserve duplicate occurrences and their positions.**
+[ ] Normal users never paste authentication data.
 
-Example:
+[ ] One obvious Connect YouTube Music button starts the process.
 
-```text
-Source:
-A
-B
-A
-C
-```
+[ ] Browser authentication is handled automatically as far as technically possible.
 
-Locker:
+[ ] Authentication progress is visible.
 
-```text
-A
-B
-C
-```
+[ ] Successful authentication clearly displays Connected.
 
-Destination:
+[ ] Failed authentication has a friendly explanation.
 
-```text
-A
-B
-A
-C
-```
+[ ] Retry works.
 
-That is much closer to a true filtered copy.
+[ ] Cancellation works.
 
----
+[ ] Authentication expiration works.
 
-# 22. Important: playlist title changes
+[ ] Disconnect works.
 
-I would **not automatically rename the destination based on the source** unless configured.
+[ ] Reconnect works.
 
-Instead:
+[ ] Credentials never appear in normal UI.
 
-```text
-Source:
-406 Lyricists
+[ ] Credentials never appear in logs.
 
-Destination:
-406 Lyricists - Locker
-```
+[ ] Existing manual authentication remains available only under Advanced/Developer options if needed.
 
-The destination name is user-controlled.
+[ ] Docker deployment works.
 
----
+[ ] LAN deployment works.
 
-# 23. UI
+[ ] Reverse-proxy deployment is tested if supported.
 
-I'd add:
+[ ] Backend authentication tests pass.
 
-## Playlist Replication
+[ ] Flutter tests pass.
 
-```text
-┌───────────────────────────────────┐
-│ Playlist Replication              │
-│                                   │
-│ [✓] Enabled                       │
-│                                   │
-│ Source Playlist                   │
-│ [ 406 Lyricists              ▼ ]  │
-│                                   │
-│ Locker Playlist                   │
-│ [ 406 Lyricists - Locker     ▼ ]  │
-│                                   │
-│ Mode                              │
-│ [ Locker Only                 ▼ ] │
-│                                   │
-│ Status: ● Watching                │
-│                                   │
-│ Source Tracks:        42          │
-│ Locker Matches:       37          │
-│ Excluded:              5          │
-│ Destination:          37          │
-│                                   │
-│ [ Sync Now ]                      │
-└───────────────────────────────────┘
-```
+[ ] README no longer teaches beginners to use F12.
 
----
+[ ] Existing playlist/upload functionality continues working after authentication changes.
 
-# 24. Show excluded tracks
 
-This would be extremely useful.
+One important instruction for the coding agent
 
-```text
-Excluded from replica
-────────────────────────────
+I would put this at the very top of the implementation task:
 
-5 tracks aren't uploaded.
+> Do not implement a cosmetic UI change that simply hides the existing header-paste workflow. First determine a technically valid browser-assisted authentication mechanism for the current ytmusicapi authentication model. The goal is a genuinely easier authentication flow, not a renamed DevTools workflow. If browser security prevents a pure web implementation, evaluate a browser extension/companion or local authentication helper rather than compromising security or pretending cookies can be read from the web page.
 
-○ Artist A - Song X
-  Not in locker
 
-○ Artist B - Song Y
-  Not in locker
 
-○ Artist C - Song Z
-  Not in locker
-```
-
-That immediately tells you:
-
-> "These are in my source playlist but haven't been uploaded yet."
-
----
-
-# 25. Add a "why excluded" reason
-
-Eventually:
-
-```text
-EXCLUDED
-
-Reason:
-Not uploaded
-
-Source:
-406 Lyricists
-
-Locker:
-No matching upload record
-```
-
-Possible reasons:
-
-```text
-NOT_UPLOADED
-UPLOAD_FAILED
-UPLOAD_PENDING
-IDENTITY_MISMATCH
-UNRESOLVED
-```
-
----
-
-# 26. Matching safety
-
-Given the issue you're currently fixing, I would make matching tiers explicit.
-
-### Tier 1 — exact stable ID
-
-```text
-ytmusic_video_id
-```
-
-### Tier 2 — exact upload-associated track ID
-
-```text
-ytmusic_track_id
-```
-
-### Tier 3 — metadata
-
-Only use metadata as a **candidate**, never automatically accept it when ambiguity exists.
-
-For example:
-
-```text
-Artist: Local Artist
-Title: Track
-Duration: 3:42
-```
-
-If two possible locker records exist:
-
-```text
-DO NOT GUESS
-```
-
-Mark:
-
-```text
-IDENTITY_AMBIGUOUS
-```
-
-That is much safer.
-
----
-
-# 27. Database relationships
-
-I'd structure the important relationship like:
-
-```text
-SourcePlaylist
-      │
-      │ contains
-      ▼
-SourcePlaylistTrack
-      │
-      │ matched to
-      ▼
-LockerUpload
-      │
-      │ replicated into
-      ▼
-ReplicatedPlaylistTrack
-```
-
-This lets you audit exactly why every destination track exists.
-
----
-
-# 28. Audit trail
-
-For every replica operation:
-
-```text
-PlaylistSyncEvent
-├── playlist_id
-├── source_track_id
-├── locker_upload_id
-├── action
-├── timestamp
-└── reason
-```
-
-Example:
-
-```text
-2026-09-02 20:43
-ADD
-Local Artist - Song
-Reason: source track exists in locker
-```
-
-Or:
-
-```text
-2026-09-02 20:43
-REMOVE
-Artist B - Song
-Reason: no longer present in source playlist
-```
-
----
-
-# 29. Dry-run mode
-
-Before enabling automatic modification:
-
-```bash
-ytmusic-sync playlist replicate --dry-run
-```
-
-Output:
-
-```text
-Source:
-406 Lyricists
-
-Would ADD:
-+ Artist A - Song 1
-
-Would REMOVE:
-- Artist B - Song 2
-
-Would MOVE:
-Artist C - Song 3
-    position 7 → position 2
-
-Would EXCLUDE:
-Artist D - Song 4
-    not uploaded
-```
-
-This would be very valuable during testing.
-
----
-
-# 30. Testing plan
-
-### Source changed
-
-```text
-source A B C
-locker A B C
-destination A B C
-```
-
-Change source:
-
-```text
-A C B
-```
-
-Expected:
-
-```text
-destination A C B
-```
-
-### Missing locker track
-
-```text
-source A B C
-locker A C
-```
-
-Expected:
-
-```text
-destination A C
-```
-
-### New upload
-
-```text
-source A B C
-locker A C
-```
-
-then upload B.
-
-Expected:
-
-```text
-A B C
-```
-
-### Upload removed/invalidated
-
-If your system marks an upload invalid:
-
-```text
-source A B C
-locker A C
-```
-
-Expected:
-
-```text
-A C
-```
-
-### Wrong artist
-
-Source:
-
-```text
-Local Artist - Song
-```
-
-Locker contains:
-
-```text
-Different Artist - Song
-```
-
-Expected:
-
-```text
-EXCLUDED
-```
-
-### Same title
-
-```text
-Artist A - Song
-Artist B - Song
-```
-
-Only the exact verified locker identity should match.
-
-### Duplicate tracks
-
-```text
-A
-B
-A
-C
-```
-
-Expected:
-
-```text
-A
-B
-A
-C
-```
-
-### Restart
-
-Stop Docker → start Docker.
-
-Expected:
-
-```text
-state restored
-watcher resumes
-no duplicate tracks
-```
-
----
-
-# Final architecture
-
-The complete feature should ultimately look like this:
-
-```text
-                    YOUTUBE MUSIC
-                         │
-                         │
-                  SOURCE PLAYLIST
-                         │
-                         │ watch/read
-                         ▼
-                ┌─────────────────┐
-                │ Playlist Watcher│
-                └────────┬────────┘
-                         │
-                         ▼
-                Source Playlist
-                    Snapshot
-                         │
-                         ▼
-                ┌─────────────────┐
-                │  Match Engine   │◄────────────┐
-                └────────┬────────┘             │
-                         │                      │
-                  source order                 │
-                         │                      │
-                         ▼                      │
-                ┌─────────────────┐             │
-                │ Locker Filter   │             │
-                └────────┬────────┘             │
-                         │                      │
-                         │ only verified        │
-                         │ uploads              │
-                         ▼                      │
-                ┌─────────────────┐             │
-                │ Desired Playlist│             │
-                │     State       │             │
-                └────────┬────────┘             │
-                         │                      │
-                         ▼                      │
-                ┌─────────────────┐             │
-                │  Reconciler     │             │
-                └────────┬────────┘             │
-                         │                      │
-                  ADD / REMOVE / MOVE          │
-                         │                      │
-                         ▼                      │
-                ┌─────────────────┐             │
-                │ Locker Replica  │             │
-                │ YT Music Playlist│            │
-                └─────────────────┘             │
-                                                │
-                         LOCKER UPLOAD ─────────┘
-```
-
-## The core rule
-
-The implementation should enforce this formula:
-
-**Destination Playlist = Source Playlist − anything that is not a verified locker upload**
-
-And preserve the source's ordering:
-
-**Destination order = Source order after locker-only filtering.**
-
-That is the cleanest way to get the **1:1 copy you want without allowing songs that aren't actually in your upload locker**, while also protecting against the wrong-artist matching problem.
+That distinction is important for this repo because the latest code shows that /api/auth/setup ultimately depends on ytmusicapi.setup() receiving browser-derived authentication headers. A frontend-only change cannot magically eliminate that dependency.
