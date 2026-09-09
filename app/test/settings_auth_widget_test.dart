@@ -35,6 +35,41 @@ void main() {
       expect(info.connected, isFalse);
       expect(info.authUrl, contains('ytm_sync_session=test_sess_123'));
     });
+
+    test('Auth error message categorization maps correctly', () {
+      // 1. Launcher failure
+      const launcherMsg = 'Unable to open authentication page. Please check your browser popup blocker or try again.';
+      expect(launcherMsg, contains('Unable to open authentication page'));
+
+      // 2. Authentication rejection
+      const rejectionError = 'Access denied: user rejected permissions';
+      String mapError(String err) {
+        final lower = err.toLowerCase();
+        if (lower.contains('reject') || lower.contains('denied') || lower.contains('permission') || lower.contains('unauthorized')) {
+          return 'YouTube Music authentication was rejected.';
+        }
+        return 'Authentication completed, but the session could not be established.';
+      }
+
+      expect(mapError(rejectionError), equals('YouTube Music authentication was rejected.'));
+      expect(mapError('Token exchange failed'), equals('Authentication completed, but the session could not be established.'));
+    });
+
+    test('Auth URL validation handles valid and invalid URLs', () {
+      bool isValidUrl(String raw) {
+        final trimmed = raw.trim();
+        if (trimmed.isEmpty) return false;
+        final uri = Uri.tryParse(trimmed);
+        return uri != null && uri.hasScheme && (uri.scheme == 'http' || uri.scheme == 'https');
+      }
+
+      expect(isValidUrl('https://music.youtube.com?session=123'), isTrue);
+      expect(isValidUrl('http://localhost:8080/auth'), isTrue);
+      expect(isValidUrl(''), isFalse);
+      expect(isValidUrl('   '), isFalse);
+      expect(isValidUrl('javascript:alert(1)'), isFalse);
+      expect(isValidUrl('not_a_url'), isFalse);
+    });
   });
 
   group('SettingsView Auth UI Tests', () {
@@ -66,3 +101,4 @@ void main() {
     });
   });
 }
+

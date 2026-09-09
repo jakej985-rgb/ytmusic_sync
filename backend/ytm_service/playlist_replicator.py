@@ -265,6 +265,15 @@ def is_managed_by_ytmusic_sync(description: Optional[str]) -> bool:
     return "managed_by=ytmusic_sync" in description
 
 
+async def _call_ytm(func, *args, user_id=None, **kwargs):
+    if user_id is not None:
+        try:
+            return await func(*args, user_id=user_id, **kwargs)
+        except TypeError:
+            return await func(*args, **kwargs)
+    return await func(*args, **kwargs)
+
+
 class PlaylistReplicatorService:
     """Service to orchestrate playlist watching, locker matching, and reconciliation."""
 
@@ -277,13 +286,14 @@ class PlaylistReplicatorService:
         if not config:
             raise ValueError(f"Replicated playlist configuration {replicated_id} not found")
 
+        user_id = getattr(config, "user_id", None)
         logger.info(
             f"RECONCILIATION START: '{config.source_playlist_name}' -> '{config.destination_playlist_name}' "
-            f"(dry_run={dry_run})"
+            f"(user_id={user_id}, dry_run={dry_run})"
         )
 
         # 1. Fetch source playlist tracks (Strictly READ-ONLY)
-        source_raw = await ytm_client.get_playlist_raw(config.source_playlist_id)
+        source_raw = await _call_ytm(ytm_client.get_playlist_raw, config.source_playlist_id, user_id=user_id)
         source_tracks = source_raw.get("tracks", [])
         source_title = source_raw.get("title") or config.source_playlist_name
 
@@ -312,8 +322,8 @@ class PlaylistReplicatorService:
             await db.save_replicated_playlist_snapshot(replicated_id, revision, snapshot_tracks)
             await db.update_replicated_playlist(replicated_id, last_source_revision=revision)
 
-        # 2. Fetch all verified locker uploads
-        uploads = await db.get_all_ytm_uploads()
+        # 2. Fetch all verified locker uploads (isolated by user if user_id is set)
+        uploads = await db.get_all_ytm_uploads(user_id=user_id)
         locker_lookup = build_locker_lookup(uploads)
 
         # 3. Filter source tracks: Locker-Only Guarantee & Order Preservation
@@ -324,7 +334,7 @@ class PlaylistReplicatorService:
         current_dest_tracks = []
         if dest_id:
             try:
-                dest_raw = await ytm_client.get_playlist_raw(dest_id)
+                dest_raw = await _call_ytm(ytm_client.get_playlist_raw, dest_id, user_id=user_id)
                 current_dest_tracks = dest_raw.get("tracks", [])
                 dest_desc = dest_raw.get("description", "")
                 if not is_managed_by_ytmusic_sync(dest_desc):
@@ -342,9 +352,11 @@ class PlaylistReplicatorService:
                 f"[managed_by=ytmusic_sync;replica_mode=locker_only;source_playlist_id={config.source_playlist_id}]"
             )
             logger.info(f"Creating destination playlist '{dest_name}' with ownership marker...")
-            dest_id = await ytm_client.create_playlist(
+            dest_id = await _call_ytm(
+                ytm_client.create_playlist,
                 title=dest_name,
-                description=ownership_desc
+                description=ownership_desc,
+                user_id=user_id
             )
             await db.update_replicated_playlist(replicated_id, destination_playlist_id=dest_id)
             config.destination_playlist_id = dest_id
@@ -362,7 +374,7 @@ class PlaylistReplicatorService:
                     if r.get("videoId") and r.get("setVideoId")
                 ]
                 if removals_payload:
-                    await ytm_client.remove_playlist_items(dest_id, removals_payload)
+                    await _call_ytm(ytm_client.remove_playlist_items, dest_id, removals_payload, user_id=user_id)
                     for r in diff["removals"]:
                         await db.record_replicated_playlist_event(
                             replicated_playlist_id=replicated_id,
@@ -376,7 +388,7 @@ class PlaylistReplicatorService:
             if diff["reordered"]:
                 # Re-fetch after removals only if destination originally had items
                 if current_dest_tracks:
-                    updated_dest = await ytm_client.get_playlist_raw(dest_id)
+                    updated_dest = await _call_ytm(ytm_client.get_playlist_raw, dest_id, user_id=user_id)
                     curr_remaining = updated_dest.get("tracks", [])
                 else:
                     curr_remaining = []
@@ -388,9 +400,9 @@ class PlaylistReplicatorService:
                     # Clear and re-populate to ensure 100% exact order and duplicates
                     clear_items = [{"videoId": t["videoId"], "setVideoId": t["setVideoId"]} for t in curr_remaining if t.get("setVideoId")]
                     if clear_items:
-                        await ytm_client.remove_playlist_items(dest_id, clear_items)
+                        await _call_ytm(ytm_client.remove_playlist_items, dest_id, clear_items, user_id=user_id)
                     if desired_vids:
-                        await ytm_client.add_playlist_items(dest_id, desired_vids, duplicates=True)
+                        await _call_ytm(ytm_client.add_playlist_items, dest_id, desired_vids, duplicates=True, user_id=user_id)
                         for t in desired_tracks:
                             await db.record_replicated_playlist_event(
                                 replicated_playlist_id=replicated_id,
@@ -400,7 +412,7 @@ class PlaylistReplicatorService:
                                 reason="Replicated in exact source order"
                             )
             elif diff["additions"]:
-                await ytm_client.add_playlist_items(dest_id, diff["additions"], duplicates=True)
+                await _call_ytm(ytm_client.add_playlist_items, dest_id, diff["additions"], duplicates=True, user_id=user_id)
                 for vid in diff["additions"]:
                     await db.record_replicated_playlist_event(
                         replicated_playlist_id=replicated_id,
@@ -408,6 +420,7 @@ class PlaylistReplicatorService:
                         source_video_id=vid,
                         reason="Added new verified locker track"
                     )
+
 
             # Log audit events for excluded tracks
             for ex in excluded_tracks:

@@ -1,1064 +1,1163 @@
-Yes. I inspected the latest ytmusic_sync-main.zip you uploaded, rather than basing this only on the existing Issue #11.
+# YTM Sync — Family Mode and Multi-Account Addendum
 
-The current repo confirms the account-linking flow is still fundamentally manual: the Flutter Settings screen asks users to open DevTools, copy YouTube Music request headers, paste them into a text box, and send them to /api/auth/setup. The backend then passes those headers into ytmusicapi.setup(). The existing API already has /api/auth/status, /api/auth/setup, and /api/auth/test.
+## 1. Goal
 
-Here is the plan I would give the coding agent.
+Extend the multi-user architecture with an optional **Family** feature that allows multiple YTM Sync accounts to be managed together in one interface.
 
-YTM Sync — Beginner-Friendly YouTube Music Account Linking
+Family Mode should make it easy to:
 
-Goal
+* See multiple connected YouTube Music accounts in one window.
+* Quickly switch between family members.
+* Upload a song to one selected account.
+* Upload the same song to multiple selected accounts.
+* See which account owns a playlist or upload.
+* Run sync operations for one account or multiple family accounts.
+* Keep every user's credentials and private data isolated.
 
-Replace the current:
-
-> Open DevTools → Network → find request → copy headers → paste headers → Connect
-
-
-
-experience with:
-
-> Connect YouTube Music → authenticate in browser → automatically return to YTM Sync
-
-
-
-The important part is that we do not simply hide the existing header textbox. The authentication architecture needs to be changed so normal users don't have to interact with browser developer tools.
-
+Family Mode must **not** weaken the security boundaries between individual users.
 
 ---
 
-Phase 1 — Audit the Existing Authentication
+# 2. Family Architecture
 
-1.1 Map the current flow
+The architecture should become:
 
-Document the current path:
-
-Flutter Settings
-      ↓
-_headersController
-      ↓
-POST /api/auth/setup
-      ↓
-AuthSetupRequest
-      ↓
-ytm_client.setup_auth()
-      ↓
-ytmusicapi.setup()
-      ↓
-/config/auth/headers_auth.json
-      ↓
-test_connection()
-
-Relevant existing code:
-
-app/lib/views/settings_view.dart
-
-app/lib/services/api_service.dart
-
-backend/ytm_service/main.py
-
-backend/ytm_service/ytm_client.py
-
-authentication models/configuration
-
-existing API tests
-
-
-1.2 Identify what can and cannot be automated
-
-This is important.
-
-A normal web page cannot simply read the user's YouTube Music cookies because of browser security restrictions.
-
-Therefore, do not implement a fake "one-click" button that secretly expects the browser to expose cookies.
-
-The implementation needs a legitimate browser-assisted authentication mechanism.
-
-
----
-
-Phase 2 — Design the New Authentication Architecture
-
-Preferred UX
-
-The final experience should be:
-
-┌─────────────────────────────────────────┐
-│ YouTube Music                           │
-│                                         │
-│  🔴 Not Connected                       │
-│                                         │
-│  Connect YTM Sync to your YouTube       │
-│  Music account.                         │
-│                                         │
-│     [ Connect YouTube Music ]           │
-│                                         │
-│  Your music stays on your server.       │
-└─────────────────────────────────────────┘
-
-User presses:
-
-Connect YouTube Music
-
-Then:
-
+```text
 YTM Sync
-   ↓
-Create authentication session
-   ↓
-Open YouTube Music authentication
-   ↓
-User signs in normally
-   ↓
-Authentication callback/companion mechanism
-   ↓
-YTM Sync receives authentication
-   ↓
-Validate connection
-   ↓
-Save credentials securely
-   ↓
-Connected
+│
+├── Users
+│   ├── User A
+│   │   └── YouTube Music Account A
+│   │
+│   ├── User B
+│   │   └── YouTube Music Account B
+│   │
+│   └── User C
+│       └── YouTube Music Account C
+│
+└── Families
+    └── Family 1
+        ├── User A
+        ├── User B
+        └── User C
+```
 
+A Family is a **grouping and authorization layer**.
 
----
-
-Phase 3 — Investigate the Best Automatic Authentication Method
-
-Before writing the implementation, have the agent investigate which method is technically viable with the current deployment model.
-
-Option A — Browser-assisted local authentication
-
-Preferred if feasible.
-
-The application launches the user's browser and uses a local callback such as:
-
-http://127.0.0.1:<port>/auth/callback
-
-The browser handles authentication.
-
-YTM Sync receives the callback and completes authentication.
-
-Option B — Browser extension / companion mechanism
-
-If browser security prevents the required credentials from being obtained through the web UI, investigate a very small browser companion/extension.
-
-The extension could:
-
-1. Detect an authenticated YouTube Music session.
-
-
-2. Obtain only the required authentication information.
-
-
-3. Send it securely to the user's YTM Sync instance.
-
-
-4. Complete the connection automatically.
-
-
-
-The UI would still remain:
-
-Connect YouTube Music
-
-rather than exposing DevTools.
-
-Option C — Local desktop helper
-
-For native desktop installations, investigate whether a tiny local helper can:
-
-Flutter app
-    ↓
-Local authentication helper
-    ↓
-Browser
-    ↓
-YouTube Music
-    ↓
-Authentication data
-    ↓
-YTM Sync
-
-Important
-
-Do not assume Google OAuth will work for YouTube Music uploads simply because it is cleaner.
-
-The current application intentionally uses ytmusicapi browser-session authentication. The new system needs to preserve the authentication method that actually gives the application access to the user's YouTube Music uploads.
-
+It is not a shared authentication account.
 
 ---
 
-Phase 4 — Create an Authentication Session API
+# 3. Family Model
 
-Instead of immediately accepting:
+Create a family entity:
 
-POST /api/auth/setup
+```text
+Family
+├── id
+├── name
+├── owner_user_id
+├── created_at
+└── updated_at
+```
+
+Example:
+
+```text
+Family
+├── id: family_001
+├── name: Johnson Family
+└── owner: user_001
+```
+
+---
+
+# 4. Family Membership
+
+Create a membership model:
+
+```text
+FamilyMember
+├── id
+├── family_id
+├── user_id
+├── role
+├── created_at
+└── status
+```
+
+Roles should initially be:
+
+```text
+OWNER
+ADMIN
+MEMBER
+```
+
+Optional future role:
+
+```text
+CHILD
+```
+
+Do not implement unnecessary child-account restrictions unless they are actually required.
+
+---
+
+# 5. Family Permissions
+
+Family membership must determine what another family member can see or do.
+
+Recommended initial behavior:
+
+### OWNER
+
+Can:
+
+* manage family,
+* invite members,
+* remove members,
+* see family members,
+* see family account connection status,
+* use Family Mode,
+* upload to permitted family accounts.
+
+### ADMIN
+
+Can:
+
+* see family members,
+* use Family Mode,
+* upload to permitted family accounts,
+* manage normal family settings.
+
+### MEMBER
+
+Can:
+
+* see permitted family accounts,
+* use Family Mode,
+* upload where permission is granted.
+
+The permission model must be explicit.
+
+Do not assume:
+
+```text
+same family = full access to everything
+```
+
+---
+
+# 6. YouTube Music Account Visibility
+
+A family member should be able to choose whether their YouTube Music account is visible to the family.
+
+Example:
+
+```text
+Family visibility
+
+[✓] Show my YouTube Music account in Family Mode
+[✓] Allow family uploads to my account
+[ ] Allow family members to see my playlists
+```
+
+This creates separate permissions for:
+
+* account visibility,
+* upload access,
+* playlist visibility,
+* sync visibility.
+
+---
+
+# 7. Important Privacy Rule
+
+**Family membership does not automatically grant access to private YTM data.**
+
+For example:
+
+```text
+Dad
+  │
+  └── YouTube Music
+       ├── Private playlists
+       ├── Uploads
+       └── Sync state
+```
+
+Mom should not automatically receive access to all of Dad's playlists merely because they are in the same Family.
+
+Family Mode should only expose information explicitly allowed by the account owner.
+
+---
+
+# 8. Family Dashboard
+
+Create a Family dashboard that displays connected accounts.
+
+Example:
+
+```text
+┌──────────────────────────────────────────────┐
+│ Johnson Family                               │
+├──────────────────────────────────────────────┤
+│                                              │
+│  👤 Dad                                      │
+│  YouTube Music        ✓ Connected            │
+│  Uploads: 243                                 │
+│                                              │
+│  👤 Mom                                      │
+│  YouTube Music        ✓ Connected            │
+│  Uploads: 118                                 │
+│                                              │
+│  👤 Charles                                  │
+│  YouTube Music        ✓ Connected            │
+│  Uploads: 42                                  │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+
+Only information permitted by the member's privacy settings should be displayed.
+
+---
+
+# 9. Account Selector
+
+Create a reusable account selector throughout the application.
+
+Example:
+
+```text
+YouTube Music Account
+
+┌─────────────────────────────────────┐
+│ 👤 Dad                              │
+│    Connected ✓                      │
+├─────────────────────────────────────┤
+│ 👤 Mom                              │
+│    Connected ✓                      │
+├─────────────────────────────────────┤
+│ 👤 Charles                          │
+│    Connected ✓                      │
+└─────────────────────────────────────┘
+```
+
+This should become the standard way to choose a YTM account.
+
+---
+
+# 10. Upload Destination Selector
+
+The upload screen must allow the user to choose where the upload goes.
+
+Example:
+
+```text
+Upload Music
+────────────────────────────────
+
+Files
+  My Song.mp3
+  Another Song.mp3
+
+Upload to:
+
+☑ Dad — YouTube Music
+☐ Mom — YouTube Music
+☐ Charles — YouTube Music
+
+[ Upload ]
+```
+
+The default should be the currently selected account.
+
+---
+
+# 11. Single-Account Upload
+
+If the user selects one account:
+
+```text
+☑ Dad
+☐ Mom
+☐ Charles
+```
+
+the file is uploaded only to Dad's YouTube Music account.
+
+The backend must use:
+
+```text
+selected_ytm_account_id
+```
+
+to determine the destination.
+
+It must **not** trust a client-provided user ID without validating permissions.
+
+---
+
+# 12. Multi-Account Upload
+
+Allow the user to select multiple permitted accounts:
+
+```text
+☑ Dad
+☑ Mom
+☐ Charles
+```
+
+The system creates independent upload jobs:
+
+```text
+Upload
+│
+├── Job → Dad
+└── Job → Mom
+```
+
+Each job must use that account's:
+
+* authentication,
+* YTMusic client,
+* upload state,
+* error handling.
+
+---
+
+# 13. Never Reuse Authentication Between Accounts
+
+This is critical.
+
+For:
+
+```text
+☑ Dad
+☑ Mom
+```
+
+the application must perform:
+
+```text
+Dad upload
+    ↓
+Dad's YTMusic client
+    ↓
+Dad's authentication
+
+Mom upload
+    ↓
+Mom's YTMusic client
+    ↓
+Mom's authentication
+```
+
+Never:
+
+```text
+One global YTMusic client
+        ↓
+switch account
+```
+
+This prevents accidental cross-account uploads.
+
+---
+
+# 14. Upload Job Model
+
+Expand the upload job model:
+
+```text
+UploadJob
+├── id
+├── family_id
+├── requested_by_user_id
+├── destination_user_id
+├── youtube_music_account_id
+├── file_id
+├── status
+├── progress
+├── error
+├── created_at
+├── started_at
+└── completed_at
+```
+
+This makes the destination explicit.
+
+---
+
+# 15. Upload Authorization
+
+Before starting an upload:
+
+```text
+Current User
+      ↓
+Is user allowed to upload to destination?
+      ↓
+YES
+      ↓
+Is destination YTM account connected?
+      ↓
+YES
+      ↓
+Create upload job
+```
+
+Reject if:
+
+* destination account doesn't exist,
+* destination account isn't connected,
+* destination user isn't in the family,
+* destination user has disabled family uploads,
+* requesting user lacks permission,
+* authentication is invalid.
+
+---
+
+# 16. Upload Confirmation
+
+When uploading to another person's account, make the destination obvious.
+
+Example:
+
+```text
+Upload to:
+
+⚠️ Dad's YouTube Music account
+
+2 songs will be uploaded.
+
+[ Cancel ]    [ Upload ]
+```
+
+For multiple accounts:
+
+```text
+Upload to:
+
+✓ Dad
+✓ Mom
+✗ Charles — Family uploads disabled
+
+2 upload jobs will be created.
+
+[ Cancel ]    [ Upload ]
+```
+
+This prevents accidental uploads to the wrong account.
+
+---
+
+# 17. Family Upload History
+
+Family Mode should provide a combined upload history where permitted.
+
+Example:
+
+```text
+Recent Family Uploads
+
+Song                 Destination      Status
+------------------------------------------------
+My Song              Dad               ✓
+My Song              Mom               ✓
+New Track            Dad               ✓
+New Track            Mom               Failed
+```
+
+The history should clearly identify:
+
+* source file,
+* destination account,
+* requesting user,
+* status,
+* error,
+* timestamp.
+
+---
+
+# 18. Family Sync
+
+Family Mode should eventually support:
+
+```text
+Sync
+├── This Account
+└── Family
+```
+
+### This Account
+
+Sync only the currently selected user's YTM account.
+
+### Family
+
+Run permitted sync jobs for all family accounts.
+
+Example:
+
+```text
+Family Sync
+
+Dad       ✓ Complete
+Mom       ✓ Complete
+Charles   ⏳ Syncing
+```
+
+A failure for one account must not stop the others.
+
+---
+
+# 19. Family Playlist Visibility
+
+Playlist visibility should be independently configurable.
+
+Example:
+
+```text
+Family Sharing
+
+YouTube Music Account
+[✓] Show account in family
+[✓] Allow family uploads
+[✓] Show playlists
+[ ] Allow playlist modification
+```
+
+Initially, recommend:
+
+```text
+View playlist
+```
+
+before allowing:
+
+```text
+Modify playlist
+```
+
+---
+
+# 20. Family Playlist Operations
+
+When the future playlist system is implemented, every operation must specify its destination account.
+
+Example:
+
+```text
+Create Playlist
+
+Playlist name:
+My Family Playlist
+
+Account:
+[ Dad ▼ ]
+
+Source:
+☑ Uploaded songs only
+
+[ Create Playlist ]
+```
+
+For multiple accounts:
+
+```text
+Create playlist on:
+
+☑ Dad
+☑ Mom
+☐ Charles
+```
+
+Each account receives an independent operation.
+
+---
+
+# 21. Family Account Switcher
+
+The application should provide a persistent account selector.
+
+Example:
+
+```text
+┌─────────────────────────┐
+│ Active Account           │
+│                          │
+│ 👤 Dad                   │
+│ ✓ YouTube Music         │
+│                          │
+│ ▼ Switch account         │
+└─────────────────────────┘
+```
+
+Options:
+
+```text
+Dad
+Mom
+Charles
+──────────────
+Family
+```
+
+Selecting **Family** activates the multi-account dashboard.
+
+---
+
+# 22. Family Mode vs Personal Mode
+
+The application should have two conceptual modes:
+
+```text
+PERSONAL
+    ↓
+One user's YTM account
+
+FAMILY
+    ↓
+Multiple permitted family accounts
+```
+
+Personal mode remains the default.
+
+Family Mode is opt-in.
+
+---
+
+# 23. Family API
+
+Add endpoints along the lines of:
+
+```text
+POST   /api/families
+GET    /api/families
+GET    /api/families/{family_id}
+PATCH  /api/families/{family_id}
+DELETE /api/families/{family_id}
+
+POST   /api/families/{family_id}/members
+DELETE /api/families/{family_id}/members/{user_id}
+
+GET    /api/families/{family_id}/accounts
+PATCH  /api/families/{family_id}/members/{user_id}/permissions
+```
+
+Account-selection endpoints:
+
+```text
+GET /api/accounts
+GET /api/accounts/{account_id}
+```
+
+Upload endpoints should accept a destination account ID:
+
+```text
+POST /api/uploads
+```
+
+with the server validating that the current user is allowed to use that destination.
+
+---
+
+# 24. Never Trust Destination IDs
+
+A malicious client could attempt:
+
+```json
 {
-    "raw_headers": "..."
+  "destination_user_id": "someone_else"
 }
+```
 
-introduce a proper authentication session.
+or:
 
-For example:
-
-POST /api/auth/start
-
-Response:
-
+```json
 {
-  "session_id": "...",
-  "auth_url": "...",
-  "status": "pending"
+  "youtube_music_account_id": "another_account"
 }
+```
 
-Then provide:
+The backend must verify:
 
-GET /api/auth/session/{session_id}
+```text
+Current User
+      ↓
+Family membership
+      ↓
+Destination account
+      ↓
+Permission
+```
 
-Possible states:
+before doing anything.
 
-pending
-authenticating
-processing
-connected
-failed
-cancelled
-expired
+---
+
+# 25. Family Database Relationships
+
+Recommended relationships:
+
+```text
+User
+ │
+ ├── YouTubeMusicAccount
+ │
+ └── FamilyMembership
+          │
+          ↓
+        Family
+          │
+          ├── FamilyMember
+          ├── FamilyMember
+          └── FamilyMember
+```
+
+Uploads:
+
+```text
+UploadJob
+ ├── requested_by_user_id
+ ├── destination_user_id
+ ├── youtube_music_account_id
+ └── family_id
+```
+
+This clearly separates:
+
+**Who requested it**
+
+from:
+
+**Where it goes.**
+
+---
+
+# 26. Security Rules
+
+Family Mode must enforce all of the following:
+
+* [x] Users cannot access families they don't belong to.
+* [x] Users cannot add themselves to arbitrary families.
+* [x] Users cannot see accounts hidden from them.
+* [x] Users cannot upload to accounts that disallow family uploads.
+* [x] Users cannot modify another user's permissions.
+* [x] Users cannot access another user's credentials.
+* [x] Users cannot access another user's private playlists.
+* [x] Users cannot access another user's private sync state.
+* [x] Users cannot construct arbitrary destination account IDs.
+* [x] Destination accounts are validated server-side.
+* [x] Upload jobs record both requester and destination.
+
+---
+
+# 27. Family Invitations
+
+Add a family invitation system.
 
 Example:
 
-{
-  "status": "connected",
-  "connected": true,
-  "user_name": "Example User"
-}
+```text
+Family
+  ↓
+Invite Member
+  ↓
+Invitation
+  ↓
+User accepts
+  ↓
+FamilyMember created
+```
 
+Invitation tokens must be:
+
+* random,
+* short-lived,
+* single-use,
+* invalidated after acceptance.
+
+Do not expose internal family IDs as invitation secrets.
 
 ---
 
-Phase 5 — Authentication Callback
+# 28. Family Removal
 
-Implement a controlled callback mechanism.
+When removing a family member:
+
+```text
+Remove Charles from Family?
+```
+
+Removing a member must **not**:
+
+* delete their YTM account,
+* delete their YTM Sync account,
+* delete their uploads,
+* delete their playlists,
+* delete their authentication.
+
+It should only remove the family relationship.
+
+---
+
+# 29. Leaving a Family
+
+A normal member should be able to:
+
+```text
+Leave Family
+```
+
+The user's personal account remains intact.
+
+Their YTM Music connection remains intact.
+
+Their personal data remains intact.
+
+Only the family relationship is removed.
+
+---
+
+# 30. Family Owner Transfer
+
+Allow the owner to transfer ownership.
 
 Example:
 
-GET /api/auth/callback
+```text
+Transfer Family Ownership
 
-The callback should:
+Transfer ownership to:
+[ Mom ▼ ]
 
-1. Validate the authentication session.
+[ Cancel ] [ Transfer ]
+```
 
-
-2. Verify the request belongs to the active authentication attempt.
-
-
-3. Process authentication data.
-
-
-4. Store credentials securely.
-
-
-5. Reset/reinitialize ytm_client.
-
-
-6. Test the connection.
-
-
-7. Mark the session as successful.
-
-
-
-Never expose credentials through:
-
-query strings
-
-normal UI
-
-logs
-
-error messages
-
-browser-visible JSON responses
-
-
+Require explicit confirmation.
 
 ---
 
-Phase 6 — Secure Authentication Storage
+# 31. Family Deletion
 
-Keep the existing security properties.
+Deleting a family must **not delete users**.
 
-The current implementation already writes the authentication file with restricted permissions.
+It should only delete:
 
-Preserve:
+* family,
+* memberships,
+* family permissions,
+* family invitations.
 
-/config/auth/headers_auth.json
-
-with:
-
-0600
-
-Also verify:
-
-parent directory permissions
-
-container ownership
-
-no credential logging
-
-no credential inclusion in API errors
-
-no credential inclusion in Flutter state
-
-no credential persistence in browser local storage
-
-
-Important
-
-The Flutter application should know:
-
-Connected
-User: Jake
-
-It should not know or display:
-
-cookie=...
-authorization=...
-SAPISID=...
-
+Individual user accounts and YTM accounts remain intact.
 
 ---
 
-Phase 7 — Replace the Current Settings UI
+# 32. Family UI Safety
 
-The current SettingsView should be redesigned.
+Always display the destination account prominently.
 
-Remove from normal UI
+Avoid ambiguous buttons such as:
 
-Remove the normal-user presentation of:
+```text
+Upload
+```
 
-F12 instructions
+Prefer:
 
-DevTools instructions
+```text
+Upload to Dad
+```
 
-Network tab instructions
+or:
 
-request-header instructions
+```text
+Upload to 2 accounts
+```
 
-raw header textbox
-
-"paste headers here"
-
-raw authentication responses
-
-
-The existing _headersController should no longer be part of the normal connection workflow.
-
+This is especially important when the same song is being uploaded to multiple accounts.
 
 ---
 
-Phase 8 — New Connection Card
+# 33. Multi-Account Upload Queue
 
-Build a dedicated account connection component.
+The queue should group jobs by destination.
 
 Example:
 
-YouTube Music
+```text
+Upload Queue
 
-🔴 Not Connected
+My Song.mp3
+ ├── Dad       ✓ Complete
+ ├── Mom       ⏳ Uploading
+ └── Charles   — Not permitted
 
-Connect your YouTube Music account to synchronize
-your uploads and playlists.
+Another Song.mp3
+ ├── Dad       ⏳ Waiting
+ └── Mom       ✓ Complete
+```
 
-[ 🔗 Connect YouTube Music ]
-
-Your YouTube Music password is never stored by YTM Sync.
-
-When clicked:
-
-Connecting...
-
-Opening YouTube Music authentication...
-
-Then:
-
-Waiting for authorization...
-
-Complete the sign-in in your browser.
-
-Then:
-
-✓ YouTube Music Connected
-
-Account
-Jake's YouTube Music
-
-[ Test Connection ] [ Disconnect ]
-
+Each destination gets its own status.
 
 ---
 
-Phase 9 — Connection State Machine
+# 34. Duplicate Handling Per Account
 
-Don't rely on one boolean.
-
-Create explicit states.
-
-For example:
-
-enum AuthState {
-  disconnected,
-  starting,
-  waitingForBrowser,
-  authenticating,
-  verifying,
-  connected,
-  failed,
-  cancelled,
-  expired,
-}
-
-This makes the UI predictable.
-
-State mapping
-
-State	UI
-
-disconnected	Connect button
-starting	Starting…
-waitingForBrowser	Complete authentication in browser
-authenticating	Connecting…
-verifying	Verifying account…
-connected	Account connected
-failed	Friendly error + Retry
-cancelled	Authentication cancelled
-expired	Session expired + Retry
-
-
-
----
-
-Phase 10 — Account Information
-
-When authentication succeeds, display whatever safe account information ytmusicapi can reliably provide.
-
-For example:
-
-✓ Connected
-
-YouTube Music
-Jake's Account
-
-Connected successfully.
-
-Do not display authentication headers.
-
-If no reliable account name exists, simply show:
-
-✓ YouTube Music Connected
-
-instead of inventing an account identity.
-
-
----
-
-Phase 11 — Disconnect / Relink
-
-Add:
-
-Disconnect YouTube Music
-
-The backend should safely:
-
-1. Remove/invalidate the stored authentication.
-
-
-2. Reset ytm_client.
-
-
-3. Clear cached authentication state.
-
-
-4. Return the UI to disconnected.
-
-
-
-Then:
-
-[ Connect YouTube Music ]
-
-should start a completely new authentication session.
-
-Also support:
-
-Reconnect
-
-without requiring the user to manually delete files.
-
-
----
-
-Phase 12 — Advanced Developer Authentication
-
-Do not necessarily delete the existing raw-header mechanism.
-
-Move it to:
-
-Advanced
-  └── Developer Authentication
+Duplicate detection must be performed independently per destination account.
 
 Example:
 
-Advanced Authentication
+```text
+My Song.mp3
 
-For developers and troubleshooting only.
+Dad:
+✓ Already uploaded
 
-[ Use manual request headers ]
+Mom:
+⬆ Uploading
 
-Opening that section can expose the current manual process.
+Charles:
+✗ Family uploads disabled
+```
 
-This gives developers a fallback without forcing normal users through it.
-
-
----
-
-Phase 13 — API Changes
-
-Update ApiService.
-
-Current:
-
-setupAuth(String rawHeaders)
-
-should no longer be the primary API.
-
-Add methods along the lines of:
-
-Future<AuthSession> startAuth();
-
-Future<AuthSession> getAuthSession(String sessionId);
-
-Future<ConnectionStatus> cancelAuth(String sessionId);
-
-Future<ConnectionStatus> disconnectAuth();
-
-Future<ConnectionStatus> testAuth();
-
-Keep setupAuth() only if the advanced/manual authentication path remains.
-
+Never assume that because a song exists in Dad's account it exists in Mom's account.
 
 ---
 
-Phase 14 — Backend Authentication Service
+# 35. Family Playlist Planning
 
-Rather than putting the entire flow in main.py, create a dedicated authentication service.
-
-Something like:
-
-backend/ytm_service/
-    auth_service.py
-    auth_session.py
-    ytm_client.py
-
-Responsibilities:
-
-auth_service.py
-
-start authentication
-
-track sessions
-
-process callbacks
-
-validate sessions
-
-complete authentication
-
-disconnect
-
-expiration
-
-cleanup
-
-
-ytm_client.py
-
-Continue owning:
-
-ytmusicapi
-
-authentication file
-
-connection testing
-
-playlist access
-
-uploads
-
-YTM operations
-
-
-This keeps authentication orchestration separate from the YTM client.
-
-
----
-
-Phase 15 — Session Security
-
-Authentication sessions must be:
-
-short-lived
-
-unpredictable
-
-single-use
-
-tied to the initiating client where practical
-
-deleted after successful completion
-
-deleted after cancellation
-
-automatically expired
-
+The planned uploaded-song-only playlist functionality should integrate with Family Mode.
 
 Example:
 
-Session created
-     ↓
-10-minute expiration
-     ↓
-Authentication completed
-     ↓
-Session destroyed
+```text
+Create / Watch Playlist
 
-Never create permanent authentication session IDs.
+Playlist:
+Family Uploads
 
+Account:
+[ Mom ▼ ]
 
----
+Source:
+● Uploaded songs only
 
-Phase 16 — Docker Compatibility
+```
 
-This is extremely important for YTM Sync.
+For Family Mode:
 
-The application is commonly run as:
+```text
+Accounts:
 
-Docker
-   ↓
-Web UI
-   ↓
-User's browser
+☑ Dad
+☑ Mom
+☐ Charles
+```
 
-The new authentication flow must work when:
-
-YTM Sync server != user's computer
-
-For example:
-
-Home Server
-192.168.x.x
-     ↓
-Browser on laptop
-
-Don't implement something that only works with:
-
-localhost
-
-unless the application can detect and correctly support that environment.
-
-Test:
-
-Local
-
-localhost → browser → YTM Sync
-
-LAN
-
-server IP → browser → YTM Sync
-
-Docker
-
-browser → Docker → backend
-
-Reverse proxy
-
-browser
-   ↓
-Traefik / Cloudflare
-   ↓
-YTM Sync
-
+The application creates/maintains the playlist independently on each selected YouTube Music account.
 
 ---
 
-Phase 17 — Authentication Failure Handling
+# 36. Family-Aware Background Jobs
 
-Every failure should produce a useful message.
+Every background job must include:
 
-Instead of:
+```text
+requested_by_user_id
+destination_user_id
+youtube_music_account_id
+family_id
+```
 
-HTTP 400
-Failed to setup authentication: ...
+Example:
 
-show:
+```text
+Family playlist sync
+       ↓
+Dad playlist sync
+       ↓
+Mom playlist sync
+       ↓
+Charles playlist sync
+```
 
-We couldn't connect your YouTube Music account.
-
-Your authentication session may have expired.
-
-[ Try Again ]
-
-Possible errors:
-
-cancelled
-
-timeout
-
-invalid authentication
-
-expired session
-
-YouTube Music unavailable
-
-callback failed
-
-server unreachable
-
-credentials rejected
-
-account verification failed
-
-
-Developer details should go to logs, not the normal UI.
-
+One account failing must not affect the others.
 
 ---
 
-Phase 18 — Testing
+# 37. Family Security Testing
 
-Add backend tests for:
+Add tests for:
 
-Authentication API
+### Membership
 
-GET /api/auth/status
-POST /api/auth/start
-GET /api/auth/session/{id}
-POST /api/auth/cancel
-POST /api/auth/disconnect
-POST /api/auth/test
+* [x] Member can access their family.
+* [x] Non-member cannot access family.
+* [x] Member cannot modify family ownership.
+* [x] Member cannot add unauthorized users.
 
-Session tests
+### Account visibility
 
-session creation
+* [x] Hidden YTM account is invisible.
+* [x] Visible account is shown.
+* [x] Family upload permission is enforced.
 
-random session IDs
+### Uploads
 
-expiration
+* [x] User can upload to own account.
+* [x] User can upload to permitted family account.
+* [x] User cannot upload to restricted family account.
+* [x] User cannot upload to non-family account.
+* [x] Destination account cannot be spoofed.
 
-successful completion
+### Privacy
 
-cancellation
-
-reuse prevention
-
-invalid session
-
-expired session
-
-
-Security tests
-
-Verify:
-
-credentials never returned by API
-credentials never appear in normal responses
-credentials never appear in logs
-
-Existing compatibility tests
-
-Make sure:
-
-/api/auth/setup
-
-still works if the manual developer method is retained.
-
+* [x] Private playlist remains private.
+* [x] Private sync state remains private.
+* [x] Authentication remains private.
+* [x] User cannot retrieve another user's credentials.
 
 ---
 
-Phase 19 — Flutter Tests
+# 38. Family Integration Test
 
-Test the UI state machine.
+Create a complete mocked workflow:
 
-At minimum:
+```text
+Dad
+ ├── YTM Account A
+ │
+Mom
+ ├── YTM Account B
+ │
+Charles
+ └── YTM Account C
 
-Disconnected
-     ↓
-Connect
-     ↓
-Starting
-     ↓
-Waiting
-     ↓
-Authenticating
-     ↓
-Verifying
-     ↓
-Connected
+        ↓
 
-And:
+Johnson Family
 
-Connect
-   ↓
-Cancelled
-   ↓
-Disconnected
+        ↓
 
-Connect
-   ↓
-Expired
-   ↓
-Retry
+Dad uploads song
 
-Connect
-   ↓
-Failed
-   ↓
-Retry
+        ↓
 
+Select:
+☑ Dad
+☑ Mom
 
----
+        ↓
 
-Phase 20 — UX Polish
+Create two upload jobs
 
-The final screen should feel like a normal application.
+        ↓
 
-Don't say:
+Dad → YTMusic A
+Mom → YTMusic B
 
-> Authentication headers
+        ↓
 
+Charles receives nothing
+```
 
+Then verify:
 
-Say:
-
-> Connect your YouTube Music account
-
-
-
-Don't say:
-
-> Authentication configuration
-
-
-
-Say:
-
-> YouTube Music Account
-
-
-
-Don't say:
-
-> Headers file configured
-
-
-
-Say:
-
-> Connected
-
-
-
-Don't say:
-
-> Test authentication request
-
-
-
-Say:
-
-> Test Connection
-
-
-
+```text
+Dad cannot access Mom's credentials.
+Mom cannot access Dad's credentials.
+Charles cannot access either account unless permitted.
+```
 
 ---
 
-Phase 21 — Update Documentation
+# 39. Definition of Done — Family Mode
 
-The README currently explicitly tells users to:
+Family Mode is complete when:
 
-> Press F12 → Network → copy request headers → paste them.
-
-
-
-That section must be rewritten.
-
-New documentation should be approximately:
-
-## YouTube Music Authentication
-
-1. Open YTM Sync.
-2. Go to Settings.
-3. Click Connect YouTube Music.
-4. Complete authentication in your browser.
-5. Return to YTM Sync.
-
-YTM Sync will verify the connection automatically.
-
-The manual developer authentication method can move to:
-
-Advanced / Developer Authentication
-
-or a separate troubleshooting document.
-
-
----
-
-Phase 22 — Remove Stale UI/Documentation
-
-Search the entire repository for:
-
-F12
-Developer Tools
-Request Headers
-Copy Request Headers
-Copy as cURL
-raw_headers
-headers_auth
-Dev Mode
-
-Classify each result:
-
-Keep
-
-Backend implementation/security code.
-
-Move
-
-Developer documentation/manual authentication.
-
-Remove
-
-Normal-user instructions that are no longer necessary.
-
-This prevents the old workflow from remaining hidden somewhere else.
-
+* [x] Families can be created.
+* [x] Users can be invited.
+* [x] Users can join families.
+* [x] Users can leave families.
+* [x] Owners can remove members.
+* [x] Family ownership can be transferred.
+* [x] Families can be deleted without deleting users.
+* [x] Multiple YTM accounts can be displayed together.
+* [x] Account visibility can be controlled.
+* [x] Family upload permissions can be controlled.
+* [x] Upload destination can be selected.
+* [x] Multiple upload destinations can be selected.
+* [x] Each destination gets an independent upload job.
+* [x] Each upload uses the correct YTM authentication.
+* [x] Duplicate detection is per account.
+* [x] Upload history identifies destination.
+* [x] Family sync works independently per account.
+* [x] Family playlist functionality is account-aware.
+* [x] Private user data remains private.
+* [x] Cross-family access is blocked.
+* [x] Cross-user authentication access is blocked.
+* [x] Security tests pass.
+* [x] Docker/reverse-proxy testing passes.
 
 ---
 
-Phase 23 — Full Regression Test
+# 40. Final Architecture
 
-After implementation:
+The target architecture should ultimately look like:
 
-flutter analyze
-flutter test
+```text
+                         YTM Sync
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+          Personal                     Family
+              │                           │
+              │                    ┌──────┴──────┐
+              │                    │             │
+            User                 Dad           Mom
+              │                    │             │
+              │              YTM Account A   YTM Account B
+              │                    │             │
+              │                    │             │
+              └──────────────┬─────┴─────────────┘
+                             │
+                        Upload Manager
+                             │
+                  ┌──────────┴──────────┐
+                  │                     │
+             Upload Job A          Upload Job B
+                  │                     │
+             YTMusic A              YTMusic B
+                  │                     │
+             Dad account             Mom account
+```
 
-Backend:
+## Core Design Principle
 
-pytest
+**The person making the request and the account receiving the operation are separate concepts.**
 
-Then:
+For every operation, especially uploads:
 
-docker compose build --no-cache
-docker compose up -d
+```text
+requested_by_user
+        +
+destination_ytm_account
+        +
+authorization
+        ↓
+operation
+```
 
-Verify:
+This allows YTM Sync to support:
 
-/health
+* personal accounts,
+* family accounts,
+* multiple YTM accounts in one window,
+* uploading to another family member's account,
+* uploading to several accounts at once,
 
-Then manually test:
-
-Fresh installation
-
-Not Connected
-    ↓
-Connect
-    ↓
-Browser
-    ↓
-Connected
-
-Existing authenticated installation
-
-Container restart
-    ↓
-Account still connected
-
-Invalid authentication
-
-Invalid
-    ↓
-Friendly error
-    ↓
-Reconnect
-
-Disconnect
-
-Connected
-    ↓
-Disconnect
-    ↓
-Not Connected
-
-
----
-
-Phase 24 — Final Acceptance Checklist
-
-The agent should not consider this complete until all of these are true:
-
-[ ] Normal users never need DevTools.
-
-[ ] Normal users never need to copy headers.
-
-[ ] Normal users never paste authentication data.
-
-[ ] One obvious Connect YouTube Music button starts the process.
-
-[ ] Browser authentication is handled automatically as far as technically possible.
-
-[ ] Authentication progress is visible.
-
-[ ] Successful authentication clearly displays Connected.
-
-[ ] Failed authentication has a friendly explanation.
-
-[ ] Retry works.
-
-[ ] Cancellation works.
-
-[ ] Authentication expiration works.
-
-[ ] Disconnect works.
-
-[ ] Reconnect works.
-
-[ ] Credentials never appear in normal UI.
-
-[ ] Credentials never appear in logs.
-
-[ ] Existing manual authentication remains available only under Advanced/Developer options if needed.
-
-[ ] Docker deployment works.
-
-[ ] LAN deployment works.
-
-[ ] Reverse-proxy deployment is tested if supported.
-
-[ ] Backend authentication tests pass.
-
-[ ] Flutter tests pass.
-
-[ ] README no longer teaches beginners to use F12.
-
-[ ] Existing playlist/upload functionality continues working after authentication changes.
-
-
-One important instruction for the coding agent
-
-I would put this at the very top of the implementation task:
-
-> Do not implement a cosmetic UI change that simply hides the existing header-paste workflow. First determine a technically valid browser-assisted authentication mechanism for the current ytmusicapi authentication model. The goal is a genuinely easier authentication flow, not a renamed DevTools workflow. If browser security prevents a pure web implementation, evaluate a browser extension/companion or local authentication helper rather than compromising security or pretending cookies can be read from the web page.
-
-
-
-That distinction is important for this repo because the latest code shows that /api/auth/setup ultimately depends on ytmusicapi.setup() receiving browser-derived authentication headers. A frontend-only change cannot magically eliminate that dependency.
+while keeping authentication and private data isolated.

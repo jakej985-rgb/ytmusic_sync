@@ -6,6 +6,8 @@ import 'views/playlists_view.dart';
 import 'views/queue_view.dart';
 import 'views/history_view.dart';
 import 'views/settings_view.dart';
+import 'views/family_view.dart';
+import 'views/components/auth_dialog.dart';
 
 import 'services/api_service.dart';
 
@@ -59,65 +61,15 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
-    apiService.onUnauthorized = _showApiKeyDialog;
+    apiService.onUnauthorized = _showAuthDialog;
   }
 
-  void _showApiKeyDialog() {
+  void _showAuthDialog() {
     if (_isAuthDialogOpen || !mounted) return;
     _isAuthDialogOpen = true;
-    final controller = TextEditingController(text: apiService.apiKey ?? '');
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogCtx) => AlertDialog(
-        backgroundColor: const Color(0xFF181820),
-        title: const Row(
-          children: [
-            Icon(Icons.lock_outline, color: Color(0xFFFF4E4E), size: 22),
-            SizedBox(width: 8),
-            Text('API Authentication Required', style: TextStyle(fontSize: 18)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Please enter your YTM Sync API Key to access backend services. '
-              'This can be found in config/auth/api_key.txt or your YTM_SYNC_API_KEY environment variable.',
-              style: TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: controller,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'API Key',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              final key = controller.text.trim();
-              if (key.isNotEmpty) {
-                await apiService.setApiKey(key);
-                if (mounted && dialogCtx.mounted) {
-                  Navigator.of(dialogCtx).pop();
-                  _isAuthDialogOpen = false;
-                  setState(() {});
-                }
-              }
-            },
-            child: const Text('Save & Reconnect'),
-          ),
-        ],
-      ),
-    ).then((_) {
+    AuthDialog.show(context).then((_) {
       _isAuthDialogOpen = false;
+      if (mounted) setState(() {});
     });
   }
 
@@ -125,6 +77,163 @@ class _MainShellState extends State<MainShell> {
     setState(() {
       _selectedIndex = index;
     });
+  }
+
+  Widget _buildAccountIndicator() {
+    final user = apiService.currentUser;
+    final ytmAccount = apiService.ytmAccount;
+    final isYtmConnected = ytmAccount?.isConnected ?? false;
+
+    if (user == null) {
+      return SizedBox(
+        width: 176,
+        child: OutlinedButton.icon(
+          onPressed: _showAuthDialog,
+          icon: const Icon(Icons.login, size: 16),
+          label: const Text('Sign In', style: TextStyle(fontSize: 12)),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.white70,
+            side: const BorderSide(color: Colors.white24),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      width: 176,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E28),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 12,
+                backgroundColor: user.isAdmin ? const Color(0xFFFF0000) : const Color(0xFF3EA6FF),
+                child: Text(
+                  user.username.isNotEmpty ? user.username[0].toUpperCase() : 'U',
+                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      user.username,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      user.role,
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                        color: user.isAdmin ? const Color(0xFFFF4E4E) : const Color(0xFF3EA6FF),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuButton<String>(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                icon: const Icon(Icons.more_vert, size: 16, color: Colors.grey),
+                color: const Color(0xFF20202A),
+                onSelected: (val) async {
+                  if (val == 'settings') {
+                    _navigateToTab(6);
+                  } else if (val == 'family') {
+                    _navigateToTab(7);
+                  } else if (val == 'switch') {
+                    _showAuthDialog();
+                  } else if (val == 'logout') {
+                    await apiService.logout();
+                    if (mounted) {
+                      setState(() {});
+                      _showAuthDialog();
+                    }
+                  }
+                },
+                itemBuilder: (ctx) => [
+                  const PopupMenuItem(
+                    value: 'family',
+                    child: Row(
+                      children: [
+                        Icon(Icons.people, size: 16, color: Color(0xFF3EA6FF)),
+                        SizedBox(width: 8),
+                        Text('Family Mode', style: TextStyle(fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'settings',
+                    child: Row(
+                      children: [
+                        Icon(Icons.settings, size: 16),
+                        SizedBox(width: 8),
+                        Text('Settings', style: TextStyle(fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'switch',
+                    child: Row(
+                      children: [
+                        Icon(Icons.switch_account, size: 16),
+                        SizedBox(width: 8),
+                        Text('Switch User', style: TextStyle(fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'logout',
+                    child: Row(
+                      children: [
+                        Icon(Icons.logout, size: 16, color: Colors.redAccent),
+                        SizedBox(width: 8),
+                        Text('Log Out', style: TextStyle(fontSize: 13, color: Colors.redAccent)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Icon(
+                isYtmConnected ? Icons.check_circle : Icons.circle_outlined,
+                size: 10,
+                color: isYtmConnected ? Colors.greenAccent : Colors.grey,
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  isYtmConnected
+                      ? (ytmAccount?.accountName ?? 'YTM Connected')
+                      : 'YTM Disconnected',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: isYtmConnected ? Colors.greenAccent : Colors.grey,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -137,6 +246,7 @@ class _MainShellState extends State<MainShell> {
       const QueueView(),
       const HistoryView(),
       const SettingsView(),
+      FamilyView(onNavigateTab: _navigateToTab),
     ];
 
     return Scaffold(
@@ -153,6 +263,10 @@ class _MainShellState extends State<MainShell> {
             },
             extended: true,
             minExtendedWidth: 200,
+            trailing: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 12.0),
+              child: _buildAccountIndicator(),
+            ),
             leading: Padding(
               padding: const EdgeInsets.symmetric(vertical: 24.0, horizontal: 16.0),
               child: Row(
@@ -225,6 +339,11 @@ class _MainShellState extends State<MainShell> {
                 icon: Icon(Icons.settings_outlined),
                 selectedIcon: Icon(Icons.settings, color: Color(0xFFFF0000)),
                 label: Text('Settings'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.people_outline),
+                selectedIcon: Icon(Icons.people, color: Color(0xFFFF0000)),
+                label: Text('Family Mode'),
               ),
             ],
           ),

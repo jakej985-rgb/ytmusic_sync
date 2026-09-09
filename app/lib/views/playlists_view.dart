@@ -154,21 +154,130 @@ class _PlaylistsViewState extends State<PlaylistsView> {
 
   Future<void> _syncMissingTracks() async {
     if (_selectedPlaylist == null) return;
+
+    List<SelectableAccountItem> accounts = [];
     try {
-      final res = await apiService.syncMissingPlaylistTracks(_selectedPlaylist!.id);
+      accounts = await apiService.getSelectableAccounts();
+    } catch (_) {}
+
+    final permitted = accounts.where((a) => a.ytmConnected && (a.isSelf || a.allowFamilyUploads || a.allowFamilySync)).toList();
+    List<String> targetUserIds = [];
+
+    if (permitted.length > 1 && mounted) {
+      final selected = Set<String>.from(permitted.map((a) => a.userId));
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDlgState) => AlertDialog(
+            backgroundColor: const Color(0xFF1E1E28),
+            title: const Row(
+              children: [
+                Icon(Icons.family_restroom, color: Color(0xFF8A2387)),
+                SizedBox(width: 10),
+                Text('Upload Missing Tracks to Family'),
+              ],
+            ),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Select which accounts should receive the uploaded songs in their cloud locker:',
+                    style: TextStyle(fontSize: 13, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF14141B),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                    ),
+                    child: Column(
+                      children: permitted.map((acc) {
+                        final isChecked = selected.contains(acc.userId);
+                        return CheckboxListTile(
+                          dense: true,
+                          value: isChecked,
+                          activeColor: const Color(0xFF8A2387),
+                          title: Row(
+                            children: [
+                              Text(acc.username, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                              if (acc.accountName != null && acc.accountName!.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                Text('(${acc.accountName})', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                              ],
+                              if (acc.isSelf) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: Colors.purple.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('You', style: TextStyle(fontSize: 10, color: Colors.purpleAccent, fontWeight: FontWeight.bold)),
+                                ),
+                              ],
+                            ],
+                          ),
+                          onChanged: (val) {
+                            setDlgState(() {
+                              if (val == true) {
+                                selected.add(acc.userId);
+                              } else if (selected.length > 1) {
+                                selected.remove(acc.userId);
+                              }
+                            });
+                          },
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton.icon(
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.cloud_upload, size: 16),
+                label: const Text('Start Upload Sync'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF8A2387),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (confirmed != true) return;
+      targetUserIds = selected.toList();
+    }
+
+    try {
+      final res = await apiService.syncMissingPlaylistTracks(
+        _selectedPlaylist!.id,
+        destinationUserIds: targetUserIds.isNotEmpty ? targetUserIds : null,
+      );
       final queued = res['queued'] as int? ?? 0;
       if (mounted) {
         if (queued > 0) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Started background sync for $queued missing tracks via yt-dlp!'),
+              content: Text('Started background sync for $queued missing tracks across selected accounts!'),
               backgroundColor: const Color(0xFF8A2387),
             ),
           );
           _startSyncPolling();
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('All tracks in this playlist are already in your uploads!')),
+            const SnackBar(content: Text('All tracks are already uploaded for the selected accounts!')),
           );
         }
       }
@@ -398,6 +507,24 @@ class _PlaylistsViewState extends State<PlaylistsView> {
     bool isCreating = false;
     String? errorMsg;
 
+    List<SelectableAccountItem> accounts = [];
+    try {
+      accounts = await apiService.getSelectableAccounts();
+    } catch (_) {}
+
+    final permittedAccounts = accounts.where((a) => a.ytmConnected && (a.isSelf || a.allowFamilyPlaylists)).toList();
+    final Set<String> selectedUserIds = {};
+    for (final a in permittedAccounts) {
+      if (a.isSelf) selectedUserIds.add(a.userId);
+    }
+    if (selectedUserIds.isEmpty && permittedAccounts.isNotEmpty) {
+      selectedUserIds.add(permittedAccounts.first.userId);
+    }
+
+    bool uploadMissingToTargets = true;
+
+    if (!mounted) return;
+
     await showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -446,6 +573,83 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     prefixIcon: Icon(Icons.queue_music),
                   ),
                 ),
+                if (permittedAccounts.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  const Row(
+                    children: [
+                      Icon(Icons.family_restroom, size: 16, color: Colors.purpleAccent),
+                      SizedBox(width: 6),
+                      Text('Target Accounts (Upload & Replicate to)', style: TextStyle(fontSize: 12, color: Colors.purpleAccent, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF14141B),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                    ),
+                    child: Column(
+                      children: permittedAccounts.map((acc) {
+                        final isChecked = selectedUserIds.contains(acc.userId);
+                        return CheckboxListTile(
+                          dense: true,
+                          value: isChecked,
+                          activeColor: const Color(0xFF0288D1),
+                          title: Row(
+                            children: [
+                              Text(acc.username, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                              if (acc.accountName != null && acc.accountName!.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                Text('(${acc.accountName})', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                              ],
+                              if (acc.isSelf) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blueAccent.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('You', style: TextStyle(fontSize: 10, color: Colors.lightBlueAccent, fontWeight: FontWeight.bold)),
+                                ),
+                              ],
+                            ],
+                          ),
+                          onChanged: isCreating ? null : (val) {
+                            setDialogState(() {
+                              if (val == true) {
+                                selectedUserIds.add(acc.userId);
+                              } else if (selectedUserIds.length > 1) {
+                                selectedUserIds.remove(acc.userId);
+                              }
+                            });
+                          },
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  CheckboxListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: uploadMissingToTargets,
+                    activeColor: const Color(0xFF8A2387),
+                    title: const Text(
+                      'Download & Upload missing songs to selected member lockers',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: const Text(
+                      'Downloads playlist tracks and uploads them to the selected family members so songs are in their cloud lockers.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    onChanged: isCreating ? null : (val) {
+                      setDialogState(() {
+                        uploadMissingToTargets = val ?? true;
+                      });
+                    },
+                  ),
+                ],
                 const SizedBox(height: 16),
                 const Row(
                   children: [
@@ -494,7 +698,12 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                           'source_playlist_name': playlist.title,
                           'destination_playlist_name': destName,
                           'enabled': true,
+                          'target_user_ids': selectedUserIds.toList(),
+                          'upload_missing_to_targets': uploadMissingToTargets,
                         });
+                        if (uploadMissingToTargets) {
+                          _startSyncPolling();
+                        }
                         await apiService.syncReplicatedPlaylist(created.id);
                         await _loadReplicatedPlaylists();
                         if (ctx.mounted) {

@@ -134,7 +134,8 @@ async def download_and_upload_playlist_track(
     raw_thumbnail: Optional[str] = None,
     destination_dir: Optional[Path] = None,
     enrich_metadata: bool = True,
-    require_full_match: bool = True
+    require_full_match: bool = True,
+    destination_user_ids: Optional[list[str]] = None,
 ) -> dict:
     """
     Download a single playlist track via yt-dlp, enrich/clean its metadata,
@@ -262,13 +263,30 @@ async def download_and_upload_playlist_track(
             cover_url=final_cover_url
         )
 
-        # Upload newly tagged song to YouTube Music cloud locker
-        logger.info(f"Uploading tagged track '{final_title}' to YouTube Music locker...")
-        up_res = await ytm_client.upload_file(str(downloaded_file))
-        if not up_res.get("success"):
-            raise RuntimeError(f"YouTube Music upload failed: {up_res.get('response')}")
-        if up_res.get("already_exists"):
-            logger.info(f"Track '{final_title}' already exists in YouTube Music cloud locker (409). Treating as uploaded.")
+        # Upload newly tagged song to YouTube Music cloud locker for all destination users
+        user_targets = destination_user_ids if destination_user_ids else [None]
+        upload_success_count = 0
+        for uid in user_targets:
+            try:
+                logger.info(f"Uploading tagged track '{final_title}' to YouTube Music locker for user {uid or 'default'}...")
+                up_res = await ytm_client.upload_file(str(downloaded_file), user_id=uid)
+                if up_res.get("success") or up_res.get("already_exists"):
+                    upload_success_count += 1
+                if up_res.get("already_exists"):
+                    logger.info(f"Track '{final_title}' already exists in YouTube Music cloud locker for user {uid or 'default'}.")
+
+                entity_id = f"up_{uid}_{video_id}" if uid else f"up_{video_id}"
+                await db.upsert_ytm_upload({
+                    "entity_id": entity_id,
+                    "video_id": video_id,
+                    "title": final_title,
+                    "artist": final_artist,
+                    "album": final_album,
+                    "thumbnail": final_cover_url,
+                    "user_id": uid
+                })
+            except Exception as ex:
+                logger.warning(f"Upload to user {uid or 'default'} failed: {ex}")
 
         # Save a local copy if directory exists and is writable within approved roots
         local_saved_path: Optional[str] = None
@@ -303,16 +321,6 @@ async def download_and_upload_playlist_track(
                     logger.info(f"Saved local copy to {local_saved_path}")
             except Exception as e:
                 logger.warning(f"Could not save local copy to {target_music_dir}: {e}")
-
-        # Upsert into ytm_uploads so it appears immediately in locker
-        await db.upsert_ytm_upload({
-            "entity_id": f"up_{video_id}",
-            "video_id": video_id,
-            "title": final_title,
-            "artist": final_artist,
-            "album": final_album,
-            "thumbnail": final_cover_url
-        })
 
         # Remove from needs_help_tracks if previously marked
         await db.delete_needs_help_track(video_id)
@@ -368,7 +376,8 @@ class PlaylistSyncManager:
         playlist_id: str,
         playlist_title: str,
         tracks_to_sync: list[dict],
-        destination_dir: Optional[str] = None
+        destination_dir: Optional[str] = None,
+        destination_user_ids: Optional[list[str]] = None
     ) -> PlaylistSyncStatus:
         """Start a background sync for missing playlist tracks."""
         if self._task and self._task.done():
@@ -388,6 +397,7 @@ class PlaylistSyncManager:
             errors=[]
         )
         self._queue = list(tracks_to_sync)
+        self._destination_user_ids = list(destination_user_ids) if destination_user_ids else []
         self._current_index = -1
         self._current_track_dict = None
         self._task = asyncio.create_task(self._sync_worker(dest_path))
@@ -420,18 +430,33 @@ class PlaylistSyncManager:
                     continue
                 seen_sync_keys.add(sync_key)
 
-                # Check if already present in database ytm_uploads
-                existing = await db.find_ytm_upload_by_title_artist(title, artist)
-                if not existing:
-                    existing = await db.get_ytm_upload_by_video_id(video_id)
-                if existing:
-                    logger.info(f"Skipping track '{title}' by '{artist}' - already in cloud uploads ({existing.title}).")
+                # Check if already present in database ytm_uploads for target users
+                target_users = self._destination_user_ids if self._destination_user_ids else [None]
+                missing_for_targets = []
+                for uid in target_users:
+                    existing = await db.find_ytm_upload_by_title_artist(title, artist, user_id=uid)
+                    if not existing:
+                        existing = await db.get_ytm_upload_by_video_id(video_id, user_id=uid)
+                    if not existing:
+                        missing_for_targets.append(uid)
+
+                if not missing_for_targets and target_users != [None]:
+                    logger.info(f"Skipping track '{title}' by '{artist}' - already in cloud uploads for all targets.")
                     self._status.completed_tracks += 1
                     continue
+                elif not missing_for_targets and target_users == [None]:
+                    existing = await db.find_ytm_upload_by_title_artist(title, artist)
+                    if not existing:
+                        existing = await db.get_ytm_upload_by_video_id(video_id)
+                    if existing:
+                        logger.info(f"Skipping track '{title}' by '{artist}' - already in cloud uploads.")
+                        self._status.completed_tracks += 1
+                        continue
 
                 self._status.current_track = f"{artist} - {title}" if artist else title
                 logger.info(f"Syncing ({self._status.completed_tracks + 1}/{self._status.total_tracks}): {self._status.current_track}")
 
+                active_upload_targets = missing_for_targets if missing_for_targets else target_users
                 try:
                     res = await download_and_upload_playlist_track(
                         video_id=video_id,
@@ -441,7 +466,8 @@ class PlaylistSyncManager:
                         raw_thumbnail=thumb,
                         destination_dir=destination_dir,
                         enrich_metadata=True,
-                        require_full_match=True
+                        require_full_match=True,
+                        destination_user_ids=active_upload_targets
                     )
                     if res.get("status") == "needs_help":
                         self._status.needs_help_tracks += 1

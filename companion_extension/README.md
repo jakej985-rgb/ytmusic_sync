@@ -17,8 +17,23 @@ With this companion extension:
 
 ---
 
-## Installation (Chrome, Brave, Edge, Opera)
+## Installation (Chrome, Brave, Edge, Chromium)
+ 
+### Option 1: Automated 1-Click Installer (Linux)
+Run the automated installation script from the repository root:
+```bash
+./scripts/install_companion_extension.sh
+```
+This automatically registers the extension with Chrome/Chromium and configures desktop launchers so the extension loads automatically without needing manual "Load unpacked" file picking.
 
+### Option 2: Zero-Install Auto-Linker (No Extension Needed)
+If you are already signed into YouTube Music in your browser:
+```bash
+./scripts/auto_link_ytm.py
+```
+This automatically reads the active session and connects your account in 1 second.
+
+### Option 3: Manual Installation
 1. Open your browser's extension manager:
    - Chrome / Brave: `chrome://extensions`
    - Edge: `edge://extensions`

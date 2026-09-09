@@ -350,13 +350,13 @@ def _download_sync(
                     "--print-to-file", "%(id)s", str(id_file),
                     "--user-agent", user_agent,
                     "-o", str(output_path.with_suffix(".%(ext)s")),
-                    target_url
                 ]
                 if mode["use_cookies"]:
                     if auth_header:
                         cmd.extend(["--add-header", f"Authorization: {auth_header}"])
                     if cookie_file:
                         cmd.extend(["--cookies", cookie_file])
+                cmd.append(target_url)
 
                 logger.info(f"Downloading audio via {target_url} (clients={mode['clients']}, cookies={mode['use_cookies']})...")
                 res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)

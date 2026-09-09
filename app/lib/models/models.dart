@@ -797,4 +797,518 @@ class ReplicationPreviewModel {
   }
 }
 
+class User {
+  final String id;
+  final String username;
+  final String role;
+  final bool isActive;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  User({
+    required this.id,
+    required this.username,
+    required this.role,
+    this.isActive = true,
+    this.createdAt,
+    this.updatedAt,
+  });
+
+  bool get isAdmin => role.toUpperCase() == 'ADMIN';
+
+  factory User.fromJson(Map<String, dynamic> json) {
+    return User(
+      id: json['id']?.toString() ?? '',
+      username: json['username']?.toString() ?? '',
+      role: json['role']?.toString() ?? 'USER',
+      isActive: json['is_active'] ?? true,
+      createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at'].toString()) : null,
+      updatedAt: json['updated_at'] != null ? DateTime.tryParse(json['updated_at'].toString()) : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'username': username,
+    'role': role,
+    'is_active': isActive,
+    'created_at': createdAt?.toIso8601String(),
+    'updated_at': updatedAt?.toIso8601String(),
+  };
+}
+
+class UserLoginResponse {
+  final String token;
+  final User user;
+  final DateTime? sessionExpiresAt;
+
+  UserLoginResponse({
+    required this.token,
+    required this.user,
+    this.sessionExpiresAt,
+  });
+
+  factory UserLoginResponse.fromJson(Map<String, dynamic> json) {
+    return UserLoginResponse(
+      token: json['token']?.toString() ?? '',
+      user: User.fromJson(json['user'] as Map<String, dynamic>? ?? {}),
+      sessionExpiresAt: json['session_expires_at'] != null
+          ? DateTime.tryParse(json['session_expires_at'].toString())
+          : null,
+    );
+  }
+}
+
+class YouTubeMusicAccount {
+  final String id;
+  final String userId;
+  final String? accountName;
+  final String? accountEmail;
+  final String status;
+  final DateTime? lastSyncAt;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  YouTubeMusicAccount({
+    required this.id,
+    required this.userId,
+    this.accountName,
+    this.accountEmail,
+    required this.status,
+    this.lastSyncAt,
+    this.createdAt,
+    this.updatedAt,
+  });
+
+  bool get isConnected => status.toUpperCase() == 'CONNECTED';
+
+  factory YouTubeMusicAccount.fromJson(Map<String, dynamic> json) {
+    return YouTubeMusicAccount(
+      id: json['id']?.toString() ?? '',
+      userId: json['user_id']?.toString() ?? '',
+      accountName: json['account_name']?.toString(),
+      accountEmail: json['account_email']?.toString(),
+      status: json['status']?.toString() ?? 'DISCONNECTED',
+      lastSyncAt: json['last_sync_at'] != null ? DateTime.tryParse(json['last_sync_at'].toString()) : null,
+      createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at'].toString()) : null,
+      updatedAt: json['updated_at'] != null ? DateTime.tryParse(json['updated_at'].toString()) : null,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Family Mode & Multi-Account Models (Sections 1-40)
+// ---------------------------------------------------------------------------
+
+class Family {
+  final String id;
+  final String name;
+  final String ownerUserId;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final String? userRole;
+
+  Family({
+    required this.id,
+    required this.name,
+    required this.ownerUserId,
+    this.createdAt,
+    this.updatedAt,
+    this.userRole,
+  });
+
+  factory Family.fromJson(Map<String, dynamic> json) {
+    return Family(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      ownerUserId: json['owner_user_id']?.toString() ?? '',
+      createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at'].toString()) : null,
+      updatedAt: json['updated_at'] != null ? DateTime.tryParse(json['updated_at'].toString()) : null,
+      userRole: json['user_role']?.toString(),
+    );
+  }
+}
+
+class FamilyMember {
+  final String id;
+  final String familyId;
+  final String userId;
+  final String? username;
+  final String role;
+  final String status;
+  final bool showAccountInFamily;
+  final bool allowFamilyUploads;
+  final bool allowFamilyPlaylists;
+  final bool allowFamilySync;
+  final DateTime? joinedAt;
+
+  FamilyMember({
+    required this.id,
+    required this.familyId,
+    required this.userId,
+    this.username,
+    required this.role,
+    required this.status,
+    this.showAccountInFamily = true,
+    this.allowFamilyUploads = true,
+    this.allowFamilyPlaylists = false,
+    this.allowFamilySync = false,
+    this.joinedAt,
+  });
+
+  factory FamilyMember.fromJson(Map<String, dynamic> json) {
+    return FamilyMember(
+      id: json['id']?.toString() ?? '',
+      familyId: json['family_id']?.toString() ?? '',
+      userId: json['user_id']?.toString() ?? '',
+      username: json['username']?.toString(),
+      role: json['role']?.toString() ?? 'MEMBER',
+      status: json['status']?.toString() ?? 'ACTIVE',
+      showAccountInFamily: json['show_account_in_family'] == true || json['show_account_in_family'] == 1,
+      allowFamilyUploads: json['allow_family_uploads'] == true || json['allow_family_uploads'] == 1,
+      allowFamilyPlaylists: json['allow_family_playlists'] == true || json['allow_family_playlists'] == 1,
+      allowFamilySync: json['allow_family_sync'] == true || json['allow_family_sync'] == 1,
+      joinedAt: json['joined_at'] != null ? DateTime.tryParse(json['joined_at'].toString()) : null,
+    );
+  }
+}
+
+class FamilyInvitation {
+  final String id;
+  final String familyId;
+  final String invitationToken;
+  final String createdByUserId;
+  final int maxUses;
+  final int timesUsed;
+  final String status;
+  final DateTime? expiresAt;
+  final DateTime? createdAt;
+
+  FamilyInvitation({
+    required this.id,
+    required this.familyId,
+    required this.invitationToken,
+    required this.createdByUserId,
+    this.maxUses = 1,
+    this.timesUsed = 0,
+    required this.status,
+    this.expiresAt,
+    this.createdAt,
+  });
+
+  factory FamilyInvitation.fromJson(Map<String, dynamic> json) {
+    return FamilyInvitation(
+      id: json['id']?.toString() ?? '',
+      familyId: json['family_id']?.toString() ?? '',
+      invitationToken: json['invitation_token']?.toString() ?? '',
+      createdByUserId: json['created_by_user_id']?.toString() ?? '',
+      maxUses: json['max_uses'] ?? 1,
+      timesUsed: json['times_used'] ?? 0,
+      status: json['status']?.toString() ?? 'PENDING',
+      expiresAt: json['expires_at'] != null ? DateTime.tryParse(json['expires_at'].toString()) : null,
+      createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at'].toString()) : null,
+    );
+  }
+}
+
+class FamilyDashboardMemberItem {
+  final String userId;
+  final String username;
+  final String role;
+  final bool ytmConnected;
+  final String? accountName;
+  final int? uploadsCount;
+  final bool allowFamilyUploads;
+  final bool allowFamilyPlaylists;
+  final bool allowFamilySync;
+
+  FamilyDashboardMemberItem({
+    required this.userId,
+    required this.username,
+    required this.role,
+    required this.ytmConnected,
+    this.accountName,
+    this.uploadsCount,
+    required this.allowFamilyUploads,
+    required this.allowFamilyPlaylists,
+    required this.allowFamilySync,
+  });
+
+  factory FamilyDashboardMemberItem.fromJson(Map<String, dynamic> json) {
+    return FamilyDashboardMemberItem(
+      userId: json['user_id']?.toString() ?? '',
+      username: json['username']?.toString() ?? 'User',
+      role: json['role']?.toString() ?? 'MEMBER',
+      ytmConnected: json['ytm_connected'] == true,
+      accountName: json['account_name']?.toString(),
+      uploadsCount: json['uploads_count'] is int ? json['uploads_count'] : null,
+      allowFamilyUploads: json['allow_family_uploads'] == true,
+      allowFamilyPlaylists: json['allow_family_playlists'] == true,
+      allowFamilySync: json['allow_family_sync'] == true,
+    );
+  }
+}
+
+class FamilyDashboardResponse {
+  final String familyId;
+  final String familyName;
+  final String callerRole;
+  final int totalMembers;
+  final int activeConnectedMembers;
+  final List<FamilyDashboardMemberItem> members;
+
+  FamilyDashboardResponse({
+    required this.familyId,
+    required this.familyName,
+    required this.callerRole,
+    required this.totalMembers,
+    required this.activeConnectedMembers,
+    required this.members,
+  });
+
+  factory FamilyDashboardResponse.fromJson(Map<String, dynamic> json) {
+    return FamilyDashboardResponse(
+      familyId: json['family_id']?.toString() ?? '',
+      familyName: json['family_name']?.toString() ?? '',
+      callerRole: json['caller_role']?.toString() ?? 'MEMBER',
+      totalMembers: json['total_members'] ?? 0,
+      activeConnectedMembers: json['active_connected_members'] ?? 0,
+      members: (json['members'] as List<dynamic>? ?? [])
+          .map((m) => FamilyDashboardMemberItem.fromJson(m as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+class SelectableAccountItem {
+  final String userId;
+  final String username;
+  final String? accountName;
+  final String? accountIdentifier;
+  final bool isConnected;
+  final bool isSelf;
+  final String? familyId;
+  final String? familyName;
+  final bool allowFamilyUploads;
+  final bool allowFamilyPlaylists;
+  final bool allowFamilySync;
+
+  bool get ytmConnected => isConnected;
+
+  SelectableAccountItem({
+    required this.userId,
+    required this.username,
+    this.accountName,
+    this.accountIdentifier,
+    required this.isConnected,
+    required this.isSelf,
+    this.familyId,
+    this.familyName,
+    required this.allowFamilyUploads,
+    this.allowFamilyPlaylists = false,
+    this.allowFamilySync = false,
+  });
+
+  String get displayName => isSelf ? '$username (You)' : username;
+  String get displayAccount => accountName ?? accountIdentifier ?? 'Connected';
+
+  factory SelectableAccountItem.fromJson(Map<String, dynamic> json) {
+    return SelectableAccountItem(
+      userId: json['user_id']?.toString() ?? '',
+      username: json['username']?.toString() ?? '',
+      accountName: json['account_name']?.toString(),
+      accountIdentifier: json['account_identifier']?.toString(),
+      isConnected: json['is_connected'] == true || json['ytm_connected'] == true,
+      isSelf: json['is_self'] == true,
+      familyId: json['family_id']?.toString(),
+      familyName: json['family_name']?.toString(),
+      allowFamilyUploads: json['allow_family_uploads'] == true,
+      allowFamilyPlaylists: json['allow_family_playlists'] == true,
+      allowFamilySync: json['allow_family_sync'] == true,
+    );
+  }
+}
+
+class UploadDestinationResponse {
+  final int jobsCreated;
+  final List<int> jobIds;
+  final List<String> destinations;
+
+  UploadDestinationResponse({
+    required this.jobsCreated,
+    required this.jobIds,
+    required this.destinations,
+  });
+
+  factory UploadDestinationResponse.fromJson(Map<String, dynamic> json) {
+    return UploadDestinationResponse(
+      jobsCreated: json['jobs_created'] ?? 0,
+      jobIds: (json['job_ids'] as List<dynamic>? ?? []).map((e) => (e as num).toInt()).toList(),
+      destinations: (json['destinations'] as List<dynamic>? ?? []).map((e) => e.toString()).toList(),
+    );
+  }
+}
+
+class TrackDestinationDuplicateStatus {
+  final String destinationUserId;
+  final String destinationUsername;
+  final bool isUploaded;
+  final String status;
+  final String? error;
+
+  TrackDestinationDuplicateStatus({
+    required this.destinationUserId,
+    required this.destinationUsername,
+    required this.isUploaded,
+    required this.status,
+    this.error,
+  });
+
+  factory TrackDestinationDuplicateStatus.fromJson(Map<String, dynamic> json) {
+    return TrackDestinationDuplicateStatus(
+      destinationUserId: json['destination_user_id']?.toString() ?? '',
+      destinationUsername: json['destination_username']?.toString() ?? '',
+      isUploaded: json['is_uploaded'] == true,
+      status: json['status']?.toString() ?? 'not_uploaded',
+      error: json['error']?.toString(),
+    );
+  }
+}
+
+class FamilyQueueDestinationSubItem {
+  final String destinationUserId;
+  final String destinationUsername;
+  final int jobId;
+  final String status;
+  final int attempts;
+  final String? error;
+
+  FamilyQueueDestinationSubItem({
+    required this.destinationUserId,
+    required this.destinationUsername,
+    required this.jobId,
+    required this.status,
+    required this.attempts,
+    this.error,
+  });
+
+  factory FamilyQueueDestinationSubItem.fromJson(Map<String, dynamic> json) {
+    return FamilyQueueDestinationSubItem(
+      destinationUserId: json['destination_user_id']?.toString() ?? '',
+      destinationUsername: json['destination_username']?.toString() ?? '',
+      jobId: json['job_id'] ?? 0,
+      status: json['status']?.toString() ?? 'queued',
+      attempts: json['attempts'] ?? 0,
+      error: json['error']?.toString(),
+    );
+  }
+}
+
+class FamilyQueueItem {
+  final int musicFileId;
+  final String filename;
+  final String? title;
+  final String? artist;
+  final List<FamilyQueueDestinationSubItem> destinations;
+
+  FamilyQueueItem({
+    required this.musicFileId,
+    required this.filename,
+    this.title,
+    this.artist,
+    required this.destinations,
+  });
+
+  String get displayTitle => (title != null && title!.isNotEmpty) ? title! : filename;
+
+  factory FamilyQueueItem.fromJson(Map<String, dynamic> json) {
+    return FamilyQueueItem(
+      musicFileId: json['music_file_id'] ?? 0,
+      filename: json['filename']?.toString() ?? '',
+      title: json['title']?.toString(),
+      artist: json['artist']?.toString(),
+      destinations: (json['destinations'] as List<dynamic>? ?? [])
+          .map((d) => FamilyQueueDestinationSubItem.fromJson(d as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+class FamilyUploadHistoryItem {
+  final int jobId;
+  final int musicFileId;
+  final String filename;
+  final String? title;
+  final String? artist;
+  final String requestedByUserId;
+  final String requestedByUsername;
+  final String destinationUserId;
+  final String destinationUsername;
+  final String status;
+  final DateTime? completedAt;
+  final String? error;
+
+  FamilyUploadHistoryItem({
+    required this.jobId,
+    required this.musicFileId,
+    required this.filename,
+    this.title,
+    this.artist,
+    required this.requestedByUserId,
+    required this.requestedByUsername,
+    required this.destinationUserId,
+    required this.destinationUsername,
+    required this.status,
+    this.completedAt,
+    this.error,
+  });
+
+  String get displayTitle => (title != null && title!.isNotEmpty) ? title! : filename;
+
+  factory FamilyUploadHistoryItem.fromJson(Map<String, dynamic> json) {
+    return FamilyUploadHistoryItem(
+      jobId: json['job_id'] ?? 0,
+      musicFileId: json['music_file_id'] ?? 0,
+      filename: json['filename']?.toString() ?? '',
+      title: json['title']?.toString(),
+      artist: json['artist']?.toString(),
+      requestedByUserId: json['requested_by_user_id']?.toString() ?? '',
+      requestedByUsername: json['requested_by_username']?.toString() ?? '',
+      destinationUserId: json['destination_user_id']?.toString() ?? '',
+      destinationUsername: json['destination_username']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'queued',
+      completedAt: json['completed_at'] != null ? DateTime.tryParse(json['completed_at'].toString()) : null,
+      error: json['error']?.toString(),
+    );
+  }
+}
+
+class FamilyPlaylistItem {
+  final String playlistId;
+  final String title;
+  final String? description;
+  final String ownerUserId;
+  final String ownerUsername;
+  final int trackCount;
+
+  FamilyPlaylistItem({
+    required this.playlistId,
+    required this.title,
+    this.description,
+    required this.ownerUserId,
+    required this.ownerUsername,
+    this.trackCount = 0,
+  });
+
+  factory FamilyPlaylistItem.fromJson(Map<String, dynamic> json) {
+    return FamilyPlaylistItem(
+      playlistId: json['playlist_id']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      description: json['description']?.toString(),
+      ownerUserId: json['owner_user_id']?.toString() ?? '',
+      ownerUsername: json['owner_username']?.toString() ?? '',
+      trackCount: json['track_count'] ?? 0,
+    );
+  }
+}
 

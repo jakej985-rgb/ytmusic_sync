@@ -44,17 +44,139 @@ def preprocess_headers(raw: str) -> str:
 
     return raw
 
+class YTMClientManager:
+    """
+    User-aware YouTube Music client manager (Phase K).
+    Maintains isolated YTMusic instances per authenticated user_id to prevent
+    cross-account client reuse or credential contamination.
+    """
+    def __init__(self):
+        self._clients: dict[str, YTMusic] = {}
+        self._recently_deleted: dict[str, dict[str, float]] = {}
+
+    def get_user_auth_file(self, user_id: str) -> Path:
+        from .security import get_user_subpath, validate_user_id
+        clean_id = validate_user_id(user_id)
+        return get_user_subpath(clean_id, "auth") / "headers_auth.json"
+
+    def is_user_auth_configured(self, user_id: str) -> bool:
+        try:
+            auth_file = self.get_user_auth_file(user_id)
+            if auth_file.exists() and auth_file.stat().st_size > 10:
+                return True
+        except Exception:
+            pass
+        # Fallback to global config if available
+        return settings.auth_file.exists() and settings.auth_file.stat().st_size > 10
+
+    def get_client_for_user(self, user_id: str) -> YTMusic:
+        from .security import validate_user_id
+        clean_id = validate_user_id(user_id)
+        if clean_id in self._clients:
+            return self._clients[clean_id]
+
+        user_auth = self.get_user_auth_file(clean_id)
+        if user_auth.exists() and user_auth.stat().st_size > 10:
+            client = YTMusic(str(user_auth))
+            self._clients[clean_id] = client
+            return client
+
+        if settings.auth_file.exists() and settings.auth_file.stat().st_size > 10:
+            client = YTMusic(str(settings.auth_file))
+            self._clients[clean_id] = client
+            return client
+
+        raise YTMusicUserError(f"YouTube Music authentication has not been configured for user '{user_id}'.")
+
+    def reset_client_for_user(self, user_id: str):
+        from .security import validate_user_id
+        try:
+            clean_id = validate_user_id(user_id)
+            self._clients.pop(clean_id, None)
+            self._recently_deleted.pop(clean_id, None)
+        except Exception:
+            pass
+
+    def disconnect_user(self, user_id: str) -> dict:
+        self.reset_client_for_user(user_id)
+        try:
+            auth_file = self.get_user_auth_file(user_id)
+            if auth_file.exists():
+                auth_file.unlink()
+        except Exception as e:
+            logger.warning(f"Error removing user auth file: {e}")
+        return {
+            "connected": False,
+            "message": "Disconnected from YouTube Music successfully.",
+            "user_name": None
+        }
+
+    async def setup_user_auth(self, user_id: str, raw_headers: str) -> dict:
+        auth_file = self.get_user_auth_file(user_id)
+        def _setup_sync():
+            auth_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(auth_file.parent, stat.S_IRWXU)
+            except OSError:
+                pass
+            cleaned_headers = preprocess_headers(raw_headers)
+            res = setup(filepath=str(auth_file), headers_raw=cleaned_headers)
+            try:
+                os.chmod(auth_file, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
+            return res
+
+        await asyncio.to_thread(_setup_sync)
+        self.reset_client_for_user(user_id)
+        client = self.get_client_for_user(user_id)
+        try:
+            acc_info = await asyncio.to_thread(client.get_account_info)
+            user_name = acc_info.get("accountName") or acc_info.get("channelHandle")
+        except Exception:
+            user_name = "Connected Account"
+        return {
+            "connected": True,
+            "message": "Connected to YouTube Music successfully.",
+            "user_name": user_name
+        }
+
+    def mark_deleted(self, user_id: str, entity_id: str):
+        if user_id not in self._recently_deleted:
+            self._recently_deleted[user_id] = {}
+        self._recently_deleted[user_id][entity_id] = time.time()
+
+    def is_recently_deleted(self, user_id: str, entity_id: str) -> bool:
+        if user_id not in self._recently_deleted:
+            return False
+        user_map = self._recently_deleted[user_id]
+        if entity_id not in user_map:
+            return False
+        if time.time() - user_map[entity_id] > 1800:
+            del user_map[entity_id]
+            return False
+        return True
+
+
+ytm_client_manager = YTMClientManager()
+
+
 class YTMClient:
     def __init__(self):
         self._ytm: Optional[YTMusic] = None
         self._recently_deleted: dict[str, float] = {}
+        self.manager = ytm_client_manager
 
-    def mark_deleted(self, entity_id: str):
+    def mark_deleted(self, entity_id: str, user_id: Optional[str] = None):
         """Mark an entity_id as deleted so stale YTM continuation caches cannot re-insert it."""
         self._recently_deleted[entity_id] = time.time()
+        if user_id:
+            self.manager.mark_deleted(user_id, entity_id)
 
-    def is_recently_deleted(self, entity_id: str) -> bool:
+    def is_recently_deleted(self, entity_id: str, user_id: Optional[str] = None) -> bool:
         """Check if an entity was deleted within the last 30 minutes."""
+        if user_id and self.manager.is_recently_deleted(user_id, entity_id):
+            return True
         if entity_id not in self._recently_deleted:
             return False
         if time.time() - self._recently_deleted[entity_id] > 1800:
@@ -62,35 +184,50 @@ class YTMClient:
             return False
         return True
 
-    def is_auth_configured(self) -> bool:
+    def is_auth_configured(self, user_id: Optional[str] = None) -> bool:
+        if user_id:
+            return self.manager.is_user_auth_configured(user_id)
         return settings.auth_file.exists() and settings.auth_file.stat().st_size > 10
 
-    def _get_client(self) -> YTMusic:
+    def _get_client(self, user_id: Optional[str] = None) -> YTMusic:
+        if user_id:
+            return self.manager.get_client_for_user(user_id)
         if not self.is_auth_configured():
             raise YTMusicUserError("YouTube Music authentication has not been configured yet.")
         if self._ytm is None:
             self._ytm = YTMusic(str(settings.auth_file))
         return self._ytm
 
-    def reset_client(self):
+    def reset_client(self, user_id: Optional[str] = None):
+        if user_id:
+            self.manager.reset_client_for_user(user_id)
         self._ytm = None
 
-    def disconnect_auth(self) -> dict:
+    def disconnect_auth(self, user_id: Optional[str] = None) -> dict:
         """Safely disconnect YouTube Music account, removing stored headers and resetting the client."""
+        res = {
+            "connected": False,
+            "message": "Disconnected from YouTube Music successfully.",
+            "user_name": None
+        }
+        if user_id:
+            res = self.manager.disconnect_user(user_id)
         self.reset_client()
         if settings.auth_file.exists():
             try:
                 settings.auth_file.unlink()
             except OSError as e:
                 logger.warning(f"Error removing auth file: {e}")
-        return {
-            "connected": False,
-            "message": "Disconnected from YouTube Music successfully.",
-            "user_name": None
-        }
+        return res
 
-    async def setup_auth(self, raw_headers: str) -> dict:
+    def disconnect_user(self, user_id: str) -> dict:
+        """Disconnect and evict cached YouTube Music client for a specific user."""
+        return self.manager.disconnect_user(user_id)
+
+    async def setup_auth(self, raw_headers: str, user_id: Optional[str] = None) -> dict:
         """Parse raw browser headers and write securely to auth_file with 0600 permissions."""
+        if user_id:
+            return await self.manager.setup_user_auth(user_id, raw_headers)
         def _setup_sync():
             settings.auth_file.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -108,9 +245,9 @@ class YTMClient:
         self.reset_client()
         return await self.test_connection()
 
-    async def test_connection(self) -> dict:
+    async def test_connection(self, user_id: Optional[str] = None) -> dict:
         """Validate credentials by running a test request."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             return {
                 "connected": False,
                 "message": "Authentication headers file not found. Please connect your account.",
@@ -118,7 +255,7 @@ class YTMClient:
             }
 
         def _test_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             user_name = None
             try:
                 acc_info = yt.get_account_info()
@@ -139,7 +276,7 @@ class YTMClient:
             }
         except Exception as e:
             logger.error(f"YTM connection test failed: {e}", exc_info=True)
-            self.reset_client()
+            self.reset_client(user_id=user_id)
             err_str = str(e).lower()
             if "timeout" in err_str or "timed out" in err_str:
                 msg = "Connection timed out while contacting YouTube Music."
@@ -155,13 +292,13 @@ class YTMClient:
                 "user_name": None
             }
 
-    async def fetch_and_cache_uploads(self) -> list[dict]:
+    async def fetch_and_cache_uploads(self, user_id: Optional[str] = None) -> list[dict]:
         """Fetch all user uploads from YouTube Music and cache them in the SQLite DB."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _fetch_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             # limit=None fetches all uploads via continuations
             return yt.get_library_upload_songs(limit=None)
 
@@ -171,7 +308,7 @@ class YTMClient:
         for item in raw_uploads:
             # Parse item structure
             entity_id = item.get("entityId")
-            if not entity_id or self.is_recently_deleted(entity_id):
+            if not entity_id or self.is_recently_deleted(entity_id, user_id=user_id):
                 continue
 
             active_entity_ids.add(entity_id)
@@ -189,11 +326,21 @@ class YTMClient:
             elif isinstance(album_dict, str):
                 album_name = album_dict
 
-            duration_raw = item.get("duration") or item.get("duration_seconds")
-            duration_sec = parse_duration(duration_raw)
+            # Parse duration from string e.g. "3:45"
+            duration_str = item.get("duration")
+            duration_sec = None
+            if duration_str and isinstance(duration_str, str):
+                parts = duration_str.split(":")
+                try:
+                    if len(parts) == 2:
+                        duration_sec = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                except ValueError:
+                    pass
 
-            thumb = None
             thumbs = item.get("thumbnails")
+            thumb = None
             if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
                 thumb = thumbs[-1].get("url")
 
@@ -211,6 +358,8 @@ class YTMClient:
                 "like_status": item.get("likeStatus"),
                 "thumbnail": thumb,
             }
+            if user_id:
+                upload_record["user_id"] = user_id
             await db.upsert_ytm_upload(upload_record)
             cached.append(upload_record)
 
@@ -219,9 +368,9 @@ class YTMClient:
 
         return cached
 
-    async def upload_file(self, filepath: str) -> dict:
+    async def upload_file(self, filepath: str, user_id: Optional[str] = None) -> dict:
         """Upload single music file to YouTube Music."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         p = Path(filepath)
@@ -229,7 +378,7 @@ class YTMClient:
             raise FileNotFoundError(f"File not found: {filepath}")
 
         def _upload_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             res = yt.upload_song(str(p.resolve()))
             return str(res)
 
@@ -244,28 +393,28 @@ class YTMClient:
             "response": result_str
         }
 
-    async def delete_upload(self, entity_id: str) -> dict:
+    async def delete_upload(self, entity_id: str, user_id: Optional[str] = None) -> dict:
         """Delete an uploaded song from YouTube Music using its entity_id."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
-        self.mark_deleted(entity_id)
+        self.mark_deleted(entity_id, user_id=user_id)
 
         def _delete_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             return yt.delete_upload_entity(entity_id)
 
         res = await asyncio.to_thread(_delete_sync)
         logger.info(f"Deleted upload entity {entity_id}: {res}")
         return {"success": True, "response": str(res)}
 
-    async def get_playlists(self) -> list[dict]:
+    async def get_playlists(self, user_id: Optional[str] = None) -> list[dict]:
         """Fetch user's YouTube Music library playlists."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _fetch_playlists_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             playlists = yt.get_library_playlists(limit=None)
             result = []
             # Add Liked Music auto-playlist at top
@@ -304,13 +453,13 @@ class YTMClient:
 
         return await asyncio.to_thread(_fetch_playlists_sync)
 
-    async def get_playlist_details(self, playlist_id: str) -> dict:
+    async def get_playlist_details(self, playlist_id: str, user_id: Optional[str] = None) -> dict:
         """Fetch playlist tracks and match against local library and uploads."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _fetch_details_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             if playlist_id == "LM":
                 return yt.get_liked_songs(limit=None)
             return yt.get_playlist(playlist_id, limit=None)
@@ -466,13 +615,13 @@ class YTMClient:
             "tracks": matched_tracks
         }
 
-    async def get_playlist_raw(self, playlist_id: str) -> dict:
+    async def get_playlist_raw(self, playlist_id: str, user_id: Optional[str] = None) -> dict:
         """Fetch full raw playlist payload directly from YouTube Music."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _fetch_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             if playlist_id == "LM":
                 return yt.get_liked_songs(limit=None)
             try:
@@ -492,14 +641,15 @@ class YTMClient:
         title: str,
         description: str = "",
         privacy_status: str = "PRIVATE",
-        video_ids: Optional[list[str]] = None
+        video_ids: Optional[list[str]] = None,
+        user_id: Optional[str] = None
     ) -> str:
         """Create a new playlist in YouTube Music."""
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _create_sync():
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             res = yt.create_playlist(
                 title=title,
                 description=description,
@@ -520,16 +670,17 @@ class YTMClient:
         self,
         playlist_id: str,
         video_ids: list[str],
-        duplicates: bool = True
+        duplicates: bool = True,
+        user_id: Optional[str] = None
     ) -> Any:
         """Add tracks to an existing playlist in YouTube Music, batching in safe chunks."""
         if not video_ids:
             return {"status": "ok", "added": 0}
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _add_chunk_sync(chunk):
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             return yt.add_playlist_items(playlist_id, chunk, duplicates=duplicates)
 
         chunk_size = 50
@@ -546,16 +697,17 @@ class YTMClient:
     async def remove_playlist_items(
         self,
         playlist_id: str,
-        video_items: list[dict]
+        video_items: list[dict],
+        user_id: Optional[str] = None
     ) -> Any:
         """Remove tracks from a playlist in YouTube Music using videoId & setVideoId, batching in safe chunks."""
         if not video_items:
             return {"status": "ok", "removed": 0}
-        if not self.is_auth_configured():
+        if not self.is_auth_configured(user_id=user_id):
             raise YTMusicUserError("Not authenticated.")
 
         def _remove_chunk_sync(chunk):
-            yt = self._get_client()
+            yt = self._get_client(user_id=user_id)
             return yt.remove_playlist_items(playlist_id, chunk)
 
         chunk_size = 50

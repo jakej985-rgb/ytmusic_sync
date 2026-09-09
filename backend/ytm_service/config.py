@@ -18,9 +18,11 @@ DATABASE_DIR = DEFAULT_DATA_DIR / "database"
 AUTH_DIR = DEFAULT_DATA_DIR / "auth"
 LOGS_DIR = DEFAULT_DATA_DIR / "logs"
 BACKUPS_DIR = DEFAULT_DATA_DIR / "backups"
+USERS_DIR = DEFAULT_DATA_DIR / "users"
 
-for d in (DATABASE_DIR, AUTH_DIR, LOGS_DIR, BACKUPS_DIR):
+for d in (DATABASE_DIR, AUTH_DIR, LOGS_DIR, BACKUPS_DIR, USERS_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
 
 # Migration helpers if upgrading from flat root layout
 legacy_db = DEFAULT_DATA_DIR / "ytm_sync.db"
@@ -87,10 +89,12 @@ else:
 
 class Settings(BaseModel):
     data_dir: Path = DEFAULT_DATA_DIR
+    config_dir: Path = DEFAULT_DATA_DIR
     database_dir: Path = DATABASE_DIR
     auth_dir: Path = AUTH_DIR
     logs_dir: Path = LOGS_DIR
     backups_dir: Path = BACKUPS_DIR
+    users_dir: Path = USERS_DIR
     db_path: Path = target_db
     auth_file: Path = target_auth
     log_file: Path = target_log
@@ -110,6 +114,7 @@ class Settings(BaseModel):
     allow_automatic_replacement: bool = os.environ.get("YTM_SYNC_ALLOW_AUTOMATIC_REPLACEMENT", "false").lower() in ("1", "true", "yes")
     forwarded_allow_ips: str = os.environ.get("FORWARDED_ALLOW_IPS", "").strip() or "127.0.0.1"
     web_dir: Path = Path(__file__).resolve().parent.parent / "web_dist"
+    rate_limiting_enabled: bool = os.environ.get("YTM_SYNC_RATE_LIMITING", "true").lower() in ("1", "true", "yes")
 
 settings = Settings()
 

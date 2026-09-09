@@ -43,17 +43,25 @@ async function extractAuthHeaders() {
   return headers;
 }
 
-async function linkAccount(callbackUrl, sessionId) {
+async function linkAccount(callbackUrl, sessionId, token) {
   const headers = await extractAuthHeaders();
   const endpoint = `${callbackUrl.replace(/\/+$/, "")}/api/auth/callback`;
 
+  const reqHeaders = {
+    "Content-Type": "application/json",
+  };
+
+  // Attach scoped temporary session token if provided (Phase C 4.2)
+  if (token) {
+    reqHeaders["Authorization"] = `Bearer ${token}`;
+  }
+
   const resp = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: reqHeaders,
     body: JSON.stringify({
       session_id: sessionId,
+      token: token || null,
       raw_headers: headers,
     }),
   });
@@ -68,7 +76,7 @@ async function linkAccount(callbackUrl, sessionId) {
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "LINK_ACCOUNT") {
-    linkAccount(request.callbackUrl, request.sessionId)
+    linkAccount(request.callbackUrl, request.sessionId, request.token)
       .then((data) => sendResponse({ success: true, data }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true; // Keep channel open for async response

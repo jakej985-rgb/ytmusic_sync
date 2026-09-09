@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Depends
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -17,8 +17,22 @@ from .models import (
     MusicFile, YtmUpload, SyncJob, DashboardStats,
     ScanRequest, AuthSetupRequest, ConnectionStatus, MusicBrainzMatch,
     PlaylistTrackDownloadRequest, PlaylistImportRequest,
-    ReplicatedPlaylist, ReplicatedPlaylistCreate, ReplicatedPlaylistUpdate
+    ReplicatedPlaylist, ReplicatedPlaylistCreate, ReplicatedPlaylistUpdate,
+    User, UserRole, UserResponse, UserCreate, UserUpdate, UserLoginRequest, UserLoginResponse,
+    YouTubeMusicAccountResponse, UserSettings, UserSettingsUpdate,
+    Family, FamilyRole, FamilyMemberStatus, FamilyMember,
+    FamilyCreateRequest, FamilyUpdateRequest, FamilyMemberAddRequest,
+    FamilyTransferOwnershipRequest, FamilyInvitation, FamilyInvitationCreateRequest,
+    FamilyInvitationInfoResponse, FamilyMemberPrivacyUpdate, FamilyMemberRoleUpdate,
+    FamilyDashboardMemberItem, FamilyDashboardResponse, SelectableAccountItem,
+    UploadDestinationRequest, UploadDestinationResponse, FamilyQueueItem,
+    TrackDestinationDuplicateStatus, FamilyMultiPlaylistRequest,
+    FamilyUploadHistoryItem, FamilySyncResponse, FamilyPlaylistItem,
+    PlaylistSyncMissingRequest
 )
+from .dependencies import require_authenticated_user, require_admin, get_optional_authenticated_user
+from .rate_limiter import rate_limit_dependency
+from .security import verify_password
 from .scanner import scanner
 from .ytm_client import ytm_client
 from .auth_service import auth_service
@@ -50,6 +64,7 @@ from .security import (
     verify_api_key_header,
     validate_fs_path,
     validate_youtube_url,
+    validate_auth_origin_url,
     get_allowed_roots,
 )
 from logging.handlers import RotatingFileHandler
@@ -124,21 +139,23 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.enable_docs else None,
 )
 
-# Restricted CORS configuration
+# CORS configuration allowing local network origins, companion extension, and YouTube Music
 app.add_middleware(
     CORSMiddleware,
+    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|music\.youtube\.com)(:\d+)?|chrome-extension://.*)$",
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "User-Agent"],
+    allow_headers=["*"],
 )
 
 @app.middleware("http")
 async def authenticate_api_requests(request: Request, call_next):
     path = request.url.path
-    # Allow public health endpoint and static frontend files
+    # Allow public health endpoint, application login, and static frontend files
     if (
         path == "/health"
+        or path == "/api/auth/login"
         or not path.startswith("/api/")
     ):
         return await call_next(request)
@@ -147,19 +164,810 @@ async def authenticate_api_requests(request: Request, call_next):
         return await call_next(request)
 
     auth_hdr = request.headers.get("Authorization")
-    if not verify_api_key_header(auth_hdr):
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Invalid or missing API key"},
-            headers={"WWW-Authenticate": "Bearer"}
+
+    # 1. Full access with master API key (maps to admin user)
+    if verify_api_key_header(auth_hdr):
+        users = await db.list_users()
+        admin_user = next((u for u in users if u.role == UserRole.ADMIN), None)
+        if admin_user:
+            request.state.user = admin_user
+        return await call_next(request)
+
+    # 2. Check Scoped Temporary Extension Token (Phase C 4.2)
+    bearer_token = None
+    if auth_hdr and auth_hdr.strip().lower().startswith("bearer "):
+        bearer_token = auth_hdr.strip().split(" ", 1)[1].strip()
+
+    if bearer_token and auth_service.is_valid_extension_token(bearer_token):
+        # Scoped extension tokens are strictly restricted to auth callback/completion
+        if path == "/api/auth/callback" or (path.startswith("/api/auth/session/") and path.endswith("/complete")):
+            return await call_next(request)
+        else:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Extension token is restricted to authentication callback endpoints only."},
+            )
+
+    # 3. Check Active Application Session Token (Phase E & F)
+    if bearer_token:
+        user = await db.get_user_by_session_token(bearer_token)
+        if user:
+            request.state.user = user
+            return await call_next(request)
+
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Invalid or missing API key"},
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
+
+# ============================================================================
+# Application Authentication & User Management (Phases D, E, F, G, Q)
+# ============================================================================
+
+@app.post("/api/auth/login", response_model=UserLoginResponse, dependencies=[Depends(rate_limit_dependency(5, 60, "login"))])
+async def login(req: UserLoginRequest):
+    """Authenticate application user with username and password, returning a secure session token."""
+    user = await db.get_user_by_username(req.username)
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    session = await db.create_app_session(user.id)
+    await db.update_last_login(user.id)
+
+    return UserLoginResponse(
+        token=session.token,
+        expires_at=session.expires_at,
+        user=UserResponse(
+            id=user.id,
+            username=user.username,
+            role=user.role,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            last_login_at=user.last_login_at,
+        ),
+    )
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, current_user: User = Depends(require_authenticated_user)):
+    """Revoke active application session token."""
+    auth_hdr = request.headers.get("Authorization", "")
+    if auth_hdr.strip().lower().startswith("bearer "):
+        token = auth_hdr.strip().split(" ", 1)[1].strip()
+        await db.revoke_app_session(token)
+    return {"status": "ok", "message": "Logged out successfully"}
+
+@app.get("/api/auth/me", response_model=UserResponse)
+async def get_current_user_profile(current_user: User = Depends(require_authenticated_user)):
+    """Get profile of current authenticated user."""
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        role=current_user.role,
+        is_active=current_user.is_active,
+        created_at=current_user.created_at,
+        last_login_at=current_user.last_login_at,
+    )
+
+@app.get("/api/admin/users", response_model=list[UserResponse])
+async def list_users_admin(admin: User = Depends(require_admin)):
+    """Admin-only: list all application users."""
+    users = await db.list_users()
+    return [
+        UserResponse(
+            id=u.id,
+            username=u.username,
+            role=u.role,
+            is_active=u.is_active,
+            created_at=u.created_at,
+            last_login_at=u.last_login_at,
         )
-    return await call_next(request)
+        for u in users
+    ]
+
+@app.post("/api/admin/users", response_model=UserResponse)
+async def create_user_admin(req: UserCreate, admin: User = Depends(require_admin)):
+    """Admin-only: create a new application user."""
+    existing = await db.get_user_by_username(req.username)
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Username '{req.username}' already exists")
+    user = await db.create_user(req)
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        last_login_at=user.last_login_at,
+    )
+
+@app.put("/api/admin/users/{user_id}", response_model=UserResponse)
+async def update_user_admin(user_id: str, req: UserUpdate, admin: User = Depends(require_admin)):
+    """Admin-only: update user details, role, or active status."""
+    user = await db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    updated = await db.update_user(user_id, req)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserResponse(
+        id=updated.id,
+        username=updated.username,
+        role=updated.role,
+        is_active=updated.is_active,
+        created_at=updated.created_at,
+        last_login_at=updated.last_login_at,
+    )
+
+class UserDeleteRequest(BaseModel):
+    password: Optional[str] = None
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user_admin(
+    user_id: str,
+    confirm: bool = Query(False),
+    admin: User = Depends(require_admin)
+):
+    """Admin-only: delete an application user with required confirmation."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="User deletion must be confirmed with confirm=true")
+    if admin.id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own admin account")
+    user = await db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.role == UserRole.ADMIN:
+        admin_count = await db.count_admins()
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last administrator")
+
+    # Clean up user's local config folder
+    user_dir = settings.config_dir / "users" / user_id
+    if user_dir.exists():
+        shutil.rmtree(user_dir, ignore_errors=True)
+
+    await db.delete_user(user_id)
+    ytm_client.disconnect_user(user_id)
+    logger.info(f"User {user_id} deleted permanently by admin {admin.id}")
+    return {"status": "ok", "message": f"User {user_id} deleted"}
+
+@app.delete("/api/users/me")
+async def delete_current_user(
+    confirm: bool = Query(False),
+    req: Optional[UserDeleteRequest] = None,
+    current_user: User = Depends(require_authenticated_user)
+):
+    """Self-delete user account with explicit confirmation."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="User deletion must be confirmed with confirm=true")
+    if current_user.role == UserRole.ADMIN:
+        admin_count = await db.count_admins()
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last administrator")
+    if req and req.password:
+        user_db = await db.get_user_by_id(current_user.id)
+        if not user_db or not verify_password(req.password, user_db.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+    user_id = current_user.id
+    user_dir = settings.config_dir / "users" / user_id
+    if user_dir.exists():
+        shutil.rmtree(user_dir, ignore_errors=True)
+
+    await db.delete_user(user_id)
+    ytm_client.disconnect_user(user_id)
+    logger.info(f"User {user_id} deleted their own account permanently")
+    return {"status": "ok", "message": "Account deleted successfully"}
+
+
+# ============================================================================
+# Family Mode & Multi-Account Endpoints (Sections 1–40)
+# ============================================================================
+
+# --- Account Selector Endpoints (Sections 9, 23) ---
+
+@app.get("/api/accounts", response_model=list[SelectableAccountItem])
+async def list_selectable_accounts(current_user: User = Depends(require_authenticated_user)):
+    """Return list of accounts available to the user (personal + permitted family accounts)."""
+    items = await db.get_permitted_family_accounts(current_user.id)
+    return [SelectableAccountItem(**item) for item in items]
+
+
+@app.get("/api/accounts/{account_id}", response_model=SelectableAccountItem)
+async def get_selectable_account(account_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Get selectable account info if permitted."""
+    items = await db.get_permitted_family_accounts(current_user.id)
+    for item in items:
+        if item.get("account_id") == account_id or item.get("user_id") == account_id:
+            return SelectableAccountItem(**item)
+    raise HTTPException(status_code=404, detail="Account not found or access denied")
+
+
+# --- Family Management Endpoints (Sections 1–8, 23, 27–31) ---
+
+@app.post("/api/families", response_model=Family)
+async def create_family(req: FamilyCreateRequest, current_user: User = Depends(require_authenticated_user)):
+    """Create a new family. Caller is assigned the OWNER role."""
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Family name cannot be empty")
+    return await db.create_family(name=req.name.strip(), owner_user_id=current_user.id)
+
+
+@app.get("/api/families", response_model=list[Family])
+async def list_user_families(current_user: User = Depends(require_authenticated_user)):
+    """List all families the caller belongs to."""
+    return await db.get_user_families(current_user.id)
+
+
+@app.get("/api/families/{family_id}", response_model=Family)
+async def get_family_details(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Get details and members of a family (requires membership)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    member = await db.get_family_member(family_id, current_user.id)
+    if not member:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+    return fam
+
+
+@app.patch("/api/families/{family_id}", response_model=Family)
+@app.put("/api/families/{family_id}", response_model=Family)
+async def update_family(family_id: str, req: FamilyUpdateRequest, current_user: User = Depends(require_authenticated_user)):
+    """Update family name (requires OWNER or ADMIN)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    member = await db.get_family_member(family_id, current_user.id)
+    if not member or member.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Only family owners and admins can update family details")
+    await db.update_family(family_id, req.name.strip())
+    return await db.get_family_by_id(family_id)
+
+
+@app.post("/api/families/{family_id}/transfer")
+async def transfer_family_ownership(family_id: str, req: FamilyTransferOwnershipRequest, current_user: User = Depends(require_authenticated_user)):
+    """Transfer family ownership to another member with explicit confirmation (Section 30)."""
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="Ownership transfer must be confirmed with confirm=true")
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    if fam.owner_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the family owner can transfer ownership")
+    try:
+        await db.transfer_family_ownership(family_id, req.new_owner_user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "message": f"Ownership transferred to {req.new_owner_user_id}"}
+
+
+@app.post("/api/families/{family_id}/leave")
+async def leave_family(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Leave family (Section 29: preserves all user data; owner cannot leave without transfer/delete)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    try:
+        await db.leave_family(family_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "message": "Left family successfully"}
+
+
+@app.delete("/api/families/{family_id}")
+async def delete_family(family_id: str, confirm: bool = Query(False), current_user: User = Depends(require_authenticated_user)):
+    """Delete family with confirmation (Section 31: OWNER only; strictly preserves user accounts)."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Family deletion must be confirmed with confirm=true")
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    if fam.owner_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the family owner can delete the family")
+    await db.delete_family(family_id)
+    return {"status": "success", "message": "Family deleted successfully"}
+
+
+# --- Member Management & Invitations (Sections 27–28) ---
+
+@app.post("/api/families/{family_id}/members", response_model=FamilyMember)
+async def add_family_member_direct(family_id: str, req: FamilyMemberAddRequest, current_user: User = Depends(require_authenticated_user)):
+    """Direct add member (Admin/Owner shortcut)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    member = await db.get_family_member(family_id, current_user.id)
+    if not member or member.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Only family owners and admins can add members")
+    target_user = await db.get_user_by_id(req.user_id) or await db.get_user_by_username(req.user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+    existing = await db.get_family_member(family_id, target_user.id)
+    if existing:
+        raise HTTPException(status_code=409, detail="User is already a member of this family")
+    return await db.add_family_member(family_id=family_id, user_id=target_user.id, role=req.role.value)
+
+
+@app.delete("/api/families/{family_id}/members/{user_id}")
+async def remove_family_member(family_id: str, user_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Remove member from family (Section 28: OWNER/ADMIN or self; preserves user data)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    caller_mem = await db.get_family_member(family_id, current_user.id)
+    if not caller_mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+    if user_id != current_user.id:
+        if caller_mem.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+            raise HTTPException(status_code=403, detail="Only owners and admins can remove other members")
+        if fam.owner_user_id == user_id:
+            raise HTTPException(status_code=400, detail="Cannot remove the family owner")
+    else:
+        if fam.owner_user_id == current_user.id:
+            raise HTTPException(status_code=400, detail="Family owner cannot leave without transferring ownership or deleting the family")
+
+    await db.remove_family_member(family_id, user_id)
+    return {"status": "success", "message": "Member removed from family"}
+
+
+@app.patch("/api/families/{family_id}/members/{user_id}/permissions")
+@app.put("/api/families/{family_id}/members/{user_id}/privacy")
+async def update_member_privacy(family_id: str, user_id: str, req: FamilyMemberPrivacyUpdate, current_user: User = Depends(require_authenticated_user)):
+    """Update member privacy flags (Section 6, 26: SELF ONLY)."""
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You can only modify your own family privacy settings")
+    member = await db.get_family_member(family_id, user_id)
+    if not member:
+        raise HTTPException(status_code=404, detail="Family member not found")
+    await db.update_family_member_privacy(
+        family_id=family_id,
+        user_id=user_id,
+        show_account_in_family=req.show_account_in_family,
+        allow_family_uploads=req.allow_family_uploads,
+        allow_family_playlists=req.allow_family_playlists,
+        allow_family_sync=req.allow_family_sync
+    )
+    return await db.get_family_member(family_id, user_id)
+
+
+@app.put("/api/families/{family_id}/members/{user_id}/role", response_model=FamilyMember)
+async def update_member_role(family_id: str, user_id: str, req: FamilyMemberRoleUpdate, current_user: User = Depends(require_authenticated_user)):
+    """Update member role (OWNER ONLY; cannot demote owner without transfer)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam or fam.owner_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the family owner can change member roles")
+    if user_id == current_user.id and req.role != FamilyRole.OWNER:
+        raise HTTPException(status_code=400, detail="Owner must use transfer endpoint to change ownership")
+    await db.update_family_member_role(family_id, user_id, req.role.value)
+    return await db.get_family_member(family_id, user_id)
+
+
+# --- Invitation Tokens (Section 27) ---
+
+@app.post("/api/families/{family_id}/invitations", response_model=FamilyInvitation)
+async def create_family_invitation(family_id: str, req: FamilyInvitationCreateRequest, current_user: User = Depends(require_authenticated_user)):
+    """Create short-lived single-use invitation token (OWNER/ADMIN)."""
+    caller_mem = await db.get_family_member(family_id, current_user.id)
+    if not caller_mem or caller_mem.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Only family owners and admins can invite members")
+    return await db.create_family_invitation(
+        family_id=family_id,
+        created_by_user_id=current_user.id,
+        role=req.role.value,
+        ttl_hours=req.ttl_hours
+    )
+
+
+@app.get("/api/families/{family_id}/invitations", response_model=list[FamilyInvitation])
+async def list_family_invitations(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    caller_mem = await db.get_family_member(family_id, current_user.id)
+    if not caller_mem or caller_mem.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Only family owners and admins can view invitations")
+    return await db.list_family_invitations(family_id)
+
+
+@app.delete("/api/families/{family_id}/invitations/{invitation_id}")
+async def revoke_family_invitation(family_id: str, invitation_id: str, current_user: User = Depends(require_authenticated_user)):
+    caller_mem = await db.get_family_member(family_id, current_user.id)
+    if not caller_mem or caller_mem.role not in (FamilyRole.OWNER, FamilyRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Only family owners and admins can revoke invitations")
+    await db.revoke_family_invitation(family_id, invitation_id)
+    return {"status": "success", "message": "Invitation revoked"}
+
+
+@app.get("/api/invitations/{token}", response_model=FamilyInvitationInfoResponse)
+async def inspect_invitation(token: str):
+    """Public inspection of invitation without disclosing internal IDs."""
+    inv = await db.get_family_invitation_by_token(token)
+    if not inv or inv.is_expired:
+        raise HTTPException(status_code=404, detail="Invitation is invalid or has expired")
+    fam = await db.get_family_by_id(inv.family_id)
+    inviter = await db.get_user_by_id(inv.created_by_user_id)
+    return FamilyInvitationInfoResponse(
+        family_id=inv.family_id,
+        family_name=fam.name if fam else "Family",
+        role=inv.role.value,
+        inviter_username=inviter.username if inviter else "Admin",
+        expires_at=inv.expires_at
+    )
+
+
+@app.post("/api/invitations/{token}/accept", response_model=FamilyMember)
+async def accept_invitation(token: str, current_user: User = Depends(require_authenticated_user)):
+    """Accept invitation and join family."""
+    try:
+        return await db.accept_family_invitation(token, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Family Dashboard (Section 8) ---
+
+@app.get("/api/families/{family_id}/dashboard", response_model=FamilyDashboardResponse)
+async def get_family_dashboard(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Family dashboard aggregating permitted member account statuses (Section 8)."""
+    fam = await db.get_family_by_id(family_id)
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    caller_mem = await db.get_family_member(family_id, current_user.id)
+    if not caller_mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+
+    members = await db.get_family_members(family_id)
+    member_items = []
+    for m in members:
+        is_self = (m.user_id == current_user.id)
+        if not is_self and not m.show_account_in_family:
+            # Privacy: hidden account
+            member_items.append(FamilyDashboardMemberItem(
+                user_id=m.user_id,
+                username=m.username or "User",
+                role=m.role.value,
+                ytm_connected=False,
+                account_name=None,
+                uploads_count=None,
+                allow_family_uploads=False,
+                allow_family_playlists=False,
+                allow_family_sync=False
+            ))
+        else:
+            acc = await db.get_ytm_account(m.user_id)
+            uploads_count = None
+            if is_self or m.show_account_in_family:
+                counts = await db.get_dashboard_counts(user_id=m.user_id)
+                uploads_count = counts.get("ytm_uploads_count", 0)
+            member_items.append(FamilyDashboardMemberItem(
+                user_id=m.user_id,
+                username=m.username or "User",
+                role=m.role.value,
+                ytm_connected=bool(acc and acc.status == "CONNECTED"),
+                account_name=acc.account_name if acc else None,
+                uploads_count=uploads_count,
+                allow_family_uploads=m.allow_family_uploads,
+                allow_family_playlists=m.allow_family_playlists,
+                allow_family_sync=m.allow_family_sync
+            ))
+
+    return FamilyDashboardResponse(
+        family_id=fam.id,
+        family_name=fam.name,
+        my_role=caller_mem.role.value,
+        members=member_items
+    )
+
+
+# --- Multi-Account Uploads & Queue (Sections 10–16, 24, 32–34) ---
+
+@app.post("/api/uploads/destinations", response_model=UploadDestinationResponse)
+async def upload_to_destinations(req: UploadDestinationRequest, current_user: User = Depends(require_authenticated_user)):
+    """Create independent upload jobs per selected destination account with strict validation (Sections 11, 12, 15, 24)."""
+    if not req.music_file_ids:
+        raise HTTPException(status_code=400, detail="No files provided for upload")
+    if not req.destination_user_ids:
+        raise HTTPException(status_code=400, detail="No destination accounts selected")
+
+    created_job_ids = []
+    errors = []
+
+    for dest_id in req.destination_user_ids:
+        allowed, reason = await db.validate_upload_destination_permission(current_user.id, dest_id)
+        if not allowed:
+            dest_user = await db.get_user_by_id(dest_id)
+            name = dest_user.username if dest_user else dest_id
+            errors.append(f"{name}: {reason}")
+            continue
+
+        dest_acc = await db.get_ytm_account(dest_id)
+        acc_id = dest_acc.id if dest_acc else None
+
+        for fid in req.music_file_ids:
+            try:
+                job_id = await db.create_sync_job(
+                    music_file_id=fid,
+                    user_id=dest_id,
+                    destination_user_id=dest_id,
+                    requested_by_user_id=current_user.id,
+                    family_id=req.family_id,
+                    youtube_music_account_id=acc_id
+                )
+                created_job_ids.append(job_id)
+            except Exception as e:
+                errors.append(f"File {fid} for user {dest_id}: {str(e)}")
+
+    if not created_job_ids and errors:
+        is_forbidden = any("not in your family" in err or "disabled family uploads" in err for err in errors)
+        raise HTTPException(status_code=403 if is_forbidden else 400, detail="; ".join(errors))
+
+    return UploadDestinationResponse(
+        jobs_created=len(created_job_ids),
+        job_ids=created_job_ids,
+        errors=errors
+    )
+
+
+@app.get("/api/tracks/{file_id}/destinations-status", response_model=list[TrackDestinationDuplicateStatus])
+async def get_track_destinations_status(file_id: int, current_user: User = Depends(require_authenticated_user)):
+    """Check duplicate and upload status per destination account (Section 34)."""
+    accounts = await db.get_permitted_family_accounts(current_user.id)
+    results = []
+    for acc in accounts:
+        dest_uid = acc["user_id"]
+        dup_info = await db.check_track_duplicate_for_user(file_id, dest_uid)
+        results.append(TrackDestinationDuplicateStatus(
+            destination_user_id=dest_uid,
+            destination_username=acc["username"],
+            is_uploaded=dup_info["is_uploaded"],
+            status=dup_info["status"],
+            error=dup_info.get("error")
+        ))
+    return results
+
+
+@app.get("/api/families/{family_id}/queue", response_model=list[FamilyQueueItem])
+async def get_family_queue(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Grouped multi-account upload queue (Section 33)."""
+    mem = await db.get_family_member(family_id, current_user.id)
+    if not mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+    items = await db.get_family_queue_grouped(family_id, current_user.id)
+    return [FamilyQueueItem(**item) for item in items]
+
+
+@app.get("/api/families/{family_id}/history", response_model=list[FamilyUploadHistoryItem])
+async def get_family_history(family_id: str, limit: int = Query(50), current_user: User = Depends(require_authenticated_user)):
+    """Combined upload history identifying destination and requesting users (Section 17)."""
+    mem = await db.get_family_member(family_id, current_user.id)
+    if not mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+    items = await db.get_family_upload_history(family_id, current_user.id, limit)
+    return [FamilyUploadHistoryItem(**item) for item in items]
+
+
+@app.post("/api/families/{family_id}/sync", response_model=FamilySyncResponse)
+async def trigger_family_sync(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Trigger independent sync for each permitted family account with fault isolation (Section 18)."""
+    mem = await db.get_family_member(family_id, current_user.id)
+    if not mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+
+    permitted = await db.get_family_permitted_sync_members(family_id)
+    results = {}
+    for p in permitted:
+        try:
+            counts = await db.get_dashboard_counts(user_id=p.user_id)
+            results[p.username or p.user_id] = {
+                "status": "started",
+                "in_queue": counts.get("in_queue_count", 0),
+                "error": None
+            }
+        except Exception as e:
+            results[p.username or p.user_id] = {
+                "status": "failed",
+                "in_queue": 0,
+                "error": str(e)
+            }
+    return FamilySyncResponse(family_id=family_id, results=results)
+
+
+@app.get("/api/families/{family_id}/playlists", response_model=list[FamilyPlaylistItem])
+async def list_family_shared_playlists(family_id: str, current_user: User = Depends(require_authenticated_user)):
+    """Read-only view of playlists shared by family members (Section 19)."""
+    mem = await db.get_family_member(family_id, current_user.id)
+    if not mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+    items = await db.get_family_permitted_playlists(family_id, current_user.id)
+    return [FamilyPlaylistItem(**item) for item in items]
+
+
+@app.post("/api/families/{family_id}/playlists/multi")
+async def create_multi_account_playlists(family_id: str, req: FamilyMultiPlaylistRequest, current_user: User = Depends(require_authenticated_user)):
+    """Create or clone independent playlist on each selected family account (Section 35)."""
+    mem = await db.get_family_member(family_id, current_user.id)
+    if not mem:
+        raise HTTPException(status_code=403, detail="You are not a member of this family")
+
+    user_ids = req.effective_user_ids
+    if not user_ids:
+        raise HTTPException(status_code=400, detail="At least one target user must be selected")
+
+    # Flow A: Clone an existing YouTube Music playlist
+    if req.source_playlist_id:
+        source_uid = req.source_user_id or current_user.id
+        if source_uid != current_user.id:
+            permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
+            can_access = any(a.get("user_id") == source_uid and a.get("allow_family_playlists") for a in permitted_accounts)
+            if not can_access:
+                raise HTTPException(status_code=403, detail="Access to source family member's playlists is not permitted")
+
+        try:
+            details = await ytm_client.get_playlist_details(req.source_playlist_id, user_id=source_uid)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch source playlist details: {e}")
+
+        source_title = details.get("title", f"Playlist {req.source_playlist_id}")
+        name = req.effective_name or source_title
+        tracks = details.get("tracks", [])
+
+        permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
+        permitted_lookup = {a.get("user_id"): a for a in permitted_accounts}
+
+        created_replicas = []
+        for uid in user_ids:
+            if uid != current_user.id:
+                account_info = permitted_lookup.get(uid)
+                if not account_info or not account_info.get("allow_family_playlists"):
+                    logger.warning(f"User {uid} does not permit family playlists from {current_user.id}")
+                    continue
+
+            existing = await db.get_replicated_playlist_by_source_id(req.source_playlist_id, user_id=uid)
+            if existing:
+                if not existing.destination_playlist_id:
+                    try:
+                        ownership_desc = (
+                            f"Automated 1:1 Locker-Only Replica of '{source_title}'. "
+                            f"[managed_by=ytmusic_sync;replica_mode=locker_only;source_playlist_id={req.source_playlist_id}]"
+                        )
+                        dest_id = await ytm_client.create_playlist(
+                            title=name,
+                            description=ownership_desc,
+                            user_id=uid
+                        )
+                        await db.update_replicated_playlist(existing.id, user_id=uid, destination_playlist_id=dest_id)
+                        existing.destination_playlist_id = dest_id
+                    except Exception as ex:
+                        logger.warning(f"Could not create YTM destination playlist for {uid}: {ex}")
+                created_replicas.append(existing)
+            else:
+                dest_id = ""
+                try:
+                    ownership_desc = (
+                        f"Automated 1:1 Locker-Only Replica of '{source_title}'. "
+                        f"[managed_by=ytmusic_sync;replica_mode=locker_only;source_playlist_id={req.source_playlist_id}]"
+                    )
+                    dest_id = await ytm_client.create_playlist(
+                        title=name,
+                        description=ownership_desc,
+                        user_id=uid
+                    )
+                except Exception as ex:
+                    logger.warning(f"Could not create YTM destination playlist for {uid}: {ex}")
+                    dest_id = f"local_{secrets.token_hex(6)}"
+
+                new_id = await db.create_replicated_playlist(
+                    source_playlist_id=req.source_playlist_id,
+                    source_playlist_name=source_title,
+                    destination_playlist_id=dest_id,
+                    destination_playlist_name=name,
+                    enabled=True,
+                    sync_interval_seconds=300,
+                    user_id=uid
+                )
+                created = await db.get_replicated_playlist(new_id, user_id=uid)
+                if created:
+                    created_replicas.append(created)
+
+        # Trigger immediate reconciliation for target accounts
+        for rep in created_replicas:
+            try:
+                asyncio.create_task(playlist_replicator.reconcile_playlist(rep.id, dry_run=False))
+            except Exception as ex:
+                logger.warning(f"Could not trigger background reconciliation for replica {rep.id}: {ex}")
+
+        # If user also requested uploading missing tracks to targets
+        if req.upload_missing_to_targets and created_replicas:
+            try:
+                valid_uids = [r.user_id for r in created_replicas if r.user_id]
+                playlist_sync_manager.start_sync(
+                    playlist_id=req.source_playlist_id,
+                    playlist_title=name,
+                    tracks_to_sync=tracks,
+                    destination_user_ids=valid_uids
+                )
+            except Exception as ex:
+                logger.warning(f"Could not launch multi-account track upload sync: {ex}")
+
+        return {
+            "status": "success",
+            "mode": "clone",
+            "source_playlist_id": req.source_playlist_id,
+            "created_count": len(created_replicas),
+            "playlists": [
+                {
+                    "replicated_playlist_id": r.id,
+                    "destination_user_id": r.user_id,
+                    "name": r.destination_playlist_name
+                }
+                for r in created_replicas
+            ]
+        }
+
+    # Flow B: Create empty shared multi-account playlist
+    name = req.effective_name
+    if not name:
+        raise HTTPException(status_code=400, detail="Playlist name cannot be empty")
+
+    created = await db.create_multi_account_playlists(
+        playlist_name=name,
+        destination_user_ids=user_ids,
+        created_by_user_id=current_user.id,
+        family_id=family_id
+    )
+    return {"status": "success", "mode": "create", "created_count": len(created), "playlists": created}
+
+
+# ============================================================================
+# YouTube Music Account Status & Settings (Phases H, Q, S, T)
+# ============================================================================
+
+@app.get("/api/ytm/account", response_model=Optional[YouTubeMusicAccountResponse])
+async def get_ytm_account(current_user: User = Depends(require_authenticated_user)):
+    """Get linked YouTube Music account for current user."""
+    account = await db.get_ytm_account_by_user_id(current_user.id)
+    if not account:
+        return None
+    return YouTubeMusicAccountResponse(
+        id=account.id,
+        user_id=account.user_id,
+        account_name=account.account_name,
+        account_identifier=account.account_identifier,
+        status=account.status,
+        created_at=account.created_at,
+        updated_at=account.updated_at,
+        last_verified_at=account.last_verified_at,
+    )
+
+@app.post("/api/ytm/disconnect")
+async def disconnect_ytm_account(current_user: User = Depends(require_authenticated_user)):
+    """Disconnect linked YouTube Music account for current user."""
+    res = await auth_service.disconnect(user_id=current_user.id)
+    return res
+
+@app.get("/api/settings", response_model=UserSettings)
+async def get_user_settings(current_user: User = Depends(require_authenticated_user)):
+    """Get settings for current user."""
+    return await db.get_user_settings(current_user.id)
+
+@app.put("/api/settings", response_model=UserSettings)
+async def update_user_settings_put(req: UserSettingsUpdate, current_user: User = Depends(require_authenticated_user)):
+    """Update settings for current user."""
+    return await db.update_user_settings(current_user.id, req)
+
+@app.post("/api/settings")
+async def update_user_settings_post(req: UserSettingsUpdate, current_user: User = Depends(require_authenticated_user)):
+    """Update settings for current user via POST (backward compatible)."""
+    await db.update_user_settings(current_user.id, req)
+    return {"status": "success"}
 
 
 @app.get("/api/status", response_model=DashboardStats)
-async def get_dashboard_status():
-    counts = await db.get_dashboard_counts()
-    conn = await ytm_client.test_connection()
+async def get_dashboard_status(current_user: User = Depends(require_authenticated_user)):
+    counts = await db.get_dashboard_counts(user_id=current_user.id)
+    conn = await ytm_client.test_connection(user_id=current_user.id)
     return DashboardStats(
         ytm_connected=conn["connected"],
         account_name=conn["user_name"],
@@ -174,29 +982,35 @@ async def get_dashboard_status():
     )
 
 @app.get("/api/auth/status", response_model=ConnectionStatus)
-async def get_auth_status():
-    res = await ytm_client.test_connection()
+async def get_auth_status(current_user: User = Depends(require_authenticated_user)):
+    res = await ytm_client.test_connection(user_id=current_user.id)
     return ConnectionStatus(
         connected=res["connected"],
         message=res["message"],
         user_name=res.get("user_name")
     )
 
-@app.post("/api/auth/start", response_model=AuthStartResponse)
-async def start_auth_session(request: Request, req: Optional[AuthStartRequest] = None):
-    """Start a new short-lived, single-use authentication session."""
-    origin_url = req.origin_url if (req and req.origin_url) else None
-    if not origin_url:
-        # Detect reverse proxy or direct host (Traefik, Cloudflare, Docker, LAN, localhost)
-        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host"))
+@app.post("/api/auth/start", response_model=AuthStartResponse, dependencies=[Depends(rate_limit_dependency(10, 60, "auth_start"))])
+async def start_auth_session(request: Request, req: Optional[AuthStartRequest] = None, current_user: User = Depends(require_authenticated_user)):
+    """Start a new short-lived, single-use authentication session with validated origin."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host")) or request.url.netloc
+
+    raw_origin = req.origin_url if (req and req.origin_url) else None
+    if raw_origin:
+        try:
+            origin_url = validate_auth_origin_url(raw_origin, request_host=host, request_proto=proto)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid or unapproved origin URL: {e}")
+    else:
         if host:
             origin_url = f"{proto}://{host}"
         else:
             origin_url = str(request.base_url).rstrip("/")
 
     client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else None)
-    return await auth_service.start_session(origin_url=origin_url, client_ip=client_ip)
+    target_user_id = req.user_id if (req and req.user_id and current_user.role == UserRole.ADMIN) else current_user.id
+    return await auth_service.start_session(origin_url=origin_url, client_ip=client_ip, user_id=target_user_id)
 
 @app.get("/api/auth/session/{session_id}", response_model=AuthSessionResponse)
 async def get_auth_session(session_id: str):
@@ -206,7 +1020,7 @@ async def get_auth_session(session_id: str):
         raise HTTPException(status_code=404, detail="Authentication session not found")
     return session
 
-@app.post("/api/auth/session/{session_id}/complete", response_model=AuthSessionResponse)
+@app.post("/api/auth/session/{session_id}/complete", response_model=AuthSessionResponse, dependencies=[Depends(rate_limit_dependency(10, 60, "auth_complete"))])
 async def complete_auth_session(session_id: str, req: AuthCompleteRequest):
     """Receive authentication headers from companion extension or helper and validate them."""
     if not req.raw_headers.strip():
@@ -219,7 +1033,7 @@ async def complete_auth_session(session_id: str, req: AuthCompleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to complete authentication: {e}")
 
-@app.post("/api/auth/callback", response_model=AuthSessionResponse)
+@app.post("/api/auth/callback", response_model=AuthSessionResponse, dependencies=[Depends(rate_limit_dependency(10, 60, "auth_callback"))])
 async def auth_callback_post(req: AuthCallbackRequest):
     """Callback endpoint for companion extensions/helpers submitting credentials."""
     if not req.raw_headers.strip():
@@ -321,9 +1135,9 @@ async def cancel_auth_post(req: AuthCancelRequest):
     return session
 
 @app.post("/api/auth/disconnect", response_model=ConnectionStatus)
-async def disconnect_auth():
+async def disconnect_auth(current_user: User = Depends(require_authenticated_user)):
     """Safely disconnect YouTube Music account and remove stored credentials."""
-    res = await auth_service.disconnect()
+    res = await auth_service.disconnect(user_id=current_user.id)
     return ConnectionStatus(
         connected=res["connected"],
         message=res["message"],
@@ -331,12 +1145,18 @@ async def disconnect_auth():
     )
 
 @app.post("/api/auth/setup", response_model=ConnectionStatus)
-async def setup_auth(req: AuthSetupRequest):
+async def setup_auth(req: AuthSetupRequest, current_user: User = Depends(require_authenticated_user)):
     """Direct/Developer setup: Parse raw headers and store credentials."""
     if not req.raw_headers.strip():
         raise HTTPException(status_code=400, detail="Headers cannot be empty")
     try:
-        res = await ytm_client.setup_auth(req.raw_headers)
+        res = await ytm_client.setup_auth(req.raw_headers, user_id=current_user.id)
+        if res.get("connected"):
+            await db.create_or_update_ytm_account(
+                user_id=current_user.id,
+                account_name=res.get("user_name"),
+                status="ACTIVE"
+            )
         return ConnectionStatus(
             connected=res["connected"],
             message=res["message"],
@@ -346,8 +1166,8 @@ async def setup_auth(req: AuthSetupRequest):
         raise HTTPException(status_code=400, detail=f"Failed to setup authentication: {e}")
 
 @app.post("/api/auth/test", response_model=ConnectionStatus)
-async def test_auth():
-    res = await ytm_client.test_connection()
+async def test_auth(current_user: User = Depends(require_authenticated_user)):
+    res = await ytm_client.test_connection(user_id=current_user.id)
     return ConnectionStatus(
         connected=res["connected"],
         message=res["message"],
@@ -355,11 +1175,18 @@ async def test_auth():
     )
 
 @app.get("/api/ytm/playlists")
-async def get_ytm_playlists():
-    if not ytm_client.is_auth_configured():
-        raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
+async def get_ytm_playlists(user_id: Optional[str] = None, current_user: User = Depends(require_authenticated_user)):
+    target_uid = user_id or current_user.id
+    if target_uid != current_user.id:
+        permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
+        permitted = any(a.get("user_id") == target_uid and a.get("allow_family_playlists") for a in permitted_accounts)
+        if not permitted:
+            raise HTTPException(status_code=403, detail="Access to this family member's playlists is not permitted")
+
+    if not ytm_client.is_auth_configured(user_id=target_uid):
+        raise HTTPException(status_code=400, detail="YouTube Music not authenticated for this account")
     try:
-        playlists = await ytm_client.get_playlists()
+        playlists = await ytm_client.get_playlists(user_id=target_uid)
         return playlists
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlists: {e}")
@@ -375,7 +1202,10 @@ async def cancel_playlist_sync():
     return playlist_sync_manager.cancel_sync()
 
 @app.post("/api/ytm/playlists/download-track")
-async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
+async def download_playlist_track_endpoint(
+    req: PlaylistTrackDownloadRequest,
+    current_user: User = Depends(require_authenticated_user),
+):
     """Download, tag, and upload a single playlist track to YouTube Music locker."""
     dest_path = None
     if req.destination_dir:
@@ -384,7 +1214,7 @@ async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid destination_dir: {e}")
 
-    if not ytm_client.is_auth_configured():
+    if not ytm_client.is_auth_configured(user_id=current_user.id):
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
     try:
         res = await download_and_upload_playlist_track(
@@ -402,7 +1232,10 @@ async def download_playlist_track_endpoint(req: PlaylistTrackDownloadRequest):
         raise HTTPException(status_code=500, detail=f"Failed to download and upload track: {e}")
 
 @app.post("/api/ytm/playlists/import-url")
-async def import_playlist_url_endpoint(req: PlaylistImportRequest):
+async def import_playlist_url_endpoint(
+    req: PlaylistImportRequest,
+    current_user: User = Depends(require_authenticated_user),
+):
     """Import and audit an external YouTube / YouTube Music playlist URL."""
     try:
         validate_youtube_url(req.url)
@@ -461,62 +1294,102 @@ async def import_playlist_url_endpoint(req: PlaylistImportRequest):
         raise HTTPException(status_code=500, detail=f"Failed to import playlist: {e}")
 
 @app.get("/api/ytm/playlists/{playlist_id}")
-async def get_ytm_playlist_details(playlist_id: str, refresh: bool = False):
-    if not ytm_client.is_auth_configured():
+async def get_ytm_playlist_details(
+    playlist_id: str,
+    refresh: bool = False,
+    current_user: User = Depends(require_authenticated_user),
+):
+    if not ytm_client.is_auth_configured(user_id=current_user.id):
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
     try:
         if refresh:
             try:
-                await ytm_client.fetch_and_cache_uploads()
+                await ytm_client.fetch_and_cache_uploads(user_id=current_user.id)
             except Exception as ex:
                 logger.warning(f"Failed to refresh uploads from YTM: {ex}")
-        details = await ytm_client.get_playlist_details(playlist_id)
+        details = await ytm_client.get_playlist_details(playlist_id, user_id=current_user.id)
         return details
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlist details: {e}")
 
 @app.post("/api/ytm/playlists/{playlist_id}/sync-missing")
-async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Optional[str] = None):
-    """Start background sync for all tracks in a playlist missing from uploads."""
+async def sync_missing_playlist_tracks(
+    playlist_id: str,
+    destination_dir: Optional[str] = None,
+    body: Optional[PlaylistSyncMissingRequest] = None,
+    current_user: User = Depends(require_authenticated_user),
+):
+    """Start background sync for tracks in a playlist missing from uploads (supports multi-account destination)."""
     dest_path = None
-    if destination_dir:
+    target_dir = (body.destination_dir if body and body.destination_dir else destination_dir)
+    if target_dir:
         try:
-            dest_path = str(validate_fs_path(destination_dir, allow_create_in_parent=True))
+            dest_path = str(validate_fs_path(target_dir, allow_create_in_parent=True))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid destination_dir: {e}")
 
-    if not ytm_client.is_auth_configured():
+    if not ytm_client.is_auth_configured(user_id=current_user.id):
         raise HTTPException(status_code=400, detail="YouTube Music not authenticated")
 
     try:
-        # Refresh current uploads from YTM so deleted tracks can be detected and re-synced!
-        try:
-            await ytm_client.fetch_and_cache_uploads()
-        except Exception as ex:
-            logger.warning(f"Could not refresh remote uploads before sync: {ex}")
-
-        details = await ytm_client.get_playlist_details(playlist_id)
+        details = await ytm_client.get_playlist_details(playlist_id, user_id=current_user.id)
         tracks = details.get("tracks", [])
-        # Filter for tracks missing from cloud uploads and not duplicates
-        missing = [t for t in tracks if not t.get("in_uploads") and not t.get("is_duplicate")]
+
+        # Validate destination user IDs
+        raw_target_uids = (body.destination_user_ids if body and body.destination_user_ids else [current_user.id])
+        target_uids = []
+        permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
+        permitted_lookup = {a.get("user_id"): a for a in permitted_accounts}
+
+        for uid in raw_target_uids:
+            if uid == current_user.id:
+                target_uids.append(uid)
+            else:
+                acc = permitted_lookup.get(uid)
+                if acc and (acc.get("allow_family_uploads") or acc.get("allow_family_sync")):
+                    target_uids.append(uid)
+
+        if not target_uids:
+            target_uids = [current_user.id]
+
+        # Check which tracks are missing from ANY of the target users' lockers
+        missing = []
+        for t in tracks:
+            if t.get("is_duplicate"):
+                continue
+            vid = t.get("video_id")
+            tit = t.get("title")
+            art = t.get("artist")
+            is_missing = False
+            for uid in target_uids:
+                has_it = await db.get_ytm_upload_by_video_id(vid, user_id=uid) or await db.find_ytm_upload_by_title_artist(tit, art, user_id=uid)
+                if not has_it:
+                    is_missing = True
+                    break
+            if is_missing:
+                missing.append(t)
+
         if not missing:
-            return {"status": "ok", "message": "All tracks in this playlist are already in your cloud uploads!", "queued": 0}
+            return {"status": "ok", "message": "All tracks in this playlist are already in the cloud uploads of the selected accounts!", "queued": 0}
 
         status = playlist_sync_manager.start_sync(
             playlist_id=playlist_id,
             playlist_title=details.get("title", "Playlist"),
             tracks_to_sync=missing,
-            destination_dir=dest_path
+            destination_dir=dest_path,
+            destination_user_ids=target_uids
         )
         return {
             "status": "started",
-            "message": f"Started syncing {len(missing)} missing tracks from '{details.get('title')}'",
+            "message": f"Started syncing {len(missing)} missing tracks from '{details.get('title')}' to {len(target_uids)} account(s)",
             "queued": len(missing),
+            "target_user_ids": target_uids,
             "sync_status": status
         }
     except RuntimeError as re:
         raise HTTPException(status_code=409, detail=str(re))
     except Exception as e:
+        logger.exception(f"Failed to sync missing playlist tracks: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start playlist sync: {e}")
 
 
@@ -525,10 +1398,10 @@ async def sync_missing_playlist_tracks(playlist_id: str, destination_dir: Option
 # ============================================================================
 
 @app.get("/api/replicated-playlists")
-async def list_replicated_playlists():
+async def list_replicated_playlists(current_user: User = Depends(require_authenticated_user)):
     """List all configured replicated playlist watchers with current status."""
     try:
-        replicas = await db.get_replicated_playlists()
+        replicas = await db.get_replicated_playlists(user_id=current_user.id)
         results = []
         for r in replicas:
             results.append(r.model_dump())
@@ -538,15 +1411,15 @@ async def list_replicated_playlists():
         raise HTTPException(status_code=500, detail=f"Failed to list replicated playlists: {e}")
 
 
-@app.post("/api/replicated-playlists")
-async def create_replicated_playlist(req: ReplicatedPlaylistCreate):
-    """Configure a new replicated playlist watcher."""
+@app.post("/api/replicated-playlists", dependencies=[Depends(rate_limit_dependency(20, 60, "playlist_create", use_user_id=True))])
+async def create_replicated_playlist(req: ReplicatedPlaylistCreate, current_user: User = Depends(require_authenticated_user)):
+    """Configure a new replicated playlist watcher (supports multi-account target selection)."""
     try:
         # If source name not supplied, fetch it from YouTube Music
         source_name = req.source_playlist_name
         if not source_name:
             try:
-                details = await ytm_client.get_playlist_details(req.source_playlist_id)
+                details = await ytm_client.get_playlist_details(req.source_playlist_id, user_id=current_user.id)
                 source_name = details.get("title", f"Playlist {req.source_playlist_id}")
             except Exception:
                 source_name = f"Playlist {req.source_playlist_id}"
@@ -554,24 +1427,70 @@ async def create_replicated_playlist(req: ReplicatedPlaylistCreate):
         dest_name = req.destination_playlist_name or f"{source_name} - Locker"
         dest_id = req.destination_playlist_id or ""
 
-        # Check if already configured
-        existing = await db.get_replicated_playlist_by_source_id(req.source_playlist_id)
-        if existing:
-            raise HTTPException(
-                status_code=409,
-                detail=f"A replica watcher is already configured for source playlist {req.source_playlist_id} (ID: {existing.id})"
-            )
+        # Determine target user IDs
+        raw_target_uids = req.target_user_ids or ([req.user_id] if req.user_id else [current_user.id])
+        created_replicas = []
 
-        new_id = await db.create_replicated_playlist(
-            source_playlist_id=req.source_playlist_id,
-            source_playlist_name=source_name,
-            destination_playlist_id=dest_id,
-            destination_playlist_name=dest_name,
-            enabled=req.enabled,
-            sync_interval_seconds=req.sync_interval_seconds
-        )
-        created = await db.get_replicated_playlist(new_id)
-        return created.model_dump() if created else {"id": new_id}
+        permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
+        permitted_lookup = {a.get("user_id"): a for a in permitted_accounts}
+
+        for uid in raw_target_uids:
+            # Validate permissions if target is another user
+            if uid != current_user.id:
+                account_info = permitted_lookup.get(uid)
+                if not account_info or not account_info.get("allow_family_playlists"):
+                    logger.warning(f"User {uid} does not permit family playlists from {current_user.id}")
+                    continue
+
+            existing = await db.get_replicated_playlist_by_source_id(req.source_playlist_id, user_id=uid)
+            if existing:
+                created_replicas.append(existing)
+                continue
+
+            new_id = await db.create_replicated_playlist(
+                source_playlist_id=req.source_playlist_id,
+                source_playlist_name=source_name,
+                destination_playlist_id=dest_id,
+                destination_playlist_name=dest_name,
+                enabled=req.enabled,
+                sync_interval_seconds=req.sync_interval_seconds,
+                user_id=uid
+            )
+            created = await db.get_replicated_playlist(new_id, user_id=uid)
+            if created:
+                created_replicas.append(created)
+
+        # Trigger immediate reconciliation for target accounts
+        for rep in created_replicas:
+            try:
+                asyncio.create_task(playlist_replicator.reconcile_playlist(rep.id, dry_run=False))
+            except Exception as ex:
+                logger.warning(f"Could not trigger background reconciliation for replica {rep.id}: {ex}")
+
+        # If user also requested uploading missing tracks to targets
+        if req.upload_missing_to_targets and created_replicas:
+            try:
+                details = await ytm_client.get_playlist_details(req.source_playlist_id, user_id=current_user.id)
+                tracks = details.get("tracks", [])
+                valid_uids = [r.user_id for r in created_replicas if r.user_id]
+                playlist_sync_manager.start_sync(
+                    playlist_id=req.source_playlist_id,
+                    playlist_title=source_name,
+                    tracks_to_sync=tracks,
+                    destination_user_ids=valid_uids
+                )
+            except Exception as ex:
+                logger.warning(f"Could not launch multi-account track upload sync: {ex}")
+
+        if not created_replicas:
+            raise HTTPException(status_code=400, detail="No replicated playlists could be created for the selected accounts")
+
+        # Return primary replica for current user if present, else first created
+        primary = next((r for r in created_replicas if r.user_id == current_user.id), created_replicas[0])
+        res = primary.model_dump()
+        res["created_replicas_count"] = len(created_replicas)
+        res["target_user_ids"] = [r.user_id for r in created_replicas]
+        return res
     except HTTPException:
         raise
     except Exception as e:
@@ -580,15 +1499,15 @@ async def create_replicated_playlist(req: ReplicatedPlaylistCreate):
 
 
 @app.get("/api/replicated-playlists/{replicated_id}")
-async def get_replicated_playlist(replicated_id: int):
+async def get_replicated_playlist(replicated_id: int, current_user: User = Depends(require_authenticated_user)):
     """Get details, current configuration, and status of a replicated playlist."""
     config = await db.get_replicated_playlist(replicated_id)
-    if not config:
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
         raise HTTPException(status_code=404, detail="Replicated playlist not found")
 
     # Run preview/dry-run to return stats (source count, locker matches, excluded count)
     try:
-        preview = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True)
+        preview = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True, config=config)
     except Exception as e:
         logger.warning(f"Could not calculate preview for replica {replicated_id}: {e}")
         preview = None
@@ -600,31 +1519,36 @@ async def get_replicated_playlist(replicated_id: int):
 
 
 @app.put("/api/replicated-playlists/{replicated_id}")
-async def update_replicated_playlist(replicated_id: int, req: ReplicatedPlaylistUpdate):
+async def update_replicated_playlist(replicated_id: int, req: ReplicatedPlaylistUpdate, current_user: User = Depends(require_authenticated_user)):
     """Update settings for an existing replicated playlist watcher."""
     config = await db.get_replicated_playlist(replicated_id)
-    if not config:
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
         raise HTTPException(status_code=404, detail="Replicated playlist not found")
 
     update_dict = {k: v for k, v in req.model_dump().items() if v is not None}
-    updated = await db.update_replicated_playlist(replicated_id, **update_dict)
+    target_user_id = None if current_user.role == UserRole.ADMIN else current_user.id
+    updated = await db.update_replicated_playlist(replicated_id, user_id=target_user_id, **update_dict)
     return updated.model_dump() if updated else {}
 
 
 @app.delete("/api/replicated-playlists/{replicated_id}")
-async def delete_replicated_playlist(replicated_id: int):
+async def delete_replicated_playlist(replicated_id: int, current_user: User = Depends(require_authenticated_user)):
     """Delete a replicated playlist watcher configuration."""
-    deleted = await db.delete_replicated_playlist(replicated_id)
+    target_user_id = None if current_user.role == UserRole.ADMIN else current_user.id
+    deleted = await db.delete_replicated_playlist(replicated_id, user_id=target_user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Replicated playlist not found")
     return {"status": "ok", "message": f"Deleted replica watcher {replicated_id}"}
 
 
-@app.post("/api/replicated-playlists/{replicated_id}/sync")
-async def sync_replicated_playlist(replicated_id: int):
+@app.post("/api/replicated-playlists/{replicated_id}/sync", dependencies=[Depends(rate_limit_dependency(10, 60, "playlist_sync", use_user_id=True))])
+async def sync_replicated_playlist(replicated_id: int, current_user: User = Depends(require_authenticated_user)):
     """Trigger immediate reconciliation of a replicated playlist."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
     try:
-        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=False)
+        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=False, config=config)
         return res
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
@@ -634,10 +1558,13 @@ async def sync_replicated_playlist(replicated_id: int):
 
 
 @app.post("/api/replicated-playlists/{replicated_id}/dry-run")
-async def dry_run_replicated_playlist(replicated_id: int):
+async def dry_run_replicated_playlist(replicated_id: int, current_user: User = Depends(require_authenticated_user)):
     """Preview reconciliation actions (add, remove, move, exclude) without modifying YouTube Music."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
     try:
-        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True)
+        res = await playlist_replicator.reconcile_playlist(replicated_id, dry_run=True, config=config)
         return res
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
@@ -647,15 +1574,21 @@ async def dry_run_replicated_playlist(replicated_id: int):
 
 
 @app.get("/api/replicated-playlists/{replicated_id}/events")
-async def get_replicated_playlist_events(replicated_id: int, limit: int = 100):
+async def get_replicated_playlist_events(replicated_id: int, limit: int = 100, current_user: User = Depends(require_authenticated_user)):
     """Get audit trail of reconciliation actions (ADD, REMOVE, MOVE, NOOP, EXCLUDE)."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
     events = await db.get_replicated_playlist_events(replicated_id, limit=limit)
     return events
 
 
 @app.get("/api/replicated-playlists/{replicated_id}/snapshots/latest")
-async def get_latest_playlist_snapshot(replicated_id: int):
+async def get_latest_playlist_snapshot(replicated_id: int, current_user: User = Depends(require_authenticated_user)):
     """Get the most recent SourcePlaylistSnapshot for a replica (Section 4 of plan)."""
+    config = await db.get_replicated_playlist(replicated_id)
+    if not config or (current_user.role != UserRole.ADMIN and config.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Replicated playlist not found")
     snapshot = await db.get_latest_replicated_playlist_snapshot(replicated_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="No snapshot found for this replicated playlist")
@@ -785,7 +1718,7 @@ async def update_folders(req: FoldersUpdate):
     await db.set_setting("music_folders", safe_folders)
     return {"status": "success", "folders": safe_folders}
 
-@app.post("/api/scan")
+@app.post("/api/scan", dependencies=[Depends(rate_limit_dependency(10, 60, "scan", use_user_id=True))])
 async def trigger_scan(bg_tasks: BackgroundTasks, req: Optional[ScanRequest] = None):
     if scanner.is_scanning:
         return {"status": "in_progress", "message": "Scan is already running"}
@@ -1046,18 +1979,25 @@ async def resolve_needs_help_track(video_id: str, req: ResolveNeedsHelpRequest):
     return res
 
 @app.get("/api/uploads", response_model=list[YtmUpload])
-async def get_uploads() -> list[YtmUpload]:
+async def get_uploads(current_user: Optional[User] = Depends(get_optional_authenticated_user)) -> list[YtmUpload]:
+    if current_user and current_user.role != UserRole.ADMIN:
+        return await db.get_all_ytm_uploads(user_id=current_user.id)
     return await db.get_all_ytm_uploads()
 
 @app.get("/api/jobs/{job_id}", response_model=SyncJob)
-async def get_job_by_id(job_id: int) -> SyncJob:
+async def get_job_by_id(job_id: int, current_user: Optional[User] = Depends(get_optional_authenticated_user)) -> SyncJob:
     job = await db.get_sync_job_by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Sync job not found")
+    if current_user and current_user.role != UserRole.ADMIN:
+        if job.user_id and job.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Sync job not found")
     return job
 
 @app.get("/api/history")
-async def get_history(limit: int = 100) -> list[SyncJob]:
+async def get_history(limit: int = 100, current_user: Optional[User] = Depends(get_optional_authenticated_user)) -> list[SyncJob]:
+    if current_user and current_user.role != UserRole.ADMIN:
+        return await db.get_user_sync_history(user_id=current_user.id, limit=limit)
     return await db.get_sync_history(limit=limit)
 
 @app.get("/api/logs")
@@ -1067,43 +2007,6 @@ async def get_recent_logs(lines: int = Query(100, ge=1, le=1000)) -> list[str]:
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
         return [l.rstrip("\r\n") for l in all_lines[-lines:]]
-
-@app.get("/api/settings")
-async def get_all_settings():
-    folders = await db.get_setting("music_folders", default=[])
-    auto_upload = await db.get_setting("auto_upload", default=False)
-    scan_interval = await db.get_setting("scan_interval_minutes", default=15)
-    verify_uploads = await db.get_setting("verify_uploads", default=True)
-    allow_automatic_replacement = await db.get_setting(
-        "allow_automatic_replacement",
-        default=settings.allow_automatic_replacement
-    )
-    return {
-        "music_folders": folders,
-        "auto_upload": auto_upload,
-        "scan_interval_minutes": scan_interval,
-        "verify_uploads": verify_uploads,
-        "allow_automatic_replacement": allow_automatic_replacement,
-    }
-
-class SettingsUpdate(BaseModel):
-    auto_upload: Optional[bool] = None
-    scan_interval_minutes: Optional[int] = None
-    verify_uploads: Optional[bool] = None
-    allow_automatic_replacement: Optional[bool] = None
-
-@app.post("/api/settings")
-async def update_settings(req: SettingsUpdate):
-    if req.auto_upload is not None:
-        await db.set_setting("auto_upload", req.auto_upload)
-    if req.scan_interval_minutes is not None:
-        await db.set_setting("scan_interval_minutes", req.scan_interval_minutes)
-    if req.verify_uploads is not None:
-        await db.set_setting("verify_uploads", req.verify_uploads)
-    if req.allow_automatic_replacement is not None:
-        await db.set_setting("allow_automatic_replacement", req.allow_automatic_replacement)
-        settings.allow_automatic_replacement = req.allow_automatic_replacement
-    return {"status": "success"}
 
 class FileReplacePreviewRequest(BaseModel):
     music_file_id: Optional[int] = None

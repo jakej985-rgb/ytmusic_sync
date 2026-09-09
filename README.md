@@ -1,251 +1,244 @@
-# YTM Sync — YouTube Music Collection Synchronizer
+# YTM Sync — Multi-User YouTube Music Collection Synchronizer
 
-**YTM Sync** is a local-first YouTube Music Upload Sync application. It keeps your local music collection synchronized with your private YouTube Music Uploads without modifying or deleting local files.
+**YTM Sync** is a self-hosted, multi-user YouTube Music Synchronization service and application. It keeps local music collections and playlists synchronized with private YouTube Music lockers and accounts without altering or deleting local audio files.
 
 ---
 
 ## 1. What YTM Sync Does
 
-- **Recursive Music Library Scanner**: Scans your local folders (`.mp3`, `.flac`, `.m4a`, `.ogg`, `.wma`) and extracts embedded metadata with SHA-256 fingerprints.
-- **Smart Metadata Normalization**: Strips remaster tags (`[Remastered]`, `(Deluxe Edition)`, `feat.`), formats track numbers, and tolerates duration deltas.
-- **Deduplication & Matching Engine**: Compares local files against your cloud YouTube Music library using a tiered confidence model (Exact, Strong, Weak, Missing) so you never re-upload tracks.
-- **Sequential Upload Queue with Recovery**: Uploads tracks one-by-one with exponential backoff retries. If the container restarts or network drops, it resumes where it left off without duplicating uploads.
-- **Unified Web & Desktop UI**: Dark mode dashboard with Library view, Queue inspector, Sync History, and Guided Auth wizard.
+- **Multi-User Role-Based Isolation**: Secure multi-tenant architecture supporting Administrators and Standard Users with server-side tenant isolation across databases, credentials, playlists, and scan jobs.
+- **Recursive Music Library Scanner**: Scans local directory trees (`.mp3`, `.flac`, `.m4a`, `.ogg`, `.wma`) and extracts embedded ID3/Vorbis/FLAC metadata with SHA-256 fingerprints.
+- **Smart Normalization Engine**: Strips noisy remaster/edition tags (`[Remastered]`, `(Deluxe Edition)`, `feat.`), formats track numbers, and tolerates duration deltas.
+- **Deduplication & Matching**: Compares local files against YouTube Music cloud uploads using a confidence model (Exact, Strong, Weak, Missing) to prevent redundant uploads.
+- **Sequential Queue & Resilient Recovery**: Uploads tracks one-by-one with exponential backoff retries. Resumes seamlessly across restarts or transient network dropouts.
+- **Companion Browser Extension**: 1-click seamless OAuth/cookie extraction for desktop browsers without manual DevTools copying.
+- **Reverse Proxy & Traefik Ready**: First-class support for HTTPS termination, `X-Forwarded-*` client IP resolution, CORS policy management, and sliding-window rate limiting.
 
 ---
 
-## 2. Requirements
+## 2. Architecture & Multi-User Security
 
-- **For Docker Deployment (Recommended)**:
-  - Docker Engine 24.0+ and Docker Compose v2.0+
-  - Host directory containing your music library (mounted strictly read-only)
-- **For Native Desktop Execution**:
-  - Python 3.12+
-  - Flutter SDK 3.19+ (with desktop linux/macos/windows toolchains)
+```text
+Host / Reverse Proxy (Traefik / Cloudflare)
+       │ (HTTPS / Bearer Auth / X-Forwarded-For)
+       ▼
+YTM Sync Container (UID 1000 ytmsync, Read-Only App)
+├── REST API & Static Flutter Web UI (Port 8080)
+├── Auth Service & Sliding Window Rate Limiter (HTTP 429)
+├── Playlist Watcher & Reconciliation Engine
+│
+├── /config (Persistent Storage Volume)
+│   ├── database/ytm_sync.db    ──► Multi-tenant SQLite (user_id partitioned)
+│   ├── users/<user_id>/        ──► Per-user AES-GCM encrypted headers & settings
+│   ├── backups/                ──► Point-in-time database snapshots
+│   └── logs/ytm_sync.log       ──► Sanitized, user-aware masked logs
+│
+├── /music (Read-Only Host Mount :ro)
+└── /downloads (Read-Only Host Mount :ro)
+```
+
+### Security Invariants
+- **Strict Tenant Partitioning**: Every database query, playlist operation, upload, and sync job derives identity strictly from the validated Bearer session (`current_user.id`), ignoring client-supplied IDs in payloads.
+- **Least Privilege Execution**: Unprivileged container user `ytmsync` (`uid=1000, gid=1000`), dropped Linux capabilities (`cap_drop: [ALL]`), and read-only music mounts prevent data loss.
+- **Credential Encryption**: Per-user YouTube Music session headers are encrypted at rest using AES-GCM before saving to `/config/users/<user_id>/auth/`.
+- **Sliding-Window Rate Limiting**: Protects sensitive authentication and sync endpoints against brute-force and resource abuse with HTTP 429 `Retry-After`.
 
 ---
 
-## 3. Docker Installation
+## 3. Quick Start with Docker
 
+### 1. Configuration
+Copy the sample environment file and adjust your storage paths:
 ```bash
-# 1. Clone the repository
-git clone https://github.com/jakej985-rgb/ytmusic_sync.git
-cd ytmusic_sync
-
-# 2. Create your environment configuration
 cp .env.example .env
-
-# 3. Launch with Docker Compose
-docker compose up -d
 ```
 
-### Accessing the Application
+Example `.env` configuration:
+```env
+# External HTTP Port for Web UI & API
+PORT=6969
 
-Open your browser and navigate to:
-```text
-http://<YOUR_SERVER_IP>:8080
-```
-*(or `http://localhost:8080` if running locally)*
+# Persistent Application Configuration Path (SQLite database, auth headers, logs)
+CONFIG_PATH=/mnt/config
 
----
+# Host Music Directories (Mounted strictly Read-Only into container)
+MUSIC_PATH=/mnt/music
+DOWNLOADS_PATH=/mnt/downloads
 
-## 4. Configuration & Environment Variables
+# Timezone & Logging
+TZ=America/Denver
+LOG_LEVEL=INFO
 
-All configuration is managed via environment variables in `.env` or passed to `docker compose`:
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `PORT` | `8080` | Host port where YTM Sync is exposed |
-| `CONFIG_PATH` | `./config` | Host path storing database, logs, and auth credentials |
-| `MUSIC_PATH` | `/mnt/music` | Host directory containing your primary music files |
-| `DOWNLOADS_PATH` | `/mnt/downloads` | Host directory containing your secondary/downloaded music |
-| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `TZ` | `UTC` | Server timezone for timestamped logs and backups |
-| `YTM_SYNC_API_KEY` | *(auto-generated)* | Explicit API key to enforce for Bearer authentication (optional) |
-| `ALLOWED_ORIGINS` | *(localhost)* | Comma-separated CORS allowed origins (e.g. `https://ytmsync.example.com`) |
-| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Reverse proxy IPs/subnets trusted for `X-Forwarded-*` headers |
-
----
-
-## 5. Security Model & API Authentication
-
-YTM Sync is engineered with security-by-default principles:
-
-### API Bearer Authentication
-- On first startup, YTM Sync automatically provisions a cryptographically strong 32-byte API key.
-- The key is securely stored at `/config/auth/api_key.txt` with restricted `0600` permissions.
-- To use the Web UI or connect external tools, authenticate using `Authorization: Bearer <API_KEY>`.
-- The Web UI automatically prompts for the API key if not yet provided or if a `401 Unauthorized` is encountered.
-- OpenAPI docs (`/docs`, `/redoc`, `/openapi.json`) are disabled by default in production.
-
-### Principle of Least Privilege
-- **Container Isolation**: Runs as non-root user `ytmsync` (`uid=1000`, `gid=1000`).
-- **Capability Lockdown**: Drops all Linux capabilities (`cap_drop: [ALL]`) with `no-new-privileges: true`.
-- **Read-Only Music Safety**: Music library directories are kernel-mounted read-only (`:ro`). YTM Sync cannot alter or delete your files.
-- **Filesystem Confinement**: Path validation restricts all browsing and file operations strictly to approved roots (`/music`, `/downloads`).
-- **SSRF Defense**: External network consumers validate hostnames and DNS resolutions, blocking private IP ranges, loopbacks, and cloud metadata endpoints.
-
----
-
-## 6. Reverse Proxy Setup (Traefik / Cloudflare / Nginx)
-
-When deploying behind a reverse proxy (e.g., Cloudflare Tunnel, Traefik, or Nginx):
-
-```text
-User / Browser
-      ↓
-Cloudflare (HTTPS)
-      ↓
-Traefik / Nginx (Reverse Proxy)
-      ↓
-YTM Sync (Port 8080)
+# Allowed CORS Origins (for reverse proxy access)
+ALLOWED_ORIGINS=https://ytmsync.example.com,http://localhost:6969
 ```
 
-1. **Configure Trusted Proxy IPs**: In `.env`, set `FORWARDED_ALLOW_IPS` to your reverse proxy IP or Docker bridge subnet (e.g. `172.16.0.0/12,10.0.0.0/8`).
-2. **Configure CORS**: Set `ALLOWED_ORIGINS` to your external domain:
-   ```bash
-   ALLOWED_ORIGINS=https://ytmsync.example.com
-   ```
-3. **Traefik Labels**: If using Traefik, uncomment the labels section in `docker-compose.yml` and set `TRAEFIK_HOST=ytmsync.example.com` in `.env`.
-
----
-
-## 7. Music Mounts (Read-Only Safety)
-
-YTM Sync **never modifies, tags, renames, or deletes your local files**.
-
-In `docker-compose.yml`, all music volumes are kernel-enforced as read-only (`:ro`):
-
-```yaml
-volumes:
-  - ./config:/config
-  - /media/Music:/music:ro
-  - /media/Downloads:/downloads:ro
+### 2. Launch
+```bash
+docker compose -f ytsync.yml --env-file .env up -d
 ```
 
-Inside the Web UI under **Settings** $\rightarrow$ **Music Folders**, you can add `/music`, `/downloads`, or any subfolder.
+Access the Web UI at `http://<SERVER_IP>:6969` (or `http://localhost:6969`).
 
 ---
 
-## 8. YouTube Music Authentication
+## 4. User Onboarding & Workflows
 
-Linking your YouTube Music account allows YTM Sync to synchronize your music locker and playlists without storing your Google password:
-
-1. Open YTM Sync.
-2. Go to Settings.
-3. Click Connect YouTube Music.
-4. Complete authentication in your browser.
-5. Return to YTM Sync.
-
-YTM Sync will verify the connection automatically.
-
-> **Companion Extension**: For effortless 1-click linking without manual steps, load the lightweight browser extension in [`companion_extension/`](companion_extension/README.md).
+### Standard User Flow
+1. **Login**: Navigate to the Web UI. Log in with your credentials or the bootstrapped administrator account.
+2. **Connect YouTube Music**:
+   - Open **Settings** $\rightarrow$ **YouTube Music Connection**.
+   - Click **Connect YouTube Music**.
+   - Use the **YTM Sync Companion Extension** for 1-click authorization, or follow the guided browser wizard.
+3. **Scan Music Folders**:
+   - Add your music folder path (e.g., `/music` or `/downloads`).
+   - Click **Scan Library** to fingerprint local tracks.
+4. **Synchronize & Replicate**:
+   - Review match statuses in the **Library** view.
+   - Queue missing tracks for upload or enable automated playlist replication.
 
 ### Advanced / Developer Authentication
-
-For headless servers, automated scripts, or troubleshooting, manual header configuration is supported in the **Advanced / Developer Authentication** accordion in Settings:
-
-1. In Settings, expand **Advanced / Developer Authentication**.
-2. Paste raw headers (`Cookie: ...` and `Authorization: SAPISIDHASH ...`) or cURL command.
-3. Click **Save Manual Headers**.
-
-Credentials are saved locally on your server with restricted `0600` permissions at `/config/auth/headers_auth.json`.
+For headless environments or automated workflows where browser extension use is impractical:
+1. Open **Settings** $\rightarrow$ Expand **Advanced / Developer Authentication**.
+2. Paste raw HTTP headers (`Cookie: ...` and `Authorization: SAPISIDHASH ...`) or an exported cURL command from your browser.
+3. Click **Save Manual Headers**. YTM Sync validates the session against YouTube Music and securely encrypts the headers for your user.
 
 ---
 
-## 9. Starting
+## 5. User Management & Administration
 
-```bash
-docker compose up -d
+Administrators have access to user management under the **Admin Panel**:
+- **Create Users**: Provision standard or administrator accounts with strong passwords.
+- **Role Assignment**: Promote or demote user roles.
+- **Safe Deletion**: Deleting an account requires explicit confirmation (`confirm=true`). Deleting an account purges that user's encrypted configuration, playlists, and sync jobs from the database.
+- **Last-Admin Safeguard**: The system strictly prevents deleting or demoting the final remaining administrator, preventing accidental lockouts.
+
+### Safe Disconnect vs Permanent Account Deletion
+| Action | Database Records | Local File Storage | Cloud Uploads | Auth Session |
+| :--- | :--- | :--- | :--- | :--- |
+| **Disconnect YTM** | **Preserved** (Tracks, jobs, history kept) | **Preserved** | Untouched | Revoked & Removed |
+| **Delete User** | **Purged** (Cascaded deletion across tables) | **Purged** (`/config/users/<id>`) | Untouched | Revoked & Removed |
+
+---
+
+## 6. Family Mode & Multi-Account Operations
+
+Family Mode provides secure, opt-in music synchronization and playlist replication across family members while maintaining strict multi-account privacy and credential isolation.
+
+### Architectural Invariants
+1. **Requester vs. Destination Separation**:
+   `requested_by_user + destination_ytm_account + authorization -> operation`
+   The user requesting an upload and the user receiving the track into their personal YouTube Music library are distinct.
+2. **Credential & Client Isolation**: Every upload or playlist operation runs exclusively against the destination user's isolated credentials and client instance. Credentials and auth tokens are never reused or shared between accounts.
+3. **Zero Implicit Sharing**: Joining a family group grants zero implicit permissions. Each member explicitly controls:
+   - `show_account_in_family`: Show/hide account connection status on the family dashboard.
+   - `allow_family_uploads`: Allow family members to upload tracks to their account.
+   - `allow_family_playlists`: Allow family members to replicate playlists to their account.
+   - `allow_family_sync`: Include their account in one-click family bulk sync.
+4. **Independent Duplicate Detection**: Duplicate checking is strictly isolated to each destination account. If Track A is already uploaded to Dad's locker but not Mom's, Mom receives the upload without skipping.
+5. **Safe Lifecycle Operations**:
+   - **Leaving a Family**: A member can leave anytime without losing their local files, uploads, or sync history. An owner cannot leave without first transferring ownership or deleting the family.
+   - **Deleting a Family**: Deleting a family purges only family memberships and invitations. Individual users and their YTM accounts remain completely intact.
+
+### Family Mode REST Endpoints
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/families` | Create a new family group (caller becomes `OWNER`). |
+| `GET` | `/api/families` | List families the caller belongs to. |
+| `GET` | `/api/families/{id}/dashboard` | Aggregated dashboard respecting member privacy controls. |
+| `POST` | `/api/families/{id}/invitations` | Generate a 32-character token invitation with expiration. |
+| `POST` | `/api/invitations/{token}/accept` | Join a family group using an invitation token. |
+| `PATCH` | `/api/families/{id}/members/{user_id}/permissions` | Update personal family privacy toggles. |
+| `POST` | `/api/uploads/destinations` | Upload tracks to one or multiple permitted destination accounts. |
+| `GET` | `/api/tracks/{file_id}/destinations-status` | Inspect duplicate/uploaded status per permitted account. |
+| `GET` | `/api/families/{id}/queue` | View family queue grouped by track and destinations. |
+| `GET` | `/api/families/{id}/history` | Combined family upload history identifying requester and destination. |
+| `POST` | `/api/families/{id}/sync` | Trigger fault-tolerant sync across all permitted family accounts. |
+| `POST` | `/api/families/{id}/playlists/multi` | Replicate playlists across multiple family accounts. |
+
+---
+
+## 7. Migration from Single-User (Phase V)
+
+When upgrading an existing single-user installation:
+1. On first startup, the migration worker detects legacy unencrypted `/config/auth/headers_auth.json`.
+2. A safety backup is created at `/config/auth/headers_auth.json.migrated_backup`.
+3. Credentials are migrated into the default administrator's secure directory (`/config/users/<admin_id>/auth/headers_auth.json`) and encrypted.
+4. The connection is validated against YouTube Music.
+5. The legacy file is renamed to `headers_auth.json.migrated` to prevent re-processing.
+
+---
+
+## 8. Reverse Proxy & Traefik Configuration
+
+When deploying behind Traefik, Cloudflare Tunnel, or Nginx:
+
+```text
+Client (Browser / Extension)
+       │ (HTTPS)
+       ▼
+Traefik / Nginx Reverse Proxy
+       │ (HTTP, Forwarded Headers)
+       ▼
+YTM Sync (Port 8080 internal)
 ```
 
-To verify the container is running and healthy:
+### Traefik Compose Labels Example
+```yaml
+services:
+  ytm-sync:
+    image: ghcr.io/jakej985-rgb/ytmusic_sync:latest
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ytmsync.rule=Host(`ytmsync.example.com`)"
+      - "traefik.http.routers.ytmsync.entrypoints=websecure"
+      - "traefik.http.routers.ytmsync.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ytmsync.loadbalancer.server.port=8080"
+```
+
+### Environment Configuration
+- Set `FORWARDED_ALLOW_IPS=172.16.0.0/12,10.0.0.0/8,127.0.0.1` so Uvicorn trusts client IP headers (`X-Forwarded-For`) for accurate rate limiting.
+- Set `ALLOWED_ORIGINS=https://ytmsync.example.com` to enable cross-origin browser extension requests.
+
+---
+
+## 9. Backup & Disaster Recovery
+
+### What is Stored in `/config`:
+- `/config/database/ytm_sync.db` — Relational database (music files, matches, playlist replicas, sync jobs)
+- `/config/users/<user_id>/` — Per-user encrypted authentication credentials and custom settings
+- `/config/backups/` — Automatic database snapshots
+- `/config/logs/` — Sanitized log files
+
+### Creating a Full Backup
 ```bash
-docker compose ps
-curl -s http://localhost:8080/health
+tar -czvf ytm_sync_backup_$(date +%Y%m%d_%H%M%S).tar.gz -C /mnt/config .
+```
+
+### Restoring from Backup
+```bash
+# 1. Stop container
+docker compose -f ytsync.yml down
+
+# 2. Extract into config path
+tar -xzvf ytm_sync_backup_YYYYMMDD_HHMMSS.tar.gz -C /mnt/config/
+
+# 3. Start container
+docker compose -f ytsync.yml --env-file .env up -d
 ```
 
 ---
 
-## 10. Stopping
+## 10. Development & Running Tests
 
+### Backend Tests (Pytest)
 ```bash
-docker compose down
+# Run full test suite (243 unit, boundary, multi-user, and family mode tests)
+pytest backend/tests -v
 ```
 
-YTM Sync catches `SIGTERM`, safely completes any active in-flight request, flushes all SQLite database transactions to disk, and exits cleanly.
-
----
-
-## 11. Updating
-
-To upgrade to the latest version while preserving all database records, authentication credentials, and sync history:
-
+### Flutter Frontend Tests
 ```bash
-git pull
-docker compose build --no-cache
-docker compose up -d
+cd app
+flutter test
 ```
-
----
-
-## 12. Backup
-
-Only the host `/config` directory needs to be backed up. The music directory is already mounted from your host system.
-
-### Create a Quick Backup Archive
-```bash
-tar -czvf ytm_sync_backup_$(date +%Y%m%d).tar.gz ./config
-```
-
-### What is Preserved in `/config`:
-- `/config/database/ytm_sync.db` — Track metadata, cloud matches, sync queue & history
-- `/config/auth/api_key.txt` — Secure API key
-- `/config/auth/headers_auth.json` — YouTube Music authentication headers
-- `/config/backups/` — Periodic SQLite database snapshots
-
----
-
-## 13. Restoration
-
-To restore your configuration and state on a new server or fresh install:
-
-1. Extract your backup archive into your project directory:
-   ```bash
-   tar -xzvf ytm_sync_backup_YYYYMMDD.tar.gz -C ./
-   ```
-2. Confirm permissions are readable/writable:
-   ```bash
-   chmod -R u=rwX,g=rX,o= ./config
-   ```
-3. Start the container:
-   ```bash
-   docker compose up -d
-   ```
-4. Verify all components restored:
-   - Database records, sync queue, and matches will be immediately active.
-   - The same API key in `config/auth/api_key.txt` will continue to authenticate your clients.
-   - YouTube Music connection will remain intact without needing re-authentication.
-
----
-
-## 14. Troubleshooting
-
-### Container Shows `(unhealthy)`
-Check logs with:
-```bash
-docker compose logs -f ytm-sync
-```
-Confirm `curl` can reach the internal endpoint:
-```bash
-docker compose exec ytm-sync curl -f http://localhost:8080/health
-```
-
-### YouTube Music Shows "NOT CONNECTED"
-- Your browser session may have expired. In **Settings**, click **Connect YouTube Music** (or **Try Again**) to re-authorize.
-- Confirm `/config/auth/headers_auth.json` exists and is readable by UID `1000`.
-
-### Music Files Not Detected
-- Verify that your host music path is mounted in `docker-compose.yml`.
-- Verify folder permissions allow reading (e.g. `chmod -R a+rX /path/to/music`).
-- In the Web UI **Settings**, confirm `/music` or `/downloads` is added to scanned paths.

@@ -8,6 +8,8 @@ class ApiService {
   final String baseUrl;
   final http.Client _client;
   String? _apiKey;
+  User? _currentUser;
+  YouTubeMusicAccount? _ytmAccount;
   VoidCallback? onUnauthorized;
 
   ApiService({String? baseUrl, http.Client? client})
@@ -18,12 +20,22 @@ class ApiService {
 
   String? get apiKey => _apiKey;
   bool get isUnauthorized => _isUnauthorized;
+  User? get currentUser => _currentUser;
+  YouTubeMusicAccount? get ytmAccount => _ytmAccount;
 
   Future<void> initApiKey() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      _apiKey = prefs.getString('ytm_sync_api_key');
+      final sessionToken = prefs.getString('ytm_sync_session_token');
+      final apiKey = prefs.getString('ytm_sync_api_key');
+      _apiKey = (sessionToken != null && sessionToken.isNotEmpty) ? sessionToken : apiKey;
       _isUnauthorized = false;
+      if (_apiKey != null && _apiKey!.isNotEmpty) {
+        try {
+          await fetchCurrentUser();
+          await fetchYtmAccount();
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 
@@ -31,15 +43,140 @@ class ApiService {
     _apiKey = key?.trim();
     if (_apiKey != null && _apiKey!.isNotEmpty) {
       _isUnauthorized = false;
+    } else {
+      _currentUser = null;
+      _ytmAccount = null;
     }
     try {
       final prefs = await SharedPreferences.getInstance();
       if (_apiKey == null || _apiKey!.isEmpty) {
         await prefs.remove('ytm_sync_api_key');
+        await prefs.remove('ytm_sync_session_token');
       } else {
         await prefs.setString('ytm_sync_api_key', _apiKey!);
       }
     } catch (_) {}
+  }
+
+  Future<UserLoginResponse> login(String username, String password) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/api/auth/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'username': username, 'password': password}),
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      final loginResp = UserLoginResponse.fromJson(data);
+      _apiKey = loginResp.token;
+      _currentUser = loginResp.user;
+      _isUnauthorized = false;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('ytm_sync_session_token', loginResp.token);
+      } catch (_) {}
+      try {
+        await fetchYtmAccount();
+      } catch (_) {}
+      return loginResp;
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Login failed');
+  }
+
+  Future<void> logout() async {
+    if (_apiKey != null && _apiKey!.isNotEmpty) {
+      try {
+        await _client.post(
+          Uri.parse('$baseUrl/api/auth/logout'),
+          headers: _buildHeaders({'Content-Type': 'application/json'}),
+        );
+      } catch (_) {}
+    }
+    _apiKey = null;
+    _currentUser = null;
+    _ytmAccount = null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('ytm_sync_session_token');
+      await prefs.remove('ytm_sync_api_key');
+    } catch (_) {}
+  }
+
+  Future<User?> fetchCurrentUser() async {
+    try {
+      final response = await _get(Uri.parse('$baseUrl/api/auth/me'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _currentUser = User.fromJson(data);
+        return _currentUser;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<YouTubeMusicAccount?> fetchYtmAccount() async {
+    try {
+      final response = await _get(Uri.parse('$baseUrl/api/ytm/account'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _ytmAccount = YouTubeMusicAccount.fromJson(data);
+        return _ytmAccount;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<List<User>> getUsers() async {
+    final response = await _get(Uri.parse('$baseUrl/api/admin/users'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((u) => User.fromJson(u as Map<String, dynamic>)).toList();
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to fetch users');
+  }
+
+  Future<User> createUser(String username, String password, {String role = 'USER'}) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/admin/users'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'username': username,
+        'password': password,
+        'role': role,
+      }),
+    );
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return User.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to create user');
+  }
+
+  Future<User> updateUser(String userId, {String? password, String? role, bool? isActive}) async {
+    final body = <String, dynamic>{};
+    if (password != null && password.isNotEmpty) body['password'] = password;
+    if (role != null) body['role'] = role;
+    if (isActive != null) body['is_active'] = isActive;
+
+    final response = await _put(
+      Uri.parse('$baseUrl/api/admin/users/$userId'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    );
+    if (response.statusCode == 200) {
+      return User.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to update user');
+  }
+
+  Future<void> deleteUser(String userId) async {
+    final response = await _delete(Uri.parse('$baseUrl/api/admin/users/$userId?confirm=true'));
+    if (response.statusCode != 204 && response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to delete user');
+    }
   }
 
   Map<String, String> _buildHeaders([Map<String, String>? base]) {
@@ -80,11 +217,29 @@ class ApiService {
     return response;
   }
 
+  Future<http.Response> _put(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    if (_isUnauthorized) {
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+    final response = await _client.put(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    _checkResponse(response);
+    return response;
+  }
+
   Future<http.Response> _delete(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
     if (_isUnauthorized) {
       throw Exception('Unauthorized: Invalid or missing API key');
     }
     final response = await _client.delete(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
+    _checkResponse(response);
+    return response;
+  }
+
+  Future<http.Response> _patch(Uri uri, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    if (_isUnauthorized) {
+      throw Exception('Unauthorized: Invalid or missing API key');
+    }
+    final response = await _client.patch(uri, headers: _buildHeaders(headers), body: body, encoding: encoding);
     _checkResponse(response);
     return response;
   }
@@ -400,8 +555,11 @@ class ApiService {
     throw Exception('Failed to backup database');
   }
 
-  Future<List<YTMPlaylist>> fetchPlaylists() async {
-    final response = await _get(Uri.parse('$baseUrl/api/ytm/playlists'));
+  Future<List<YTMPlaylist>> fetchPlaylists({String? userId}) async {
+    final uri = Uri.parse('$baseUrl/api/ytm/playlists').replace(
+      queryParameters: userId != null && userId.isNotEmpty ? {'user_id': userId} : null,
+    );
+    final response = await _get(uri);
     if (response.statusCode == 200) {
       final list = jsonDecode(response.body) as List<dynamic>;
       return list.map((item) => YTMPlaylist.fromJson(item as Map<String, dynamic>)).toList();
@@ -420,11 +578,24 @@ class ApiService {
     throw Exception('Failed to fetch playlist details');
   }
 
-  Future<Map<String, dynamic>> syncMissingPlaylistTracks(String playlistId, {String? destinationDir}) async {
-    final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId/sync-missing').replace(
-      queryParameters: destinationDir != null && destinationDir.isNotEmpty ? {'destination_dir': destinationDir} : null,
+  Future<Map<String, dynamic>> syncMissingPlaylistTracks(
+    String playlistId, {
+    String? destinationDir,
+    List<String>? destinationUserIds,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/ytm/playlists/$playlistId/sync-missing');
+    final Map<String, dynamic> body = {};
+    if (destinationDir != null && destinationDir.isNotEmpty) {
+      body['destination_dir'] = destinationDir;
+    }
+    if (destinationUserIds != null && destinationUserIds.isNotEmpty) {
+      body['destination_user_ids'] = destinationUserIds;
+    }
+    final response = await _post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
     );
-    final response = await _post(uri);
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
     }
@@ -721,6 +892,309 @@ class ApiService {
     final response = await _delete(uri);
     if (response.statusCode != 200) {
       throw Exception('Failed to delete replicated playlist #$id');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Family Mode & Multi-Account Methods (Sections 1-40)
+  // ---------------------------------------------------------------------------
+
+  Future<List<Family>> getFamilies() async {
+    final response = await _get(Uri.parse('$baseUrl/api/families'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => Family.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to fetch families: ${response.body}');
+  }
+
+  Future<Family> createFamily(String name) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/families'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'name': name}),
+    );
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return Family.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to create family');
+  }
+
+  Future<Family> getFamily(String familyId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId'));
+    if (response.statusCode == 200) {
+      return Family.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Failed to fetch family: ${response.body}');
+  }
+
+  Future<Family> updateFamily(String familyId, String name) async {
+    final response = await _patch(
+      Uri.parse('$baseUrl/api/families/$familyId'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'name': name}),
+    );
+    if (response.statusCode == 200) {
+      return Family.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to update family');
+  }
+
+  Future<void> transferFamilyOwnership(String familyId, String newOwnerUserId, {bool confirm = true}) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/families/$familyId/transfer'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'new_owner_user_id': newOwnerUserId,
+        'confirm': confirm,
+      }),
+    );
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to transfer ownership');
+    }
+  }
+
+  Future<void> leaveFamily(String familyId) async {
+    final response = await _post(Uri.parse('$baseUrl/api/families/$familyId/leave'));
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to leave family');
+    }
+  }
+
+  Future<void> deleteFamily(String familyId) async {
+    final response = await _delete(Uri.parse('$baseUrl/api/families/$familyId'));
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to delete family');
+    }
+  }
+
+  Future<FamilyDashboardResponse> getFamilyDashboard(String familyId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId/dashboard'));
+    if (response.statusCode == 200) {
+      return FamilyDashboardResponse.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to load family dashboard');
+  }
+
+  Future<List<SelectableAccountItem>> getSelectableAccounts() async {
+    final response = await _get(Uri.parse('$baseUrl/api/accounts'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => SelectableAccountItem.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to fetch selectable accounts: ${response.body}');
+  }
+
+  Future<UploadDestinationResponse> uploadToDestinations(
+    List<int> musicFileIds,
+    List<String> destinationUserIds, {
+    String? familyId,
+  }) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/uploads/destinations'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'music_file_ids': musicFileIds,
+        'destination_user_ids': destinationUserIds,
+        'family_id': ?familyId,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return UploadDestinationResponse.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to queue uploads');
+  }
+
+  Future<List<TrackDestinationDuplicateStatus>> getTrackDestinationsStatus(int fileId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/tracks/$fileId/destinations-status'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => TrackDestinationDuplicateStatus.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to load track destinations status: ${response.body}');
+  }
+
+  Future<List<FamilyQueueItem>> getFamilyQueue(String familyId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId/queue'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => FamilyQueueItem.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to load family queue: ${response.body}');
+  }
+
+  Future<List<FamilyUploadHistoryItem>> getFamilyHistory(String familyId, {int limit = 50}) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId/history?limit=$limit'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => FamilyUploadHistoryItem.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to load family history: ${response.body}');
+  }
+
+  Future<Map<String, dynamic>> triggerFamilySync(String familyId) async {
+    final response = await _post(Uri.parse('$baseUrl/api/families/$familyId/sync'));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to trigger family sync');
+  }
+
+  Future<List<FamilyPlaylistItem>> getFamilyPlaylists(String familyId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId/playlists'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => FamilyPlaylistItem.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to load family playlists: ${response.body}');
+  }
+
+  Future<Map<String, dynamic>> createMultiPlaylists(
+    String familyId,
+    String title,
+    List<String> targetUserIds, {
+    String? description,
+    List<String>? videoIds,
+    String? sourcePlaylistId,
+    String? sourceUserId,
+    bool uploadMissingToTargets = false,
+  }) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/families/$familyId/playlists/multi'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'name': title,
+        'title': title,
+        'destination_user_ids': targetUserIds,
+        'target_user_ids': targetUserIds,
+        'description': ?description,
+        'video_ids': ?videoIds,
+        'source_playlist_id': ?sourcePlaylistId,
+        'source_user_id': ?sourceUserId,
+        'upload_missing_to_targets': uploadMissingToTargets,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    String errorMsg = 'Failed to create multi-account playlists';
+    try {
+      final err = jsonDecode(response.body);
+      if (err is Map && err['detail'] != null) {
+        errorMsg = err['detail'].toString();
+      }
+    } catch (_) {
+      if (response.body.isNotEmpty) {
+        errorMsg = response.body;
+      }
+    }
+    throw Exception(errorMsg);
+  }
+
+  Future<FamilyInvitation> createFamilyInvitation(
+    String familyId, {
+    int expiryHours = 48,
+    int maxUses = 1,
+  }) async {
+    final response = await _post(
+      Uri.parse('$baseUrl/api/families/$familyId/invitations'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'expiry_hours': expiryHours,
+        'max_uses': maxUses,
+      }),
+    );
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return FamilyInvitation.fromJson(jsonDecode(response.body));
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Failed to create invitation');
+  }
+
+  Future<List<FamilyInvitation>> listFamilyInvitations(String familyId) async {
+    final response = await _get(Uri.parse('$baseUrl/api/families/$familyId/invitations'));
+    if (response.statusCode == 200) {
+      final list = jsonDecode(response.body) as List<dynamic>;
+      return list.map((e) => FamilyInvitation.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to list invitations: ${response.body}');
+  }
+
+  Future<void> revokeFamilyInvitation(String familyId, String invitationId) async {
+    final response = await _delete(Uri.parse('$baseUrl/api/families/$familyId/invitations/$invitationId'));
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to revoke invitation');
+    }
+  }
+
+  Future<Map<String, dynamic>> getInvitationInfo(String token) async {
+    final response = await _get(Uri.parse('$baseUrl/api/invitations/$token'));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    final err = jsonDecode(response.body);
+    throw Exception(err['detail'] ?? 'Invalid invitation');
+  }
+
+  Future<void> acceptFamilyInvitation(String token) async {
+    final response = await _post(Uri.parse('$baseUrl/api/invitations/$token/accept'));
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to accept invitation');
+    }
+  }
+
+  Future<void> updateFamilyMemberPrivacy(
+    String familyId,
+    String userId, {
+    bool? showAccountInFamily,
+    bool? allowFamilyUploads,
+    bool? allowFamilyPlaylists,
+    bool? allowFamilySync,
+  }) async {
+    final body = <String, dynamic>{};
+    if (showAccountInFamily != null) body['show_account_in_family'] = showAccountInFamily;
+    if (allowFamilyUploads != null) body['allow_family_uploads'] = allowFamilyUploads;
+    if (allowFamilyPlaylists != null) body['allow_family_playlists'] = allowFamilyPlaylists;
+    if (allowFamilySync != null) body['allow_family_sync'] = allowFamilySync;
+
+    final response = await _patch(
+      Uri.parse('$baseUrl/api/families/$familyId/members/$userId/permissions'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    );
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to update member privacy');
+    }
+  }
+
+  Future<void> updateFamilyMemberRole(String familyId, String userId, String role) async {
+    final response = await _put(
+      Uri.parse('$baseUrl/api/families/$familyId/members/$userId/role'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'role': role}),
+    );
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to update member role');
+    }
+  }
+
+  Future<void> removeFamilyMember(String familyId, String userId) async {
+    final response = await _delete(Uri.parse('$baseUrl/api/families/$familyId/members/$userId'));
+    if (response.statusCode != 200) {
+      final err = jsonDecode(response.body);
+      throw Exception(err['detail'] ?? 'Failed to remove member');
     }
   }
 }

@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import 'components/folder_browser_dialog.dart';
+import 'components/auth_dialog.dart';
 
 class SettingsView extends StatefulWidget {
   const SettingsView({super.key});
@@ -28,6 +29,10 @@ class _SettingsViewState extends State<SettingsView> {
   bool _isLoading = true;
   bool _isSavingAuth = false;
   String? _authMessage;
+  String? _currentAuthUrl;
+
+  List<User> _users = [];
+  bool _isLoadingUsers = false;
 
   @override
   void initState() {
@@ -45,6 +50,22 @@ class _SettingsViewState extends State<SettingsView> {
     super.dispose();
   }
 
+  Future<void> _loadUsers() async {
+    if (apiService.currentUser?.isAdmin != true) return;
+    setState(() => _isLoadingUsers = true);
+    try {
+      final users = await apiService.getUsers();
+      if (mounted) {
+        setState(() {
+          _users = users;
+          _isLoadingUsers = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingUsers = false);
+    }
+  }
+
   Future<void> _loadAll() async {
     setState(() => _isLoading = true);
     try {
@@ -52,6 +73,15 @@ class _SettingsViewState extends State<SettingsView> {
       final stats = await apiService.fetchFolderStats();
       final settings = await apiService.getSettings();
       final authStatus = await apiService.fetchAuthStatus();
+      try {
+        await apiService.fetchCurrentUser();
+        await apiService.fetchYtmAccount();
+      } catch (_) {}
+      if (apiService.currentUser?.isAdmin == true) {
+        try {
+          _users = await apiService.getUsers();
+        } catch (_) {}
+      }
       if (mounted) {
         setState(() {
           _folders = folders;
@@ -136,6 +166,7 @@ class _SettingsViewState extends State<SettingsView> {
     setState(() {
       _authState = AuthState.starting;
       _authMessage = null;
+      _currentAuthUrl = null;
     });
 
     try {
@@ -143,23 +174,65 @@ class _SettingsViewState extends State<SettingsView> {
         originUrl: kIsWeb ? Uri.base.origin : null,
       );
       _currentSessionId = session.sessionId;
+      _currentAuthUrl = session.authUrl;
 
       if (!mounted) return;
+
+      // Validate authentication URL returned by server
+      final rawUrl = session.authUrl.trim();
+      if (rawUrl.isEmpty) {
+        throw const FormatException('Empty authentication URL received from server.');
+      }
+      final uri = Uri.tryParse(rawUrl);
+      if (uri == null || !uri.hasScheme || (uri.scheme != 'http' && uri.scheme != 'https')) {
+        throw const FormatException('Invalid authentication URL scheme.');
+      }
+
       setState(() {
         _authState = AuthState.waitingForBrowser;
       });
 
-      final uri = Uri.parse(session.authUrl);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      // Launch URL directly with web-compatible mode and fallback
+      bool launched = false;
+      try {
+        launched = await launchUrl(
+          uri,
+          mode: LaunchMode.platformDefault,
+          webOnlyWindowName: '_blank',
+        );
+      } catch (launchErr, st) {
+        debugPrint('url_launcher failed with exception: ${launchErr.runtimeType}\n$st');
+        launched = false;
+      }
+
+      if (!launched) {
+        if (!mounted) return;
+        setState(() {
+          _authState = AuthState.failed;
+          _authMessage = 'Unable to open authentication page. Please check your browser popup blocker or try again.';
+        });
+        return;
       }
 
       _startAuthPolling(session.sessionId);
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('Failed to start authentication session: ${e.runtimeType}\n$st');
       if (mounted) {
         setState(() {
           _authState = AuthState.failed;
-          _authMessage = 'Failed to start authentication session: $e';
+          String userMsg = 'Unable to open the YouTube Music authentication page. Please try again.';
+          final errStr = e.toString().toLowerCase();
+          if (errStr.contains('network') ||
+              errStr.contains('connection') ||
+              errStr.contains('socket') ||
+              errStr.contains('failed to start auth session')) {
+            userMsg = 'Unable to connect to the authentication server. Please check your network and try again.';
+          } else if (errStr.contains('unapproved origin') || errStr.contains('invalid origin')) {
+            userMsg = 'Origin URL validation failed. Please contact your administrator.';
+          } else if (errStr.contains('format') || errStr.contains('empty') || errStr.contains('scheme')) {
+            userMsg = 'Invalid authentication URL received from server.';
+          }
+          _authMessage = userMsg;
         });
       }
     }
@@ -184,6 +257,8 @@ class _SettingsViewState extends State<SettingsView> {
               message: 'Connected to YouTube Music successfully.',
               userName: session.userName,
             );
+            _authMessage = null;
+            _currentAuthUrl = null;
           });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -193,21 +268,34 @@ class _SettingsViewState extends State<SettingsView> {
           );
         } else if (session.status == AuthState.failed) {
           timer.cancel();
+          String failureMsg = 'Authentication completed, but the session could not be established.';
+          final err = (session.errorMessage ?? '').toLowerCase();
+          if (err.contains('reject') ||
+              err.contains('denied') ||
+              err.contains('permission') ||
+              err.contains('unauthorized')) {
+            failureMsg = 'YouTube Music authentication was rejected.';
+          } else if (session.errorMessage != null && session.errorMessage!.trim().isNotEmpty) {
+            failureMsg = session.errorMessage!;
+          }
           setState(() {
             _authState = AuthState.failed;
-            _authMessage = session.errorMessage ?? 'Authentication failed during verification.';
+            _authMessage = failureMsg;
+            _currentAuthUrl = null;
           });
         } else if (session.status == AuthState.expired) {
           timer.cancel();
           setState(() {
             _authState = AuthState.expired;
             _authMessage = 'Authentication session expired. Please try again.';
+            _currentAuthUrl = null;
           });
         } else if (session.status == AuthState.cancelled) {
           timer.cancel();
           setState(() {
             _authState = AuthState.cancelled;
-            _authMessage = 'Authentication was cancelled.';
+            _authMessage = 'YouTube Music authentication was cancelled.';
+            _currentAuthUrl = null;
           });
         } else {
           setState(() {
@@ -230,7 +318,8 @@ class _SettingsViewState extends State<SettingsView> {
     if (mounted) {
       setState(() {
         _authState = AuthState.cancelled;
-        _authMessage = 'Authentication cancelled.';
+        _authMessage = 'YouTube Music authentication was cancelled.';
+        _currentAuthUrl = null;
       });
     }
   }
@@ -360,6 +449,16 @@ class _SettingsViewState extends State<SettingsView> {
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 24),
+
+          // User Session Card
+          _buildUserProfileCard(),
+          const SizedBox(height: 24),
+
+          // Admin User Accounts Management (visible to Admins)
+          if (apiService.currentUser?.isAdmin == true) ...[
+            _buildAdminUserManagementCard(),
+            const SizedBox(height: 24),
+          ],
 
           // API Security Section
           _buildCard(
@@ -883,6 +982,34 @@ class _SettingsViewState extends State<SettingsView> {
                     '3. Return here once complete.',
                     style: TextStyle(color: Colors.grey[300], fontSize: 12, height: 1.4),
                   ),
+                  if (_currentAuthUrl != null) ...[
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: () async {
+                        final raw = _currentAuthUrl;
+                        if (raw != null) {
+                          final uri = Uri.tryParse(raw);
+                          if (uri != null) {
+                            try {
+                              await launchUrl(
+                                uri,
+                                mode: LaunchMode.platformDefault,
+                                webOnlyWindowName: '_blank',
+                              );
+                            } catch (_) {}
+                          }
+                        }
+                      },
+                      child: const Text(
+                        "Didn't open? Click here to open YouTube Music.",
+                        style: TextStyle(
+                          color: Color(0xFF3EA6FF),
+                          fontSize: 12,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1050,4 +1177,413 @@ class _SettingsViewState extends State<SettingsView> {
       ),
     );
   }
+
+  Widget _buildUserProfileCard() {
+    final user = apiService.currentUser;
+    final ytmAccount = apiService.ytmAccount;
+
+    return _buildCard(
+      title: 'Current User Session',
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 20,
+            backgroundColor: (user?.isAdmin ?? false) ? const Color(0xFFFF0000) : const Color(0xFF3EA6FF),
+            child: Text(
+              user?.username.isNotEmpty == true ? user!.username[0].toUpperCase() : '?',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      user?.username ?? 'Not Signed In',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    if (user != null) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: user.isAdmin ? Colors.red.withValues(alpha: 0.2) : Colors.blue.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          user.role,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: user.isAdmin ? const Color(0xFFFF4E4E) : const Color(0xFF3EA6FF),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  user != null
+                      ? 'ID: ${user.id} • YTM Account: ${ytmAccount?.accountName ?? (ytmAccount?.isConnected == true ? "Connected" : "Disconnected")}'
+                      : 'Authenticate with a username & password or master API key to access features.',
+                  style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final loggedIn = await AuthDialog.show(context);
+              if (loggedIn == true && mounted) {
+                _loadAll();
+              }
+            },
+            icon: const Icon(Icons.switch_account, size: 16),
+            label: Text(user == null ? 'Sign In' : 'Switch Account'),
+          ),
+          if (user != null) ...[
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                await apiService.logout();
+                if (mounted) {
+                  _loadAll();
+                }
+              },
+              icon: const Icon(Icons.logout, size: 16, color: Colors.redAccent),
+              label: const Text('Log Out', style: TextStyle(color: Colors.redAccent)),
+              style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white12)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdminUserManagementCard() {
+    return _buildCard(
+      title: 'Administrator: User Accounts',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Manage application accounts and access permissions.',
+                style: TextStyle(color: Colors.grey[400], fontSize: 13),
+              ),
+              ElevatedButton.icon(
+                onPressed: _showAddUserDialog,
+                icon: const Icon(Icons.person_add, size: 16),
+                label: const Text('Add User'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF0000),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_isLoadingUsers)
+            const Center(child: Padding(padding: EdgeInsets.all(16.0), child: CircularProgressIndicator()))
+          else if (_users.isEmpty)
+            Text('No users found.', style: TextStyle(color: Colors.grey[500], fontSize: 13))
+          else
+            Table(
+              columnWidths: const {
+                0: FlexColumnWidth(2),
+                1: FlexColumnWidth(1),
+                2: FlexColumnWidth(1),
+                3: FlexColumnWidth(1.5),
+              },
+              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              children: [
+                TableRow(
+                  decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white12))),
+                  children: [
+                    Padding(padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text('Username', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[400], fontSize: 12))),
+                    Padding(padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text('Role', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[400], fontSize: 12))),
+                    Padding(padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text('Status', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[400], fontSize: 12))),
+                    Padding(padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text('Actions', textAlign: TextAlign.right, style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[400], fontSize: 12))),
+                  ],
+                ),
+                ..._users.map((u) {
+                  final isCurrent = u.id == apiService.currentUser?.id;
+                  return TableRow(
+                    decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white10))),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Row(
+                          children: [
+                            Icon(Icons.person, size: 16, color: u.isAdmin ? Colors.redAccent : Colors.blueAccent),
+                            const SizedBox(width: 8),
+                            Text(u.username, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                            if (isCurrent) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                decoration: BoxDecoration(color: Colors.green.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(4)),
+                                child: const Text('You', style: TextStyle(color: Colors.greenAccent, fontSize: 9)),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Text(u.role, style: TextStyle(fontSize: 12, color: u.isAdmin ? const Color(0xFFFF4E4E) : const Color(0xFF3EA6FF))),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Row(
+                          children: [
+                            Icon(u.isActive ? Icons.check_circle : Icons.cancel, size: 12, color: u.isActive ? Colors.green : Colors.red),
+                            const SizedBox(width: 4),
+                            Text(u.isActive ? 'Active' : 'Disabled', style: const TextStyle(fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, size: 16),
+                              tooltip: 'Edit User',
+                              onPressed: () => _showEditUserDialog(u),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                              tooltip: 'Delete User',
+                              onPressed: isCurrent ? null : () => _confirmDeleteUser(u),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                }),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAddUserDialog() async {
+    final usernameController = TextEditingController();
+    final passwordController = TextEditingController();
+    String selectedRole = 'USER';
+    String? dialogError;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF181820),
+          title: const Text('Add New User'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (dialogError != null) ...[
+                Text(dialogError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                const SizedBox(height: 8),
+              ],
+              TextField(
+                controller: usernameController,
+                decoration: const InputDecoration(
+                  labelText: 'Username',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: selectedRole,
+                dropdownColor: const Color(0xFF181820),
+                decoration: const InputDecoration(
+                  labelText: 'Role',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'USER', child: Text('Standard User')),
+                  DropdownMenuItem(value: 'ADMIN', child: Text('Administrator')),
+                ],
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedRole = val);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final uname = usernameController.text.trim();
+                final pwd = passwordController.text;
+                if (uname.isEmpty || pwd.isEmpty) {
+                  setDialogState(() => dialogError = 'Username and password required');
+                  return;
+                }
+                try {
+                  await apiService.createUser(uname, pwd, role: selectedRole);
+                  if (ctx.mounted) Navigator.of(ctx).pop();
+                  await _loadUsers();
+                } catch (e) {
+                  setDialogState(() => dialogError = e.toString().replaceFirst('Exception: ', ''));
+                }
+              },
+              child: const Text('Create User'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showEditUserDialog(User user) async {
+    final passwordController = TextEditingController();
+    String selectedRole = user.role;
+    bool isActive = user.isActive;
+    String? dialogError;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF181820),
+          title: Text('Edit User: ${user.username}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (dialogError != null) ...[
+                Text(dialogError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                const SizedBox(height: 8),
+              ],
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'New Password (leave blank to keep current)',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: selectedRole,
+                dropdownColor: const Color(0xFF181820),
+                decoration: const InputDecoration(
+                  labelText: 'Role',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'USER', child: Text('Standard User')),
+                  DropdownMenuItem(value: 'ADMIN', child: Text('Administrator')),
+                ],
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedRole = val);
+                },
+              ),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                title: const Text('Active Account', style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                value: isActive,
+                onChanged: (val) => setDialogState(() => isActive = val),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                try {
+                  await apiService.updateUser(
+                    user.id,
+                    password: passwordController.text.isNotEmpty ? passwordController.text : null,
+                    role: selectedRole,
+                    isActive: isActive,
+                  );
+                  if (ctx.mounted) Navigator.of(ctx).pop();
+                  await _loadUsers();
+                } catch (e) {
+                  setDialogState(() => dialogError = e.toString().replaceFirst('Exception: ', ''));
+                }
+              },
+              child: const Text('Save Changes'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteUser(User user) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF181820),
+        title: const Text('Delete User'),
+        content: Text('Are you sure you want to delete user "${user.username}"? All associated data will be removed.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        await apiService.deleteUser(user.id);
+        await _loadUsers();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('User "${user.username}" deleted')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to delete user: $e'), backgroundColor: Colors.red),
+          );
+        }
+      }
+    }
+  }
+
 }

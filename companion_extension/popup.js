@@ -54,6 +54,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       const session = await startResp.json();
       const sessionId = session.session_id;
+      const extToken = session.extension_token;
 
       // 2. Call background script to capture headers and complete auth
       chrome.runtime.sendMessage(
@@ -61,6 +62,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           action: "LINK_ACCOUNT",
           callbackUrl: serverUrl,
           sessionId: sessionId,
+          token: extToken,
         },
         (response) => {
           linkBtn.disabled = false;

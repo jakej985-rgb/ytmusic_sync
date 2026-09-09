@@ -72,16 +72,16 @@ class PlaylistWatcher:
         except Exception as e:
             logger.error(f"Error checking replicas in PlaylistWatcher: {e}")
 
-    async def on_new_upload_completed(self, video_id: str):
+    async def on_new_upload_completed(self, video_id: str, user_id: Optional[str] = None):
         """
         Event Trigger (Section 14 & 15 of plan):
         Called immediately after a song is uploaded to YouTube Music locker.
         Tracks dependencies using source playlist snapshots: only reconciles
         replicas that actually contain the newly uploaded track.
         """
-        logger.info(f"PlaylistWatcher received new upload completion for video_id={video_id}")
+        logger.info(f"PlaylistWatcher received new upload completion for video_id={video_id} (user_id={user_id})")
         try:
-            replicas = await db.get_replicated_playlists(enabled_only=True)
+            replicas = await db.get_replicated_playlists(user_id=user_id, enabled_only=True)
             upload_rec = await db.get_ytm_upload_by_video_id(video_id)
             from .normalizer import normalize_text
 

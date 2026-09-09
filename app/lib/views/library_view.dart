@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import 'components/metadata_editor_dialog.dart';
+import 'components/upload_destination_dialog.dart';
+import 'components/account_selector_widget.dart';
 
 class LibraryView extends StatefulWidget {
   const LibraryView({super.key});
@@ -71,20 +73,15 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
 
   Future<void> _uploadTrack(MusicFile song) async {
     if (song.id == null) return;
-    try {
-      await apiService.uploadSong(song.id!);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Enqueued "${song.displayTitle}" for upload')),
-        );
-        _loadSongs();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to enqueue upload: $e'), backgroundColor: Colors.redAccent),
-        );
-      }
+    final res = await UploadDestinationDialog.show(context, [song]);
+    if (res != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Enqueued "${song.displayTitle}" for upload across ${res.jobsCreated} account(s)'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      _loadSongs();
     }
   }
 
@@ -121,27 +118,17 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
 
   Future<void> _batchUploadSelected() async {
     if (_selectedSongIds.isEmpty) return;
-    setState(() => _isBatchProcessing = true);
-    try {
-      final count = await apiService.batchUploadSongs(_selectedSongIds.toList());
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Enqueued $count song${count > 1 ? 's' : ''} for upload!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+    final selectedSongs = _songs.where((s) => s.id != null && _selectedSongIds.contains(s.id!)).toList();
+    final res = await UploadDestinationDialog.show(context, selectedSongs);
+    if (res != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Enqueued ${res.jobsCreated} upload jobs across ${res.destinations.length} account(s)!'),
+          backgroundColor: Colors.green,
+        ),
+      );
       _selectedSongIds.clear();
       await _loadSongs();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Batch upload failed: $e'), backgroundColor: Colors.redAccent),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isBatchProcessing = false);
     }
   }
 
@@ -259,6 +246,8 @@ class _LibraryViewState extends State<LibraryView> with SingleTickerProviderStat
                 ),
               ),
               const SizedBox(width: 12),
+              const AccountSelectorWidget(),
+              const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.refresh),
                 tooltip: 'Refresh list',

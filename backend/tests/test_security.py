@@ -106,6 +106,9 @@ async def test_all_api_routes_require_authentication():
 
     for route in app.routes:
         if isinstance(route, APIRoute) and route.path.startswith("/api/"):
+            # /api/auth/login is the public application login endpoint (Phase E)
+            if route.path == "/api/auth/login":
+                continue
             for method in route.methods:
                 if method != "OPTIONS":
                     api_routes.append((method, route.path))
