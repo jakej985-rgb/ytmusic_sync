@@ -1099,7 +1099,7 @@ class _FamilyViewState extends State<FamilyView> with SingleTickerProviderStateM
                       DropdownButtonFormField<String>(
                         dropdownColor: const Color(0xFF1E1E28),
                         style: const TextStyle(color: Colors.white, fontSize: 13),
-                        value: selectedSourceUserId,
+                        initialValue: selectedSourceUserId,
                         decoration: const InputDecoration(
                           border: OutlineInputBorder(),
                           contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1165,7 +1165,7 @@ class _FamilyViewState extends State<FamilyView> with SingleTickerProviderStateM
                         DropdownButtonFormField<String>(
                           dropdownColor: const Color(0xFF1E1E28),
                           style: const TextStyle(color: Colors.white, fontSize: 13),
-                          value: selectedSourcePlaylist?.id,
+                          initialValue: selectedSourcePlaylist?.id,
                           decoration: const InputDecoration(
                             border: OutlineInputBorder(),
                             contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
