@@ -353,6 +353,7 @@ class PlaylistSyncManager:
         self._queue: list[dict] = []
         self._current_index: int = -1
         self._current_track_dict: Optional[dict] = None
+        self._destination_user_ids: list[str] = []
         self._history: deque = deque(maxlen=100)
 
     @property
@@ -431,7 +432,8 @@ class PlaylistSyncManager:
                 seen_sync_keys.add(sync_key)
 
                 # Check if already present in database ytm_uploads for target users
-                target_users = self._destination_user_ids if self._destination_user_ids else [None]
+                target_uids = getattr(self, "_destination_user_ids", None)
+                target_users = target_uids if target_uids else [None]
                 missing_for_targets = []
                 for uid in target_users:
                     existing = await db.find_ytm_upload_by_title_artist(title, artist, user_id=uid)

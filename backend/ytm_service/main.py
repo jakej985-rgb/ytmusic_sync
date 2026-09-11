@@ -1362,7 +1362,10 @@ async def sync_missing_playlist_tracks(
             art = t.get("artist")
             is_missing = False
             for uid in target_uids:
-                has_it = await db.get_ytm_upload_by_video_id(vid, user_id=uid) or await db.find_ytm_upload_by_title_artist(tit, art, user_id=uid)
+                if uid == current_user.id and t.get("in_uploads"):
+                    has_it = True
+                else:
+                    has_it = await db.get_ytm_upload_by_video_id(vid, user_id=uid) or await db.find_ytm_upload_by_title_artist(tit, art, user_id=uid)
                 if not has_it:
                     is_missing = True
                     break
@@ -1427,8 +1430,8 @@ async def create_replicated_playlist(req: ReplicatedPlaylistCreate, current_user
         dest_name = req.destination_playlist_name or f"{source_name} - Locker"
         dest_id = req.destination_playlist_id or ""
 
-        # Determine target user IDs
-        raw_target_uids = req.target_user_ids or ([req.user_id] if req.user_id else [current_user.id])
+        # Determine target user IDs (ignore spoofed/payload user_id; multi-target replication uses target_user_ids)
+        raw_target_uids = req.target_user_ids if req.target_user_ids else [current_user.id]
         created_replicas = []
 
         permitted_accounts = await db.get_permitted_family_accounts(current_user.id)
