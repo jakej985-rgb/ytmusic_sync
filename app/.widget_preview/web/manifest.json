@@ -1,11 +1,11 @@
 {
-    "name": "app",
-    "short_name": "app",
+    "name": "Red Music Locker",
+    "short_name": "Red Music Locker",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#0F0F13",
+    "theme_color": "#E53935",
+    "description": "Red Music Locker — Self-hosted cloud music sync & locker manager.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

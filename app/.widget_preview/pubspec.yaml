@@ -6,7 +6,7 @@ environment:
   sdk: ^3.13.3
 dependencies:
   app:
-    path: /home/m3tal/Workspaces/ytmusic_sync/app
+    path: /home/m3tal/Workspaces/red-music-locker/app
   dtd: ^4.0.0
   flutter:
     sdk: flutter
@@ -23,4 +23,4 @@ flutter:
   uses-material-design: true
 dependency_overrides:
   app:
-    path: /home/m3tal/Workspaces/ytmusic_sync/app
+    path: /home/m3tal/Workspaces/red-music-locker/app
