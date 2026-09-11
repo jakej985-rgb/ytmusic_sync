@@ -1,17 +1,17 @@
-# YTM Sync — Multi-User YouTube Music Collection Synchronizer
+# Red Music Locker — Multi-User Cloud Music Locker & Synchronizer
 
-**YTM Sync** is a self-hosted, multi-user YouTube Music Synchronization service and application. It keeps local music collections and playlists synchronized with private YouTube Music lockers and accounts without altering or deleting local audio files.
+**Red Music Locker** is a self-hosted, multi-user music synchronization service and cloud locker manager. It keeps local music collections and playlists synchronized with private YouTube Music lockers and accounts without altering or deleting local audio files.
 
 ---
 
-## 1. What YTM Sync Does
+## 1. What Red Music Locker Does
 
 - **Multi-User Role-Based Isolation**: Secure multi-tenant architecture supporting Administrators and Standard Users with server-side tenant isolation across databases, credentials, playlists, and scan jobs.
 - **Recursive Music Library Scanner**: Scans local directory trees (`.mp3`, `.flac`, `.m4a`, `.ogg`, `.wma`) and extracts embedded ID3/Vorbis/FLAC metadata with SHA-256 fingerprints.
 - **Smart Normalization Engine**: Strips noisy remaster/edition tags (`[Remastered]`, `(Deluxe Edition)`, `feat.`), formats track numbers, and tolerates duration deltas.
 - **Deduplication & Matching**: Compares local files against YouTube Music cloud uploads using a confidence model (Exact, Strong, Weak, Missing) to prevent redundant uploads.
 - **Sequential Queue & Resilient Recovery**: Uploads tracks one-by-one with exponential backoff retries. Resumes seamlessly across restarts or transient network dropouts.
-- **Companion Browser Extension**: 1-click seamless OAuth/cookie extraction for desktop browsers without manual DevTools copying.
+- **Companion Browser Extension**: 1-click seamless authorization for desktop browsers without manual DevTools copying.
 - **Reverse Proxy & Traefik Ready**: First-class support for HTTPS termination, `X-Forwarded-*` client IP resolution, CORS policy management, and sliding-window rate limiting.
 
 ---
@@ -22,7 +22,7 @@
 Host / Reverse Proxy (Traefik / Cloudflare)
        │ (HTTPS / Bearer Auth / X-Forwarded-For)
        ▼
-YTM Sync Container (UID 1000 ytmsync, Read-Only App)
+Red Music Locker Container (UID 1000 ytmsync, Read-Only App)
 ├── REST API & Static Flutter Web UI (Port 8080)
 ├── Auth Service & Sliding Window Rate Limiter (HTTP 429)
 ├── Playlist Watcher & Reconciliation Engine
@@ -75,7 +75,7 @@ ALLOWED_ORIGINS=https://ytmsync.example.com,http://localhost:6969
 
 ### 2. Launch
 ```bash
-docker compose -f ytsync.yml --env-file .env up -d
+docker compose -f redmusiclocker.yml --env-file .env up -d
 ```
 
 Access the Web UI at `http://<SERVER_IP>:6969` (or `http://localhost:6969`).
@@ -87,21 +87,25 @@ Access the Web UI at `http://<SERVER_IP>:6969` (or `http://localhost:6969`).
 ### Standard User Flow
 1. **Login**: Navigate to the Web UI. Log in with your credentials or the bootstrapped administrator account.
 2. **Connect YouTube Music**:
-   - Open **Settings** $\rightarrow$ **YouTube Music Connection**.
-   - Click **Connect YouTube Music**.
-   - Use the **YTM Sync Companion Extension** for 1-click authorization, or follow the guided browser wizard.
+   - **Option A (Automated CLI Linker — Recommended)**: If signed into YouTube Music in your desktop browser:
+     ```bash
+     python3 scripts/auto_link_ytm.py
+     ```
+     This automatically captures authorization from your active browser session and connects your account in 1 second without needing manual DevTools or extension installation.
+   - **Option B (Browser Helper Extension)**:
+     - **Firefox**: Install the **Red Music Locker — Account Linker** directly from Firefox Add-ons (Marketplace).
+     - **Chrome / Chromium / Brave / Edge**: Open `chrome://extensions` $\rightarrow$ enable **Developer mode** $\rightarrow$ click **Load unpacked** $\rightarrow$ select `ytmusic_sync_helper_ext`.
+     - Once installed, open **Settings** $\rightarrow$ click **Connect YouTube Music** to trigger 1-click automatic linking.
+   - **Option C (Manual Headers / Headless)**:
+     - Open **Settings** $\rightarrow$ expand **Advanced / Developer Authentication**.
+     - Paste raw HTTP headers (`Cookie: ...` and `Authorization: SAPISIDHASH ...`) or an exported cURL command from your browser.
+     - Click **Save Manual Headers** to validate and encrypt credentials.
 3. **Scan Music Folders**:
    - Add your music folder path (e.g., `/music` or `/downloads`).
    - Click **Scan Library** to fingerprint local tracks.
 4. **Synchronize & Replicate**:
    - Review match statuses in the **Library** view.
    - Queue missing tracks for upload or enable automated playlist replication.
-
-### Advanced / Developer Authentication
-For headless environments or automated workflows where browser extension use is impractical:
-1. Open **Settings** $\rightarrow$ Expand **Advanced / Developer Authentication**.
-2. Paste raw HTTP headers (`Cookie: ...` and `Authorization: SAPISIDHASH ...`) or an exported cURL command from your browser.
-3. Click **Save Manual Headers**. YTM Sync validates the session against YouTube Music and securely encrypts the headers for your user.
 
 ---
 
@@ -180,25 +184,25 @@ Client (Browser / Extension)
 Traefik / Nginx Reverse Proxy
        │ (HTTP, Forwarded Headers)
        ▼
-YTM Sync (Port 8080 internal)
+Red Music Locker (Port 8080 internal)
 ```
 
 ### Traefik Compose Labels Example
 ```yaml
 services:
-  ytm-sync:
-    image: ghcr.io/jakej985-rgb/ytmusic_sync:latest
+  red-music-locker:
+    image: ghcr.io/jakej985-rgb/red_music_locker:latest
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ytmsync.rule=Host(`ytmsync.example.com`)"
-      - "traefik.http.routers.ytmsync.entrypoints=websecure"
-      - "traefik.http.routers.ytmsync.tls.certresolver=letsencrypt"
-      - "traefik.http.services.ytmsync.loadbalancer.server.port=8080"
+      - "traefik.http.routers.musiclocker.rule=Host(`musiclocker.example.com`)"
+      - "traefik.http.routers.musiclocker.entrypoints=websecure"
+      - "traefik.http.routers.musiclocker.tls.certresolver=letsencrypt"
+      - "traefik.http.services.musiclocker.loadbalancer.server.port=8080"
 ```
 
 ### Environment Configuration
 - Set `FORWARDED_ALLOW_IPS=172.16.0.0/12,10.0.0.0/8,127.0.0.1` so Uvicorn trusts client IP headers (`X-Forwarded-For`) for accurate rate limiting.
-- Set `ALLOWED_ORIGINS=https://ytmsync.example.com` to enable cross-origin browser extension requests.
+- Set `ALLOWED_ORIGINS=https://musiclocker.example.com` to enable cross-origin browser extension requests.
 
 ---
 

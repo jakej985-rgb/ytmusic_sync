@@ -467,8 +467,8 @@ class _SettingsViewState extends State<SettingsView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'YTM Sync protects all API endpoints with an API key. '
-                  'The key is stored in config/auth/api_key.txt or defined via YTM_SYNC_API_KEY.',
+                  'Red Music Locker protects all API endpoints with an API key. '
+                  'The key is stored in config/auth/api_key.txt or defined via RED_MUSIC_LOCKER_API_KEY (or YTM_SYNC_API_KEY).',
                   style: TextStyle(color: Colors.grey[400], fontSize: 12),
                 ),
                 const SizedBox(height: 12),
@@ -1060,7 +1060,7 @@ class _SettingsViewState extends State<SettingsView> {
             ] else ...[
               Text(
                 'Connect your YouTube Music account to synchronize your uploads and playlists.\n'
-                'Your music stays on your server, and your password is never stored by YTM Sync.',
+                'Your music stays on your server, and your password is never stored by Red Music Locker.',
                 style: TextStyle(color: Colors.grey[300], fontSize: 13, height: 1.4),
               ),
               const SizedBox(height: 16),

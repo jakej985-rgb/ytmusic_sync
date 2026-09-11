@@ -38,7 +38,7 @@ COPY backend/web_dist/ ./web_dist/
 
 # Provision persistent directories and set ownership
 RUN mkdir -p /config/database /config/auth /config/logs /config/backups /music /downloads && \
-    chown -R ytmsync:ytmsync /app /config
+    chown -R ytmsync:ytmsync /app /config /music /downloads
 
 USER ytmsync
 

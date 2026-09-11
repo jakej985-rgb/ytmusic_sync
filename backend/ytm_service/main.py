@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI):
     await queue_manager.stop_worker()
 
 app = FastAPI(
-    title="YTM Sync Backend Service",
+    title="Red Music Locker Backend Service",
     version=__version__,
     lifespan=lifespan,
     docs_url="/docs" if settings.enable_docs else None,
@@ -1053,7 +1053,7 @@ async def auth_callback_get(session_id: Optional[str] = None):
         return HTMLResponse(
             content="""<!DOCTYPE html>
 <html>
-<head><title>YTM Sync - Missing Session</title>
+<head><title>Red Music Locker - Missing Session</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }
 .card { background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }
@@ -1064,7 +1064,7 @@ p { color: #aaa; line-height: 1.5; }
 <body>
 <div class="card">
   <h2>Invalid Request</h2>
-  <p>Missing session parameter. Please return to YTM Sync.</p>
+  <p>Missing session parameter. Please return to Red Music Locker.</p>
 </div>
 </body>
 </html>""",
@@ -1076,7 +1076,7 @@ p { color: #aaa; line-height: 1.5; }
         return HTMLResponse(
             content="""<!DOCTYPE html>
 <html>
-<head><title>YTM Sync - Authentication Pending</title>
+<head><title>Red Music Locker - Authentication Pending</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }
 .card { background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }
@@ -1087,7 +1087,7 @@ p { color: #aaa; line-height: 1.5; }
 <body>
 <div class="card">
   <h2>Authentication Pending or Incomplete</h2>
-  <p>The authentication session has not completed or has expired. Please return to YTM Sync and try again.</p>
+  <p>The authentication session has not completed or has expired. Please return to Red Music Locker and try again.</p>
 </div>
 </body>
 </html>""",
@@ -1098,7 +1098,7 @@ p { color: #aaa; line-height: 1.5; }
     return HTMLResponse(
         content=f"""<!DOCTYPE html>
 <html>
-<head><title>YTM Sync - Connected</title>
+<head><title>Red Music Locker - Connected</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #121212; color: #fff; }}
 .card {{ background: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; max-width: 420px; }}
@@ -1111,7 +1111,7 @@ p {{ color: #ccc; line-height: 1.5; }}
 <div class="card">
   <h2>✓ YouTube Music Connected</h2>
   <p>Successfully linked account: <span class="user">{user_disp}</span></p>
-  <p>You can now safely close this window and return to YTM Sync.</p>
+  <p>You can now safely close this window and return to Red Music Locker.</p>
 </div>
 </body>
 </html>""",

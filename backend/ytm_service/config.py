@@ -4,12 +4,18 @@ import secrets
 from pathlib import Path
 from pydantic import BaseModel
 
-if "YTM_SYNC_DATA_DIR" in os.environ:
+if "RED_MUSIC_LOCKER_DATA_DIR" in os.environ:
+    DEFAULT_DATA_DIR = Path(os.environ["RED_MUSIC_LOCKER_DATA_DIR"])
+elif "YTM_SYNC_DATA_DIR" in os.environ:
     DEFAULT_DATA_DIR = Path(os.environ["YTM_SYNC_DATA_DIR"])
 elif Path("/config").is_dir() and os.access("/config", os.W_OK):
     DEFAULT_DATA_DIR = Path("/config")
-else:
+elif (Path.home() / ".config" / "red_music_locker").is_dir():
+    DEFAULT_DATA_DIR = Path.home() / ".config" / "red_music_locker"
+elif (Path.home() / ".config" / "ytm_sync").is_dir():
     DEFAULT_DATA_DIR = Path.home() / ".config" / "ytm_sync"
+else:
+    DEFAULT_DATA_DIR = Path.home() / ".config" / "red_music_locker"
 
 DEFAULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -42,7 +48,9 @@ if legacy_log.exists() and not target_log.exists():
 
 # API Key provisioning: secure by default, do not print secret to logs
 target_api_key_file = AUTH_DIR / "api_key.txt"
-if "YTM_SYNC_API_KEY" in os.environ and os.environ["YTM_SYNC_API_KEY"].strip():
+if "RED_MUSIC_LOCKER_API_KEY" in os.environ and os.environ["RED_MUSIC_LOCKER_API_KEY"].strip():
+    resolved_api_key = os.environ["RED_MUSIC_LOCKER_API_KEY"].strip()
+elif "YTM_SYNC_API_KEY" in os.environ and os.environ["YTM_SYNC_API_KEY"].strip():
     resolved_api_key = os.environ["YTM_SYNC_API_KEY"].strip()
 elif target_api_key_file.exists():
     resolved_api_key = target_api_key_file.read_text(encoding="utf-8").strip()
@@ -67,8 +75,11 @@ else:
     resolved_allowed_origins = [
         "http://localhost:8080",
         "http://127.0.0.1:8080",
+        "http://localhost:6969",
+        "http://127.0.0.1:6969",
         "http://localhost:8765",
-        "http://127.0.0.1:8765"
+        "http://127.0.0.1:8765",
+        "chrome-extension://oamfbcnlnlinbnfpaeagpjcdppiknfjj"
     ]
 
 is_docker = os.environ.get("DOCKER") == "true" or Path("/.dockerenv").exists()

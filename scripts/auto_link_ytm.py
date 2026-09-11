@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-YTM Sync — Zero-Install Account Linker
-Quickly links your YouTube Music account to YTM Sync directly from an active
+Red Music Locker — Zero-Install Account Linker
+Quickly links your YouTube Music account to Red Music Locker directly from an active
 browser session without needing manual extension installation or DevTools.
 """
 
@@ -15,33 +15,56 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_SERVER = os.environ.get("YTM_SYNC_URL", "http://localhost:6969")
-CONFIG_API_KEY_PATH = Path.home() / ".config" / "ytm_sync" / "auth" / "api_key.txt"
+def resolve_server_url() -> str:
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    if os.environ.get("RED_MUSIC_LOCKER_URL"):
+        return os.environ["RED_MUSIC_LOCKER_URL"]
+    if os.environ.get("YTM_SYNC_URL"):
+        return os.environ["YTM_SYNC_URL"]
+    for port in (8080, 6969):
+        try:
+            with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=0.5) as resp:
+                if resp.status == 200:
+                    return f"http://localhost:{port}"
+        except Exception:
+            pass
+    return "http://localhost:8080"
+
+
+CONFIG_API_KEY_PATHS = [
+    Path.home() / ".config" / "red_music_locker" / "auth" / "api_key.txt",
+    Path.home() / ".config" / "ytm_sync" / "auth" / "api_key.txt",
+]
 
 
 def get_api_key() -> str:
     # 1. Environment variable
+    if os.environ.get("RED_MUSIC_LOCKER_API_KEY"):
+        return os.environ["RED_MUSIC_LOCKER_API_KEY"].strip()
     if os.environ.get("YTM_SYNC_API_KEY"):
         return os.environ["YTM_SYNC_API_KEY"].strip()
 
-    # 2. Check docker container ytm-sync
-    try:
-        import subprocess
-        out = subprocess.check_output(
-            ["docker", "exec", "ytm-sync", "cat", "/config/auth/api_key.txt"],
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-        ).decode().strip()
-        if out:
-            return out
-    except Exception:
-        pass
+    # 2. Check docker container red-music-locker or ytm-sync
+    for container in ("red-music-locker", "ytm-sync"):
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["docker", "exec", container, "cat", "/config/auth/api_key.txt"],
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            ).decode().strip()
+            if out:
+                return out
+        except Exception:
+            pass
 
     # 3. Host configuration file
-    if CONFIG_API_KEY_PATH.exists():
-        key = CONFIG_API_KEY_PATH.read_text(encoding="utf-8").strip()
-        if key:
-            return key
+    for p in CONFIG_API_KEY_PATHS:
+        if p.exists():
+            key = p.read_text(encoding="utf-8").strip()
+            if key:
+                return key
 
     return ""
 
@@ -98,7 +121,7 @@ async def extract_cookies_from_cdp(port: int = 9222):
     if tabs is None:
         raise RuntimeError(
             f"Could not connect to browser on port {port}.\n"
-            "You can also simply open YTM Sync in your browser at http://localhost:6969,\n"
+            "You can also open Red Music Locker in your browser (e.g. at http://localhost:8080 or http://localhost:6969),\n"
             "go to Settings -> 1. YouTube Music Account, and click 'Connect YouTube Music'."
         )
 
@@ -189,13 +212,13 @@ def build_raw_headers(cookies: list[dict]) -> str:
 
 
 async def main():
-    server_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SERVER
-    print(f"Connecting to YTM Sync at {server_url}...")
+    server_url = resolve_server_url()
+    print(f"Connecting to Red Music Locker at {server_url}...")
 
     api_key = get_api_key()
     if not api_key:
         print("❌ Warning: API key could not be detected automatically.")
-        api_key = input("Enter your YTM Sync API Key: ").strip()
+        api_key = input("Enter your Red Music Locker API Key: ").strip()
 
     print("Extracting YouTube Music session credentials from browser...")
     try:

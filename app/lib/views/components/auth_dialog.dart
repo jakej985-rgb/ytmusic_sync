@@ -134,7 +134,7 @@ class _AuthDialogState extends State<AuthDialog> with SingleTickerProviderStateM
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'YTM Sync Authentication',
+                          'Red Music Locker Authentication',
                           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                         SizedBox(height: 2),

@@ -4,6 +4,8 @@ config/
 headers_auth.json
 *.token
 *.key
+*.pem
+*.crx
 *.db
 *.log
 ytm_sync.log

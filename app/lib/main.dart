@@ -23,7 +23,7 @@ class YTMSyncApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'YTM Sync',
+      title: 'Red Music Locker',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
@@ -271,28 +271,36 @@ class _MainShellState extends State<MainShell> {
               padding: const EdgeInsets.symmetric(vertical: 24.0, horizontal: 16.0),
               child: Row(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFF0000),
-                      borderRadius: BorderRadius.circular(8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.asset(
+                      'assets/images/logo.png',
+                      width: 32,
+                      height: 32,
+                      errorBuilder: (context, error, stackTrace) => Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF0000),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.music_note, color: Colors.white, size: 20),
+                      ),
                     ),
-                    child: const Icon(Icons.music_note, color: Colors.white, size: 20),
                   ),
                   const SizedBox(width: 12),
                   const Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'YTM SYNC',
+                        'RED MUSIC LOCKER',
                         style: TextStyle(
-                          fontSize: 16,
+                          fontSize: 14,
                           fontWeight: FontWeight.w900,
-                          letterSpacing: 1.2,
+                          letterSpacing: 1.1,
                         ),
                       ),
                       Text(
-                        'Local ➔ YouTube Music',
+                        'Cloud Music Sync & Locker',
                         style: TextStyle(
                           fontSize: 10,
                           color: Colors.grey,

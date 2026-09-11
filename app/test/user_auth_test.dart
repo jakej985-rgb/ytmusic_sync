@@ -211,7 +211,7 @@ void main() {
       );
 
       // Verify header
-      expect(find.text('YTM Sync Authentication'), findsOneWidget);
+      expect(find.text('Red Music Locker Authentication'), findsOneWidget);
       expect(find.text('User Login'), findsOneWidget);
       expect(find.text('API Key'), findsOneWidget);
 

@@ -102,7 +102,7 @@ async def run_replicate(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="ytmusic-sync", description="YTM Sync Management CLI")
+    parser = argparse.ArgumentParser(prog="red-music-locker", description="Red Music Locker Management CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # playlist subcommands
