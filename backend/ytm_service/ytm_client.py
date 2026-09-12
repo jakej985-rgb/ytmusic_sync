@@ -687,7 +687,15 @@ class YTMClient:
         last_res = None
         for i in range(0, len(video_ids), chunk_size):
             chunk = video_ids[i:i + chunk_size]
-            last_res = await asyncio.to_thread(_add_chunk_sync, chunk)
+            try:
+                last_res = await asyncio.to_thread(_add_chunk_sync, chunk)
+            except Exception as e:
+                logger.warning(f"Chunk batch add failed for playlist {playlist_id} ({e}), falling back to single items...")
+                for single_vid in chunk:
+                    try:
+                        last_res = await asyncio.to_thread(_add_chunk_sync, [single_vid])
+                    except Exception as single_e:
+                        logger.warning(f"Could not add track {single_vid} to playlist {playlist_id}: {single_e}")
             if i + chunk_size < len(video_ids):
                 await asyncio.sleep(0.5)
 
