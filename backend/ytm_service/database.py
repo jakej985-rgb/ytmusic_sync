@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS replicated_playlists (
     destination_playlist_name TEXT NOT NULL,
     enabled BOOLEAN DEFAULT 1,
     sync_interval_seconds INTEGER DEFAULT 300,
+    replica_mode TEXT DEFAULT '1to1_youtube',
     last_source_revision TEXT,
     last_sync_at TIMESTAMP,
     last_sync_status TEXT,
@@ -1618,23 +1619,32 @@ class Database:
         destination_playlist_name: str,
         enabled: bool = True,
         sync_interval_seconds: int = 300,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        replica_mode: Optional[str] = None
     ) -> int:
         """Create a new replicated playlist configuration owned by user_id."""
         async with self.get_connection() as db:
+            if not replica_mode:
+                if "locker" in destination_playlist_name.lower() or "upload" in destination_playlist_name.lower():
+                    mode_val = "locker_only"
+                else:
+                    mode_val = "1to1_youtube"
+            else:
+                mode_val = replica_mode
+
             cursor = await db.execute(
                 """
                 INSERT INTO replicated_playlists (
                     user_id, source_playlist_id, source_playlist_name,
                     destination_playlist_id, destination_playlist_name,
-                    enabled, sync_interval_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    enabled, sync_interval_seconds, replica_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
                 (
                     user_id, source_playlist_id, source_playlist_name,
                     destination_playlist_id, destination_playlist_name,
-                    1 if enabled else 0, sync_interval_seconds
+                    1 if enabled else 0, sync_interval_seconds, mode_val
                 )
             )
             row = await cursor.fetchone()
@@ -1649,7 +1659,7 @@ class Database:
         set_clauses = []
         values = []
         for k, v in kwargs.items():
-            if k in ("destination_playlist_id", "source_playlist_name", "destination_playlist_name", "last_source_revision", "last_sync_status", "last_sync_at"):
+            if k in ("destination_playlist_id", "source_playlist_name", "destination_playlist_name", "last_source_revision", "last_sync_status", "last_sync_at", "replica_mode"):
                 set_clauses.append(f"{k} = ?")
                 values.append(v)
             elif k in ("enabled",):

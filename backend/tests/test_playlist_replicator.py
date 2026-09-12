@@ -699,3 +699,25 @@ def test_section29_cli_dry_run_formatting():
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_1to1_youtube_replica_preserves_streaming_tracks(temp_db):
+    """
+    Test that in 1to1_youtube mode, catalog/streaming tracks not present in locker
+    are preserved as desired tracks rather than being excluded.
+    """
+    from ytm_service.playlist_replicator import filter_source_tracks_for_replica
+
+    from ytm_service.playlist_replicator import build_locker_lookup
+    lookup = build_locker_lookup([])
+    source_tracks = [
+        {"videoId": "VID_CATALOG_1", "title": "Streaming Hit 1", "artist": "Popular Artist 1"},
+        {"videoId": "VID_CATALOG_2", "title": "Streaming Hit 2", "artist": "Popular Artist 2"},
+    ]
+
+    desired, excluded = filter_source_tracks_for_replica(source_tracks, lookup, replica_mode="1to1_youtube")
+    assert len(desired) == 2
+    assert len(excluded) == 0
+    assert desired[0]["video_id"] == "VID_CATALOG_1"
+    assert desired[1]["video_id"] == "VID_CATALOG_2"

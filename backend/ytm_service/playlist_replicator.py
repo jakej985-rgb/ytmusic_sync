@@ -121,25 +121,51 @@ def match_source_track_to_locker(source_track: dict, locker_lookup: dict) -> tup
     return None, "IDENTITY_AMBIGUOUS"
 
 
-def filter_source_tracks_for_replica(source_tracks: list[dict], locker_lookup: dict) -> tuple[list[dict], list[dict]]:
+def filter_source_tracks_for_replica(
+    source_tracks: list[dict],
+    locker_lookup: dict,
+    replica_mode: str = "locker_only"
+) -> tuple[list[dict], list[dict]]:
     """
-    Filter source tracks preserving exact sequence and duplicate positions.
+    Filter or replicate source tracks preserving exact sequence and duplicate positions.
+    - If replica_mode == 'locker_only': Only verified locker uploads are included.
+    - If replica_mode == '1to1_youtube' (default): Replicates exact 1:1 tracks from YouTube Music catalog,
+      mapping uploaded tracks when available while keeping streaming tracks intact.
     Returns (desired_tracks, excluded_tracks).
     """
     desired_tracks = []
     excluded_tracks = []
 
+    is_locker_only = (replica_mode == "locker_only")
+
     for idx, st in enumerate(source_tracks):
+        vid = str(st.get("videoId") or st.get("id") or "").strip()
         matched, reason = match_source_track_to_locker(st, locker_lookup)
+
         if matched:
-            target_vid = matched.get("video_id") or matched.get("upload_video_id") or st.get("videoId")
+            target_vid = matched.get("video_id") or matched.get("upload_video_id") or vid
             desired_tracks.append({
                 "position": len(desired_tracks),
                 "video_id": target_vid,
                 "title": st.get("title") or matched.get("title"),
                 "artist": st.get("artist") or matched.get("artist"),
-                "source_video_id": st.get("videoId"),
+                "source_video_id": vid,
                 "locker_upload_id": matched.get("entity_id") or target_vid
+            })
+        elif not is_locker_only and vid:
+            # 1:1 YouTube Mode: Keep the YouTube track directly
+            art_name = st.get("artist")
+            if not art_name and st.get("artists") and isinstance(st.get("artists"), list) and len(st["artists"]) > 0:
+                first_art = st["artists"][0]
+                art_name = first_art.get("name") if isinstance(first_art, dict) else str(first_art)
+
+            desired_tracks.append({
+                "position": len(desired_tracks),
+                "video_id": vid,
+                "title": st.get("title") or "Unknown Title",
+                "artist": art_name or "Unknown Artist",
+                "source_video_id": vid,
+                "locker_upload_id": None
             })
         else:
             reason_str = reason or "NOT_PRESENT_IN_LOCKER"
@@ -149,7 +175,7 @@ def filter_source_tracks_for_replica(source_tracks: list[dict], locker_lookup: d
             logger.info(f"Source track excluded: '{a_name} - {t_name}' | Reason: {human_reason}")
             excluded_tracks.append({
                 "source_position": idx,
-                "video_id": st.get("videoId"),
+                "video_id": vid,
                 "title": t_name,
                 "artist": a_name,
                 "reason": reason_str,
@@ -326,8 +352,20 @@ class PlaylistReplicatorService:
         uploads = await db.get_all_ytm_uploads(user_id=user_id)
         locker_lookup = build_locker_lookup(uploads)
 
-        # 3. Filter source tracks: Locker-Only Guarantee & Order Preservation
-        desired_tracks, excluded_tracks = filter_source_tracks_for_replica(source_tracks, locker_lookup)
+        # 3. Filter/replicate source tracks according to replica_mode
+        configured_mode = getattr(config, "replica_mode", None)
+        if not configured_mode:
+            dest_n = getattr(config, "destination_playlist_name", "") or ""
+            if "locker" in dest_n.lower() or "upload" in dest_n.lower():
+                replica_mode = "locker_only"
+            else:
+                replica_mode = "1to1_youtube"
+        else:
+            replica_mode = configured_mode
+
+        desired_tracks, excluded_tracks = filter_source_tracks_for_replica(
+            source_tracks, locker_lookup, replica_mode=replica_mode
+        )
 
         # 4. Fetch or verify destination playlist
         dest_id = config.destination_playlist_id
@@ -348,8 +386,8 @@ class PlaylistReplicatorService:
         if not dest_id and not dry_run:
             dest_name = config.destination_playlist_name or f"{source_title} - Locker"
             ownership_desc = (
-                f"Automated 1:1 Locker-Only Replica of '{source_title}'. "
-                f"[managed_by=ytmusic_sync;replica_mode=locker_only;source_playlist_id={config.source_playlist_id}]"
+                f"Automated 1:1 Replica of '{source_title}'. "
+                f"[managed_by=ytmusic_sync;replica_mode={replica_mode};source_playlist_id={config.source_playlist_id}]"
             )
             logger.info(f"Creating destination playlist '{dest_name}' with ownership marker...")
             dest_id = await _call_ytm(

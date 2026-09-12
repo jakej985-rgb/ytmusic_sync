@@ -182,6 +182,7 @@ class ReplicatedPlaylistCreate(BaseModel):
     user_id: Optional[str] = None
     target_user_ids: Optional[list[str]] = None
     upload_missing_to_targets: bool = False
+    replica_mode: str = "locker_only"
 
 
 class PlaylistSyncMissingRequest(BaseModel):
@@ -204,6 +205,7 @@ class ReplicatedPlaylist(BaseModel):
     destination_playlist_name: str
     enabled: bool = True
     sync_interval_seconds: int = 300
+    replica_mode: str = "locker_only"
     last_source_revision: Optional[str] = None
     last_sync_at: Optional[str] = None
     last_sync_status: Optional[str] = None
@@ -528,6 +530,7 @@ class FamilyMultiPlaylistRequest(BaseModel):
     source_user_id: Optional[str] = None
     source_playlist_id: Optional[str] = None
     upload_missing_to_targets: bool = False
+    replica_mode: str = "1to1_youtube"
 
     @property
     def effective_name(self) -> str:

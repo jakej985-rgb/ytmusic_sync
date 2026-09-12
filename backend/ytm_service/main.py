@@ -846,8 +846,8 @@ async def create_multi_account_playlists(family_id: str, req: FamilyMultiPlaylis
                 dest_id = ""
                 try:
                     ownership_desc = (
-                        f"Automated 1:1 Locker-Only Replica of '{source_title}'. "
-                        f"[managed_by=ytmusic_sync;replica_mode=locker_only;source_playlist_id={req.source_playlist_id}]"
+                        f"Automated 1:1 Replica of '{source_title}'. "
+                        f"[managed_by=ytmusic_sync;replica_mode={req.replica_mode};source_playlist_id={req.source_playlist_id}]"
                     )
                     dest_id = await ytm_client.create_playlist(
                         title=name,
@@ -865,7 +865,8 @@ async def create_multi_account_playlists(family_id: str, req: FamilyMultiPlaylis
                     destination_playlist_name=name,
                     enabled=True,
                     sync_interval_seconds=300,
-                    user_id=uid
+                    user_id=uid,
+                    replica_mode=req.replica_mode
                 )
                 created = await db.get_replicated_playlist(new_id, user_id=uid)
                 if created:
